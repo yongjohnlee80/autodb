@@ -604,6 +604,14 @@ type Remote struct {
 	// HandshakeTimeout bounds a connection's handshake: authentication and
 	// the request for the autodb subsystem.
 	HandshakeTimeout Duration `toml:"handshake_timeout"`
+	// BlockAfterFailures consecutive refused connections from one address
+	// (an IPv6 /64 counts as one) block it for BlockDuration.
+	BlockAfterFailures int      `toml:"block_after_failures"`
+	BlockDuration      Duration `toml:"block_duration"`
+	// DenialSpill is the file each refusal is written to before the store,
+	// so a crash cannot lose one. Empty means remote-denials.pending in
+	// autodb's data directory.
+	DenialSpill string `toml:"denial_spill"`
 }
 
 // BindAddr is [remote] bind, or its default when unset.
@@ -630,8 +638,43 @@ func (r Remote) HandshakeSlots() int {
 	return r.MaxUnauthenticated
 }
 
+// BlockAfter is [remote] block_after_failures, or its default when unset.
+func (r Remote) BlockAfter() int {
+	if r.BlockAfterFailures <= 0 {
+		return DefaultRemoteBlockAfterFailures
+	}
+	return r.BlockAfterFailures
+}
+
+// BlockFor is [remote] block_duration, or its default when unset.
+func (r Remote) BlockFor() time.Duration {
+	if r.BlockDuration <= 0 {
+		return DefaultRemoteBlockDuration
+	}
+	return r.BlockDuration.Duration()
+}
+
+// DenialSpillPath is where refused remote connections are spilled before the
+// store: [remote] denial_spill, or remote-denials.pending in autodb's data
+// directory.
+func (c Config) DenialSpillPath() (string, error) {
+	if c.Remote.DenialSpill != "" {
+		return c.Remote.DenialSpill, nil
+	}
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "autodb", "remote-denials.pending"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "share", "autodb", "remote-denials.pending"), nil
+}
+
 // Remote listener defaults.
 const (
+	DefaultRemoteBlockAfterFailures = 3
+	DefaultRemoteBlockDuration      = 24 * time.Hour
 	DefaultRemoteBind               = "0.0.0.0:7422"
 	DefaultRemoteMaxUnauthenticated = 16
 	DefaultRemoteHandshakeTimeout   = 10 * time.Second
@@ -791,6 +834,8 @@ func Default() Config {
 			Bind:               DefaultRemoteBind,
 			MaxUnauthenticated: DefaultRemoteMaxUnauthenticated,
 			HandshakeTimeout:   Duration(DefaultRemoteHandshakeTimeout),
+			BlockAfterFailures: DefaultRemoteBlockAfterFailures,
+			BlockDuration:      Duration(DefaultRemoteBlockDuration),
 		},
 	}
 }
@@ -1236,6 +1281,12 @@ func (c Config) validate() error {
 	}
 	if c.Remote.HandshakeTimeout < 0 {
 		return fmt.Errorf("%w: remote.handshake_timeout must not be negative", ErrInvalid)
+	}
+	if c.Remote.BlockAfterFailures < 0 {
+		return fmt.Errorf("%w: remote.block_after_failures %d must not be negative", ErrInvalid, c.Remote.BlockAfterFailures)
+	}
+	if c.Remote.BlockDuration < 0 {
+		return fmt.Errorf("%w: remote.block_duration must not be negative", ErrInvalid)
 	}
 	if c.Exec.MaxStatementBytes <= 0 {
 		return fmt.Errorf("%w: exec.max_statement_bytes %d must be positive", ErrInvalid, c.Exec.MaxStatementBytes)

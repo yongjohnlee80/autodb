@@ -29,6 +29,17 @@ const (
 // registered key of an enabled user.
 var ErrUnknownKey = errors.New("remote: not a registered SSH key")
 
+// Why the listener refused a connection, as it tells Config.Denied. The
+// limiter counts them; a capacity refusal, a handshake timeout, and a client
+// that simply left are none of them, and are never counted.
+const (
+	// DeniedKey: the client authenticated with no registered key.
+	DeniedKey = "key_not_registered"
+	// DeniedProtocol: the client asked for something the listener does not
+	// serve (a shell, a command, a terminal, forwarding, another channel).
+	DeniedProtocol = "protocol_violation"
+)
+
 // Authorize answers whose live registered key has fingerprint (SHA256:…), or
 // ErrUnknownKey. It is asked for every key a client offers.
 type Authorize func(ctx context.Context, fingerprint string) (keyID, userID int64, err error)
@@ -51,6 +62,15 @@ type Config struct {
 	Version string
 	// Logf receives the listener's operational messages; nil discards them.
 	Logf func(format string, args ...any)
+	// Admit, when set, is asked about every new TCP connection before a byte
+	// of SSH: false closes it at once, uncounted (a blocked address, or
+	// admission paused).
+	Admit func(ip string) bool
+	// Denied, when set, is told of every connection the listener refused
+	// for the client's own doing: the address, why (DeniedKey,
+	// DeniedProtocol), the last key it offered, and the user its key named
+	// once it had authenticated. It is told once per connection.
+	Denied func(ip, reason, offeredKeyFP string, userID int64)
 }
 
 // Listener is the remote listener: it accepts SSH connections on a TCP
@@ -201,6 +221,12 @@ func (l *Listener) acceptLoop() {
 			_ = l.stop(fmt.Errorf("remote listener: accept: %w", err))
 			return
 		}
+		if l.cfg.Admit != nil && !l.cfg.Admit(hostOf(c.RemoteAddr())) {
+			// Blocked, or admission paused: closed before a byte of SSH,
+			// and not counted again.
+			_ = c.Close()
+			continue
+		}
 		select {
 		case l.unauth <- struct{}{}:
 			go l.serve(c)
@@ -224,9 +250,26 @@ func (l *Listener) serve(c net.Conn) {
 	defer release()
 
 	_ = c.SetDeadline(time.Now().Add(l.cfg.HandshakeTimeout))
-	sconn, chans, reqs, err := ssh.NewServerConn(c, l.server)
+	ip := hostOf(c.RemoteAddr())
+	// A per-connection copy of the server config, so the key this client
+	// offered last can be named in its denial. Only named: the connection's
+	// identity still comes from the permissions of the authentication that
+	// succeeded (peerOf), never from this.
+	var offered string
+	cfg := *l.server
+	cfg.PublicKeyCallback = func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+		offered = ssh.FingerprintSHA256(key)
+		return l.server.PublicKeyCallback(meta, key)
+	}
+	sconn, chans, reqs, err := ssh.NewServerConn(c, &cfg)
 	if err != nil {
 		_ = c.Close()
+		// Counted only when the client tried to authenticate and failed; a
+		// timeout, a dropped connection or a bad handshake is not a guess.
+		var authErr *ssh.ServerAuthError
+		if errors.As(err, &authErr) {
+			l.denied(ip, DeniedKey, offered, 0)
+		}
 		return
 	}
 	// No global request is honoured: port forwarding (tcpip-forward) and every
@@ -239,22 +282,28 @@ func (l *Listener) serve(c net.Conn) {
 		_ = sconn.Close()
 		return
 	}
-	ch, rest, ok := l.subsystem(sconn, chans)
-	if !ok {
+	ch, rest, violation := l.subsystem(sconn, chans)
+	if ch == nil {
 		_ = sconn.Close()
+		if violation {
+			l.denied(ip, DeniedProtocol, offered, peer.UserID)
+		}
 		return
 	}
 	release()
 	_ = c.SetDeadline(time.Time{})
 
-	// Any further channel ends the connection: one subsystem per connection.
+	// Any further channel ends the connection, and is counted: one subsystem
+	// per connection.
 	go func() {
 		for nc := range rest {
 			_ = nc.Reject(ssh.Prohibited, "one autodb-rpc channel per connection")
 			_ = sconn.Close()
+			l.denied(ip, DeniedProtocol, offered, peer.UserID)
 		}
 	}()
 	rc := &conn{Conn: Bridge(closeBoth{ch, sconn}, sconn.LocalAddr(), sconn.RemoteAddr()), peer: peer}
+	peer.hangup = func() { _ = sconn.Close() }
 	select {
 	case l.ready <- rc:
 	case <-l.done:
@@ -294,14 +343,17 @@ func peerOf(sconn *ssh.ServerConn, hostFP string) (*Peer, error) {
 // session request for a shell, a command, a terminal, agent or X11
 // forwarding, ends the connection. It returns the channel and the stream of
 // any later channel opens.
-func (l *Listener) subsystem(sconn *ssh.ServerConn, chans <-chan ssh.NewChannel) (ssh.Channel, <-chan ssh.NewChannel, bool) {
+//
+// violation reports that the connection asked for something not served, as
+// opposed to leaving or failing on its own.
+func (l *Listener) subsystem(sconn *ssh.ServerConn, chans <-chan ssh.NewChannel) (ch ssh.Channel, rest <-chan ssh.NewChannel, violation bool) {
 	nc, ok := <-chans
 	if !ok {
 		return nil, nil, false
 	}
 	if nc.ChannelType() != "session" {
 		_ = nc.Reject(ssh.UnknownChannelType, "only an autodb-rpc session is served")
-		return nil, nil, false
+		return nil, nil, true
 	}
 	ch, reqs, err := nc.Accept()
 	if err != nil {
@@ -317,7 +369,7 @@ func (l *Listener) subsystem(sconn *ssh.ServerConn, chans <-chan ssh.NewChannel)
 					_ = r.Reply(false, nil)
 				}
 			}()
-			return ch, chans, true
+			return ch, chans, false
 		case req.Type == "env":
 			// Clients send these unasked; refused, and harmless.
 			_ = req.Reply(false, nil)
@@ -326,10 +378,29 @@ func (l *Listener) subsystem(sconn *ssh.ServerConn, chans <-chan ssh.NewChannel)
 			// different subsystem: none is served, and asking ends it.
 			_ = req.Reply(false, nil)
 			_ = ch.Close()
-			return nil, nil, false
+			return nil, nil, true
 		}
 	}
 	return nil, nil, false
+}
+
+// denied tells Config.Denied, when set.
+func (l *Listener) denied(ip, reason, offered string, userID int64) {
+	if l.cfg.Denied != nil {
+		l.cfg.Denied(ip, reason, offered, userID)
+	}
+}
+
+// hostOf is an address's host: the IP a TCP peer connected from.
+func hostOf(a net.Addr) string {
+	if a == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(a.String())
+	if err != nil {
+		return a.String()
+	}
+	return host
 }
 
 // subsystemName decodes a subsystem request's payload: one SSH string.

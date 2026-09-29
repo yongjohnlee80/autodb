@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -378,5 +379,123 @@ func TestAListenerThatFailsStopsAndSaysWhy(t *testing.T) {
 	<-l2.Done()
 	if l2.Err() != nil {
 		t.Fatalf("a closed listener's Err: %v; want nil", l2.Err())
+	}
+}
+
+type denial struct {
+	ip, reason, fp string
+	user           int64
+}
+
+type denials struct {
+	mu  sync.Mutex
+	got []denial
+}
+
+func (d *denials) record(ip, reason, fp string, user int64) {
+	d.mu.Lock()
+	d.got = append(d.got, denial{ip, reason, fp, user})
+	d.mu.Unlock()
+}
+
+func (d *denials) list() []denial {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]denial(nil), d.got...)
+}
+
+func waitDenials(t *testing.T, d *denials, n int) []denial {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := d.list(); len(got) >= n {
+			return got
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("denials %+v; want %d", d.list(), n)
+	return nil
+}
+
+// Admit is asked before a byte of SSH: a refused address gets no handshake.
+func TestARefusedAddressGetsNoHandshake(t *testing.T) {
+	k := newSigner(t)
+	var asked []string
+	var mu sync.Mutex
+	s := startListener(t, map[string]registered{ssh.FingerprintSHA256(k.PublicKey()): {1, 1}}, func(c *remote.Config) {
+		c.Admit = func(ip string) bool { mu.Lock(); asked = append(asked, ip); mu.Unlock(); return false }
+	})
+	if c, err := s.dial(t, ssh.PublicKeys(k)); err == nil {
+		c.Close()
+		t.Fatal("a refused address completed a handshake")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 1 || asked[0] != "127.0.0.1" {
+		t.Fatalf("Admit was asked %v; want once, about 127.0.0.1", asked)
+	}
+}
+
+// A failed authentication is a denial naming the key offered; a protocol
+// violation after authenticating is one naming the user; a handshake that
+// simply times out is none.
+func TestTheListenerReportsWhatItRefused(t *testing.T) {
+	k, stranger := newSigner(t), newSigner(t)
+	d := &denials{}
+	s := startListener(t, map[string]registered{ssh.FingerprintSHA256(k.PublicKey()): {5, 9}}, func(c *remote.Config) {
+		c.Denied = d.record
+		c.HandshakeTimeout = 300 * time.Millisecond
+	})
+	if c, err := s.dial(t, ssh.PublicKeys(stranger)); err == nil {
+		c.Close()
+		t.Fatal("an unregistered key authenticated")
+	}
+	got := waitDenials(t, d, 1)
+	if got[0] != (denial{"127.0.0.1", remote.DeniedKey, ssh.FingerprintSHA256(stranger.PublicKey()), 0}) {
+		t.Fatalf("auth failure reported as %+v", got[0])
+	}
+	c, err := s.dial(t, ssh.PublicKeys(k))
+	if err != nil {
+		t.Fatal(err)
+	}
+	se, _ := c.NewSession()
+	_ = se.Shell()
+	got = waitDenials(t, d, 2)
+	if got[1].reason != remote.DeniedProtocol || got[1].user != 9 {
+		t.Fatalf("a shell request reported as %+v; want a protocol violation by user 9", got[1])
+	}
+	c.Close()
+	idle, err := net.Dial("tcp", s.l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idle.Close()
+	time.Sleep(600 * time.Millisecond) // past the handshake deadline
+	if n := len(d.list()); n != 2 {
+		t.Fatalf("a timed-out handshake was counted: %+v", d.list())
+	}
+}
+
+// Hangup, as the RPC server calls it after a violation, ends the SSH session:
+// the client's channel sees the end.
+func TestHangupEndsTheSession(t *testing.T) {
+	k := newSigner(t)
+	s := startListener(t, map[string]registered{ssh.FingerprintSHA256(k.PublicKey()): {1, 1}}, nil)
+	c, err := s.dial(t, ssh.PublicKeys(k))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, out := openRPC(t, c)
+	s.accept(t).(remote.Conn).RemotePeer().Hangup()
+	done := make(chan error, 1)
+	go func() { _, err := out.Read(make([]byte, 1)); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("the session is still open after Hangup")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the session is still open after Hangup")
 	}
 }

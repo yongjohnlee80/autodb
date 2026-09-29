@@ -673,8 +673,16 @@ func runServe(configPath string) error {
 	// listener while Remote Control is on, fanned into one. Which surface a
 	// connection is on is decided by the listener that accepted it.
 	fan := remote.NewFanIn(ln)
-	remoteAddr, stopRemote, rerr := startRemote(serveCtx, cfg, store, svc, fan, version,
-		func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) })
+	remoteLog := func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) }
+	lim, lerr := newRemoteLimiter(cfg, svc)
+	if lerr != nil {
+		// Not fatal: the local surface does not need it. Without it the remote
+		// listener does not start (startRemote says so).
+		remoteLog("the remote limiter did not start: " + lerr.Error())
+	} else {
+		defer lim.Close()
+	}
+	remoteAddr, stopRemote, rerr := startRemote(serveCtx, cfg, store, svc, lim, fan, version, remoteLog)
 	if rerr != nil {
 		// NEVER FAILS THE START. The local surface is the operators' way in,
 		// and a remote listener that cannot bind must not take it down; the
@@ -684,8 +692,15 @@ func runServe(configPath string) error {
 		fmt.Printf("autodb: remote listener on %s\n", remoteAddr)
 	}
 	defer stopRemote()
-	srv := rpc.New(svc, eng, cfg.Server, version,
-		rpcServerOptions(ep, fan, oplog, notesRoot, frontDoorState, pressureState)...)
+	rpcOpts := rpcServerOptions(ep, fan, oplog, notesRoot, frontDoorState, pressureState)
+	if lim != nil {
+		// A remote connection's protocol violation counts like the
+		// listener's refusals: against its address.
+		rpcOpts = append(rpcOpts, rpc.WithRemoteDenials(func(ip, reason string, userID int64) {
+			remoteDeny(lim, remoteLog, ip, reason, "", userID)
+		}))
+	}
+	srv := rpc.New(svc, eng, cfg.Server, version, rpcOpts...)
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the

@@ -276,3 +276,32 @@ func TestTheRemoteGreetingCarriesNoHostPaths(t *testing.T) {
 		t.Errorf("the remote greeting lost applied_at_start, which names scripts, not paths: %#v", sch)
 	}
 }
+
+// A remote connection's call of a method it may not make is counted once, as a
+// protocol violation by its address and the user its key named, however many
+// it sends; a local connection's calls are never counted.
+func TestARemoteViolationIsCountedOncePerConnection(t *testing.T) {
+	var mu sync.Mutex
+	type seen struct {
+		ip, reason string
+		user       int64
+	}
+	var got []seen
+	f, local, rem := remoteFixture(t, rpc.WithRemoteDenials(func(ip, reason string, user int64) {
+		mu.Lock()
+		got = append(got, seen{ip, reason, user})
+		mu.Unlock()
+	}))
+	for i := 0; i < 2; i++ {
+		errVal, _ := rem.call("auth.whoami", f.rootTok)
+		mustErr(t, errVal, rpc.CodeRemoteLoginRequired)
+	}
+	if errVal, _ := local.call("auth.whoami", f.rootTok); errVal != nil {
+		t.Fatalf("local whoami: %#v", errVal)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || got[0] != (seen{"127.0.0.1", "protocol_violation", 1}) {
+		t.Fatalf("violations counted: %+v; want one, from 127.0.0.1 by user 1", got)
+	}
+}
