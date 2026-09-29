@@ -40,6 +40,19 @@ type Peer struct {
 	HostKeyFP string
 	// Addr is the client's TCP address.
 	Addr net.Addr
+
+	// hangup ends the connection's SSH session; set by the listener that
+	// accepted it.
+	hangup func()
+}
+
+// Hangup ends the connection's SSH session, as the RPC server does after
+// refusing a remote connection's protocol violation. A Peer the listener did
+// not build has none, and Hangup does nothing.
+func (p *Peer) Hangup() {
+	if p != nil && p.hangup != nil {
+		p.hangup()
+	}
 }
 
 // ControlKey is the meta-store key of the Remote Control switch: "on" when an

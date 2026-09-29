@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/config"
@@ -76,6 +77,10 @@ const Protocol int64 = 9
 const (
 	sessHello   = "hello"   // bool: compatible handshake completed
 	sessRefused = "refused" // bool: incompatible handshake; everything denied
+	// sessRemoteViolated marks a remote connection already counted for a
+	// protocol violation, so it is counted once however many it sends before
+	// its hangup.
+	sessRemoteViolated = "remote-violated"
 )
 
 // decodeLimits bounds inbound value decoding. Tighter than golib defaults:
@@ -125,6 +130,10 @@ type Server struct {
 	// where the cause is withheld and only the sentinel shape crosses. It is a
 	// capability fixed at assembly, not per-call, because the surface is.
 	discloseDetail bool
+
+	// remoteDenied counts a remote connection's protocol violation
+	// (WithRemoteDenials); nil counts nothing.
+	remoteDenied func(ip, reason string, userID int64)
 
 	// hookShutdownAudit wraps sys.shutdown's audit write. nil in production.
 	//
@@ -241,6 +250,16 @@ type options struct {
 	frontDoor      func() FrontDoorInfo
 	pressure       func() (pressure.Snapshot, error)
 	discloseDetail bool
+	remoteDenied   func(ip, reason string, userID int64)
+}
+
+// WithRemoteDenials sets what the server tells of a remote connection's
+// protocol violation (a method it may not call there): the address, the
+// reason ("protocol_violation") and the user its key named. The daemon counts
+// it against the address. Without it a violation is refused and hung up, but
+// not counted.
+func WithRemoteDenials(fn func(ip, reason string, userID int64)) Option {
+	return func(o *options) { o.remoteDenied = fn }
 }
 
 // WithLogger sets the transport logger.
@@ -312,6 +331,7 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 		frontDoor:      o.frontDoor,
 		pressure:       o.pressure,
 		discloseDetail: o.discloseDetail,
+		remoteDenied:   o.remoteDenied,
 		verbs:          make(map[string]struct{}),
 	}
 
@@ -420,6 +440,39 @@ var remotePreLogin = map[string]bool{
 	"auth.needs_bootstrap": true,
 }
 
+// remoteRefusalGrace is how long a remote connection that violated the
+// surface keeps its session after the refusal, so the refusal is delivered
+// before the connection ends.
+const remoteRefusalGrace = 250 * time.Millisecond
+
+// remoteViolation counts a remote connection's call of a method it may not
+// make there, once per connection, and ends the connection after the refusal
+// has had time to arrive: one violation per connection, and the next attempt
+// needs a new connection, which the limiter admits or not.
+func (s *Server) remoteViolation(sess *golibrpc.Session, peer *remote.Peer) {
+	if done, _ := sess.Value(sessRemoteViolated).(bool); done {
+		return
+	}
+	sess.SetValue(sessRemoteViolated, true)
+	if s.remoteDenied != nil {
+		ip, user := "", int64(0)
+		if peer != nil {
+			user = peer.UserID
+			if peer.Addr != nil {
+				ip = peer.Addr.String()
+			}
+		}
+		if ip == "" && sess.Peer() != nil {
+			ip = sess.Peer().String()
+		}
+		if host, _, err := net.SplitHostPort(ip); err == nil {
+			ip = host
+		}
+		s.remoteDenied(ip, "protocol_violation", user)
+	}
+	time.AfterFunc(remoteRefusalGrace, peer.Hangup)
+}
+
 // gate enforces handshake-before-methods: sys.hello is the
 // only reachable method until a compatible hello lands; an incompatible
 // hello poisons the session — every later call, hello included, is refused
@@ -432,12 +485,14 @@ func (s *Server) gate(sess *golibrpc.Session, method string) error {
 	}
 	// The remote surface, decided here and not in handlers: a refused method
 	// never reaches its handler.
-	if _, ok := remotePeer(sess); ok {
+	if peer, ok := remotePeer(sess); ok {
 		if remoteRefused[method] {
+			s.remoteViolation(sess, peer)
 			return &golibrpc.Error{Code: CodeRemoteRefused,
 				Message: method + " is available on the server host only"}
 		}
 		if !remotePreLogin[method] {
+			s.remoteViolation(sess, peer)
 			return &golibrpc.Error{Code: CodeRemoteLoginRequired,
 				Message: "sign in on this remote connection first"}
 		}

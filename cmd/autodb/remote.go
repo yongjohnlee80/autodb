@@ -35,8 +35,12 @@ var (
 // Once running it is SUPERVISED: if its TCP listener fails, the failure is
 // said loudly and the listener is started again, with backoff, until it binds
 // or stop is called. The local surface is never touched by any of it.
+//
+// lim counts what the listener refuses and decides whom it admits; without it
+// the listener does not start, because a remote surface without its limiter
+// would have no bound on guesses.
 func startRemote(ctx context.Context, cfg config.Config, store *meta.Store, svc *auth.Service,
-	fan *remote.FanIn, version string, onLog func(string)) (net.Addr, func(), error) {
+	lim *auth.RemoteLimiter, fan *remote.FanIn, version string, onLog func(string)) (net.Addr, func(), error) {
 	noop := func() {}
 	v, _, err := store.GetMeta(ctx, remote.ControlKey)
 	if err != nil {
@@ -44,6 +48,9 @@ func startRemote(ctx context.Context, cfg config.Config, store *meta.Store, svc 
 	}
 	if v != "on" {
 		return nil, noop, nil
+	}
+	if lim == nil {
+		return nil, noop, fmt.Errorf("remote listener: the remote limiter is not available")
 	}
 	path, err := cfg.HostKeyPath()
 	if err != nil {
@@ -53,7 +60,7 @@ func startRemote(ctx context.Context, cfg config.Config, store *meta.Store, svc 
 	if err != nil {
 		return nil, noop, err
 	}
-	sup := &remoteSupervisor{cfg: cfg, svc: svc, fan: fan, version: version, onLog: onLog,
+	sup := &remoteSupervisor{cfg: cfg, svc: svc, lim: lim, ctx: ctx, fan: fan, version: version, onLog: onLog,
 		host: host, fp: fp, stopped: make(chan struct{})}
 	l, err := sup.bind()
 	if err != nil {
@@ -71,6 +78,8 @@ func startRemote(ctx context.Context, cfg config.Config, store *meta.Store, svc 
 type remoteSupervisor struct {
 	cfg     config.Config
 	svc     *auth.Service
+	lim     *auth.RemoteLimiter
+	ctx     context.Context
 	fan     *remote.FanIn
 	version string
 	onLog   func(string)
@@ -94,6 +103,13 @@ func (s *remoteSupervisor) bind() (*remote.Listener, error) {
 		HandshakeTimeout:   s.cfg.Remote.HandshakeLimit(),
 		Version:            s.version,
 		Logf:               func(format string, args ...any) { s.onLog(fmt.Sprintf(format, args...)) },
+		Admit: func(ip string) bool {
+			ok, _ := s.lim.Admit(s.ctx, ip)
+			return ok
+		},
+		Denied: func(ip, reason, offeredKeyFP string, userID int64) {
+			remoteDeny(s.lim, s.onLog, ip, reason, offeredKeyFP, userID)
+		},
 	})
 	if err != nil {
 		_ = tcp.Close()
@@ -158,4 +174,28 @@ func (s *remoteSupervisor) rebind(ctx context.Context) (*remote.Listener, bool) 
 func (s *remoteSupervisor) stop() {
 	s.once.Do(func() { close(s.stopped) })
 	s.wg.Wait()
+}
+
+// remoteDeny counts a refused remote connection. A spill failure is said
+// loudly: the limiter has paused remote admission, which is the safe state,
+// and an operator needs to know why.
+func remoteDeny(lim *auth.RemoteLimiter, onLog func(string), ip, reason, offeredKeyFP string, userID int64) {
+	if err := lim.Deny(ip, auth.DenialReason(reason), offeredKeyFP, userID); err != nil {
+		onLog(fmt.Sprintf("REMOTE DENIAL COULD NOT BE SPILLED, remote admission paused: %v", err))
+	}
+}
+
+// newRemoteLimiter builds the daemon's remote limiter from [remote]. It is
+// built at every start, Remote Control on or off, so denials a previous start
+// left pending are replayed before any remote connection is admitted.
+func newRemoteLimiter(cfg config.Config, svc *auth.Service) (*auth.RemoteLimiter, error) {
+	spill, err := cfg.DenialSpillPath()
+	if err != nil {
+		return nil, fmt.Errorf("remote denial spill path: %w", err)
+	}
+	return svc.NewRemoteLimiter(auth.LimiterConfig{
+		BlockAfter: cfg.Remote.BlockAfter(),
+		BlockFor:   cfg.Remote.BlockFor(),
+		SpillPath:  spill,
+	})
 }

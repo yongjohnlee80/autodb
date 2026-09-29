@@ -724,3 +724,15 @@ bind = "0.0.0.0:7422"
 max_unauthenticated = 16
 # How long a connection has to authenticate and ask for the autodb subsystem.
 handshake_timeout = "10s"
+# Refused connections: an unregistered key, a protocol violation, a failed
+# sign-in. This many in a row from one address block it (an IPv6 /64 counts as
+# one address) for block_duration, measured from the refusal that reached the
+# count. A sign-in from the address resets the count; an admin can lift a block
+# from Remote > Manage > Blocked IPs. A full handshake cap, a timeout and
+# Remote Control being off are never counted.
+block_after_failures = 3
+block_duration = "24h0m0s"
+# Each refusal is written here, fsynced, before the store: if the store cannot
+# take the write, remote connections pause until it can, and a crash loses
+# nothing. Empty means remote-denials.pending in autodb's data directory.
+# denial_spill = "/var/lib/autodb/remote-denials.pending"
