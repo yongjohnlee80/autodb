@@ -368,6 +368,11 @@ func seedEverything(t *testing.T, s *Store) {
 	if _, err := s.Sessions.OnCtx(ctx).
 		Set(SessTokenHash, []byte("hash1")).Set(SessUserID, rootID).Set(SessIP, "10.1.2.3").
 		Set(SessCreatedAt, int64(17)).Set(SessExpiresAt, int64(18)).Set(SessRevoked, int64(1)).
+		// A REMOTE session's binding, non-default: a copy that dropped any of
+		// the three would leave the default, and a local session looks the
+		// same on both sides.
+		Set(SessDeviceID, int64(4)).Set(SessAttachedConn, "c0ffee00c0ffee00c0ffee00c0ffee00").
+		Set(SessDetachedUntil, int64(99)).
 		Insert(); err != nil {
 		t.Fatal(err)
 	}
@@ -427,6 +432,46 @@ func seedEverything(t *testing.T, s *Store) {
 		Set(PATExpiresAt, int64(9_000_000)).
 		Set(PATLastUsedAt, int64(42)).
 		Set(PATRevoked, int64(1)).Insert(); err != nil {
+		t.Fatal(err)
+	}
+	// REMOTE ACCESS: one FK-consistent graph, key -> device -> address, plus
+	// a block and a denial claim. Every column non-default, for the same
+	// reason as the PAT above: a dropped fingerprint or device key would
+	// refuse every remote connection with the counts still matching.
+	keyID, err := s.SSHKeys.OnCtx(ctx).
+		Set(SSHKeyUserID, rootID).Set(SSHKeyLabel, "laptop").
+		Set(SSHKeyPublicKey, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5seeded").
+		Set(SSHKeyFingerprint, "SHA256:seededfingerprint").Set(SSHKeyAddedBy, rootID).
+		Set(SSHKeyCreatedAt, int64(51)).Set(SSHKeyLastUsedAt, int64(52)).
+		Set(SSHKeyRevokedAt, int64(53)).Set(SSHKeyRevokedBy, rootID).Insert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	devID, err := s.RemoteDevices.OnCtx(ctx).
+		Set(DevSSHKeyID, keyID).Set(DevUserID, rootID).
+		Set(DevPublicKey, "ed25519:seededdevicekey").Set(DevFingerprint, "SHA256:seededdevice").
+		Set(DevEnrolledAt, int64(54)).Set(DevEnrolledIP, "198.51.100.9").
+		Set(DevKeyCreatedAt, int64(55)).Set(DevLastSeenAt, int64(56)).
+		Set(DevRevokedAt, int64(57)).Set(DevRevokedBy, rootID).Insert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RemoteDeviceIPs.OnCtx(ctx).
+		Set(DevIPDeviceID, devID).Set(DevIPIP, "198.51.100.9").
+		Set(DevIPFirstSeenAt, int64(58)).Set(DevIPLastSeenAt, int64(59)).Insert(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RemoteIPBlocks.OnCtx(ctx).
+		Set(BlockPrefix, "203.0.113.7/32").Set(BlockFailures, int64(3)).
+		Set(BlockLastFailureAt, int64(60)).Set(BlockUntil, int64(61)).
+		Set(BlockUnblockedBy, rootID).Set(BlockUnblockedAt, int64(62)).Insert(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RemoteDenials.OnCtx(ctx).
+		Set(DenialEventID, "e1e2e3e4e5e6e7e8e9eaebecedeeef00").Set(DenialPrefix, "203.0.113.7/32").
+		Set(DenialOccurredAt, int64(63)).Set(DenialReason, "device_mismatch").
+		Set(DenialOfferedKeyFP, "SHA256:offered").Set(DenialUserID, rootID).
+		Set(DenialAuditID, int64(1)).Insert(); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetMeta(ctx, "install_id", "src-install"); err != nil {
