@@ -129,7 +129,7 @@ func TestHintsSayTheKeys(t *testing.T) {
 	s.Keys(t, decltest.Rune('?'))
 	s.WaitFor(t, "the hints", func(sc string) bool {
 		return strings.Contains(sc, "keys here") && strings.Contains(sc, "the leader menu: every command") &&
-			strings.Contains(sc, "find in the focused query") && strings.Contains(sc, "h / l     explorer: collapse / expand")
+			strings.Contains(sc, "find in the focused explorer, query or results") && strings.Contains(sc, "h / l     explorer: collapse / expand")
 	})
 	s.Keys(t, esc())
 	s.WaitFor(t, "the hints closed", func(sc string) bool { return !strings.Contains(sc, "keys here") })
