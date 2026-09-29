@@ -175,7 +175,12 @@ func (s *Server) handle(method string, h golibrpc.Handler) {
 		panic("rpc: duplicate method registration: " + method)
 	}
 	s.verbs[method] = struct{}{}
-	s.rpc.Handle(method, h)
+	// Every handler runs with its connection's Caller, set here once for all
+	// of them: the auth calls a handler makes resolve tokens for the surface
+	// the request actually arrived on.
+	s.rpc.Handle(method, func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		return h(auth.WithCaller(ctx, callerOf(req.Session)), req)
+	})
 }
 
 // Verbs reports the registered method surface, sorted. The pin cell reads it;
@@ -420,6 +425,22 @@ func remotePeer(sess *golibrpc.Session) (*remote.Peer, bool) {
 	}
 	rs, ok := sess.Attachment().(remoteSurface)
 	return rs.peer, ok
+}
+
+// callerOf is the auth.Caller of a request on sess: remote, with the
+// connection's id, for a connection the remote listener accepted (with no
+// Peer it has no id, and no remote token resolves on it), and local for
+// every other connection.
+func callerOf(sess *golibrpc.Session) auth.Caller {
+	peer, remote := remotePeer(sess)
+	if !remote {
+		return auth.LocalCaller
+	}
+	c := auth.Caller{Surface: auth.SurfaceRemote}
+	if peer != nil {
+		c.ConnID = peer.ConnID
+	}
+	return c
 }
 
 // remoteRefused are the methods the remote surface never offers: restarting

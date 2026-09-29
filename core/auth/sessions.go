@@ -24,9 +24,35 @@ func tokenHash(token string) []byte {
 // resolveToken is the single provenance check: token → live session → live
 // user → fresh Identity. Every privileged method calls it, so authority is
 // re-read from the store on every call — a demotion or disable takes effect
-// on the caller's next request.
-func (s *Service) resolveToken(ctx context.Context, token string) (Identity, *meta.Session, error) {
-	sess, err := s.store.Sessions.OnCtx(ctx).With(meta.SessTokenHash, tokenHash(token)).Get()
+// on the caller's next request. caller is who presents the token (Caller).
+func (s *Service) resolveToken(ctx context.Context, caller Caller, token string) (Identity, *meta.Session, error) {
+	return s.checkSession(reader{ctx: ctx}, caller, token)
+}
+
+// resolveTokenTx is resolveToken bound to an open transaction. Callers
+// already inside a transaction MUST use this: resolving on the pool while a
+// transaction holds a connection deadlocks single-connection stores
+// (sqlite), and it would read outside the transaction's snapshot.
+func (s *Service) resolveTokenTx(tx *dao.Transaction, caller Caller, token string) (Identity, error) {
+	ident, _, err := s.checkSession(reader{tx: tx}, caller, token)
+	return ident, err
+}
+
+// checkSession is both resolvers' one body, run on the reader it is given.
+//
+// Beyond the session and its user being live, it holds a token to the
+// surface it was minted for. A session bound to a remote device
+// (sessions.device_id) is refused on the local surface. On the remote
+// surface only such a session is accepted, and only when:
+//   - the connection proved that same device;
+//   - the connection owns the session (sessions.attached_conn);
+//   - the device, and the SSH key it was enrolled with, are not revoked.
+//
+// All of it is read on the same reader, so a revocation takes effect on the
+// caller's next request, inside an open transaction too. Every refusal is
+// ErrTokenInvalid: which check failed is not said.
+func (s *Service) checkSession(r reader, caller Caller, token string) (Identity, *meta.Session, error) {
+	sess, err := s.sessionsOn(r).With(meta.SessTokenHash, tokenHash(token)).Get()
 	if errors.Is(err, dao.ErrNoRows) {
 		return Identity{}, nil, ErrTokenInvalid
 	}
@@ -36,7 +62,10 @@ func (s *Service) resolveToken(ctx context.Context, token string) (Identity, *me
 	if sess.Revoked != 0 || s.now().Unix() >= sess.ExpiresAt {
 		return Identity{}, nil, ErrTokenInvalid
 	}
-	u, err := s.store.Users.OnCtx(ctx).With(meta.UserID, sess.UserID).Get()
+	if err := s.checkSurface(r, caller, sess); err != nil {
+		return Identity{}, nil, err
+	}
+	u, err := s.usersOn(r).With(meta.UserID, sess.UserID).Get()
 	if err != nil {
 		return Identity{}, nil, err
 	}
@@ -46,34 +75,46 @@ func (s *Service) resolveToken(ctx context.Context, token string) (Identity, *me
 	return Identity{userID: u.ID, name: u.Name, role: u.Role}, sess, nil
 }
 
-// resolveTokenTx is resolveToken bound to an open transaction. Callers
-// already inside a transaction MUST use this: resolving on the pool while a
-// transaction holds a connection deadlocks single-connection stores
-// (sqlite), and it would read outside the transaction's snapshot.
-func (s *Service) resolveTokenTx(tx *dao.Transaction, token string) (Identity, error) {
-	sess, err := s.store.Sessions.On(tx).With(meta.SessTokenHash, tokenHash(token)).Get()
+// checkSurface is checkSession's surface rule for sess presented by caller.
+func (s *Service) checkSurface(r reader, caller Caller, sess *meta.Session) error {
+	if caller.Surface != SurfaceRemote {
+		if sess.DeviceID != 0 {
+			return ErrTokenInvalid
+		}
+		return nil
+	}
+	if sess.DeviceID == 0 || sess.DeviceID != caller.DeviceID {
+		return ErrTokenInvalid
+	}
+	if caller.ConnID == "" || sess.AttachedConn != caller.ConnID {
+		return ErrTokenInvalid
+	}
+	dev, err := s.devicesOn(r).With(meta.DevID, sess.DeviceID).Get()
 	if errors.Is(err, dao.ErrNoRows) {
-		return Identity{}, ErrTokenInvalid
+		return ErrTokenInvalid
 	}
 	if err != nil {
-		return Identity{}, err
+		return err
 	}
-	if sess.Revoked != 0 || s.now().Unix() >= sess.ExpiresAt {
-		return Identity{}, ErrTokenInvalid
+	if dev.RevokedAt != 0 || dev.UserID != sess.UserID {
+		return ErrTokenInvalid
 	}
-	u, err := s.store.Users.On(tx).With(meta.UserID, sess.UserID).Get()
+	key, err := s.sshKeysOn(r).With(meta.SSHKeyID, dev.SSHKeyID).Get()
+	if errors.Is(err, dao.ErrNoRows) {
+		return ErrTokenInvalid
+	}
 	if err != nil {
-		return Identity{}, err
+		return err
 	}
-	if u.Disabled != 0 {
-		return Identity{}, ErrTokenInvalid
+	if key.RevokedAt != 0 {
+		return ErrTokenInvalid
 	}
-	return Identity{userID: u.ID, name: u.Name, role: u.Role}, nil
+	return nil
 }
 
 // ValidateToken resolves a session token to a fresh Identity.
 func (s *Service) ValidateToken(ctx context.Context, token string) (Identity, error) {
-	ident, _, err := s.resolveToken(ctx, token)
+	ident, _, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	return ident, err
 }
 
@@ -87,7 +128,7 @@ func (s *Service) RequireAdmin(ctx context.Context, token string) (Identity, err
 
 // requireAdmin resolves the token and demands a current admin role.
 func (s *Service) requireAdmin(ctx context.Context, token string) (Identity, error) {
-	ident, _, err := s.resolveToken(ctx, token)
+	ident, _, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -329,7 +370,7 @@ const sentinelUserID int64 = 0
 
 // Logout revokes the calling session (kept as a row for audit).
 func (s *Service) Logout(ctx context.Context, token, ip string) error {
-	ident, sess, err := s.resolveToken(ctx, token)
+	ident, sess, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return err
 	}
@@ -344,7 +385,7 @@ func (s *Service) Logout(ctx context.Context, token, ip string) error {
 
 // RevokeUserSessions revokes every session of userID (self, or admin).
 func (s *Service) RevokeUserSessions(ctx context.Context, token string, userID int64, ip string) error {
-	actor, _, err := s.resolveToken(ctx, token)
+	actor, _, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return err
 	}

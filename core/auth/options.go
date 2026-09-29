@@ -57,7 +57,7 @@ var knownOptions = map[string][]string{
 // Unknown keys are returned as they were stored rather than dropped, so a
 // downgrade reads a newer build's preferences without destroying them.
 func (s *Service) UserOptions(ctx context.Context, token string) (map[string]string, error) {
-	id, _, err := s.resolveToken(ctx, token)
+	id, _, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (s *Service) UserOptions(ctx context.Context, token string) (map[string]str
 // version check would REFUSE the second writer for touching an unrelated key —
 // correct, but a conflict the operator cannot act on and did not cause.
 func (s *Service) SetUserOption(ctx context.Context, token, key, value, ip string) error {
-	id, _, err := s.resolveToken(ctx, token)
+	id, _, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return err
 	}
