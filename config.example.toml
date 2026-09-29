@@ -740,3 +740,7 @@ block_duration = "24h0m0s"
 # closed lid) can be taken up again by the same device within this long, with
 # no passphrase. After it, or after a daemon restart, the passphrase is asked.
 reconnect_grace = "2m0s"
+# A device key older than this is replaced by the TUI on its next connect: it
+# makes a new key, proves it with both the old one and the new one, and the
+# server swaps them in one step (logged as the device's enrollment, rotated).
+device_key_max_age = "2160h0m0s"

@@ -156,6 +156,13 @@ type Service struct {
 	// nil in production.
 	hookAuditWrite func(action string) error
 
+	// hookResumeClaim fires in ResumeRemote's transaction between the read of
+	// the session and the compare-and-swap that claims it: where another
+	// connection's claim can commit first on a store that runs them at once.
+	// A cell makes that claim here, on the same transaction, so the swap's
+	// condition and the re-read after it are what decide. nil in production.
+	hookResumeClaim func(tx *dao.Transaction)
+
 	// patCompares counts PAT hash-and-compare operations for the
 	// comparable-work assertion. Per-service so parallel tests cannot
 	// interleave into each other's deltas.

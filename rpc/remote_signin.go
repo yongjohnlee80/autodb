@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/yongjohnlee80/golib/logger"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
@@ -17,8 +18,8 @@ import (
 // and "version"), for the device-enrollment event.
 const sessClientVersion = "client-version"
 
-// registerRemoteSignIn registers remote.attest. auth.login's remote branch
-// is remoteLogin.
+// registerRemoteSignIn registers remote.attest, remote.resume and
+// remote.rotate_device. auth.login's remote branch is remoteLogin.
 func (s *Server) registerRemoteSignIn() {
 	// remote.attest(device_pub, sig) proves the connection's device before
 	// the passphrase is sent. sig is the device key's signature over
@@ -64,8 +65,151 @@ func (s *Server) registerRemoteSignIn() {
 			// A second proof on one connection.
 			return nil, s.remoteRefusal(req, peer, auth.DenialProtocolViolation)
 		}
-		return map[string]any{"enrolled": at.DeviceID != 0, "key_created_at": at.KeyCreatedAt}, nil
+		due := at.DeviceID != 0 && time.Since(time.Unix(at.KeyCreatedAt, 0)) > s.deviceKeyMaxAge
+		return map[string]any{"enrolled": at.DeviceID != 0, "key_created_at": at.KeyCreatedAt, "rotate_due": due}, nil
 	})
+
+	// remote.resume(token) takes up this device's session on a new connection
+	// within the reconnect grace, without the passphrase: after sys.hello and
+	// remote.attest of an ENROLLED device. A token that is not this device's
+	// is a counted denial. One that is, but can no longer be taken up, is
+	// CodeResumeUnavailable: uncounted, and the connection stays open to
+	// sign in with the passphrase.
+	s.handle("remote.resume", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		peer, isRemote := remotePeer(req.Session)
+		if !isRemote {
+			return nil, &golibrpc.Error{Code: CodeRemoteRefused,
+				Message: "remote.resume is for remote connections"}
+		}
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		if peer == nil || peer.Device() == 0 {
+			// Resuming needs an enrolled device proved first; a device to
+			// enroll signs in with the passphrase.
+			return nil, s.remoteRefusal(req, peer, auth.DenialProtocolViolation)
+		}
+		release, rerr := s.admitRemote(req)
+		if rerr != nil {
+			return nil, rerr
+		}
+		ip := remoteIP(req.Session, peer)
+		res, err := s.auth.ResumeRemote(ctx, auth.RemoteResume{DeviceID: peer.Device(), ConnID: peer.ConnID}, token, ip)
+		if err != nil {
+			release()
+			if errors.Is(err, auth.ErrRemoteResumeUnavailable) {
+				return nil, &golibrpc.Error{Code: CodeResumeUnavailable,
+					Message: "that session can no longer be resumed; sign in"}
+			}
+			if reason, ok := auth.DenialFor(err); ok {
+				return nil, s.remoteRefusal(req, peer, reason)
+			}
+			return nil, s.wireErrFor(req, err)
+		}
+		if err := s.signedIn(req, peer, res.SessionID, peer.Device(), release, ip); err != nil {
+			return nil, err
+		}
+		if res.TookOver != "" && s.remoteClose != nil {
+			s.remoteClose(remote.ByConn(res.TookOver))
+		}
+		return map[string]any{"user": identMap(res.Identity)}, nil
+	})
+
+	// remote.rotate_device(token, new_pub, sig_old, sig_new) replaces this
+	// connection's device key. Both keys sign remote.RotateMessage for this
+	// connection, this device, the current key and the new one. The reply is
+	// the new key's creation time.
+	s.handle("remote.rotate_device", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		peer, isRemote := remotePeer(req.Session)
+		if !isRemote || peer == nil {
+			return nil, &golibrpc.Error{Code: CodeRemoteRefused,
+				Message: "remote.rotate_device is for remote connections"}
+		}
+		if err := exactArgs(req.Params, 4); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		newPub, err := argBin(req.Params, 1, "new_pub")
+		if err != nil {
+			return nil, err
+		}
+		sigOld, err := argBin(req.Params, 2, "sig_old")
+		if err != nil {
+			return nil, err
+		}
+		sigNew, err := argBin(req.Params, 3, "sig_new")
+		if err != nil {
+			return nil, err
+		}
+		msgFor := func(oldPub []byte) []byte {
+			return remote.RotateMessage(peer.SessionID, peer.Device(), oldPub, newPub)
+		}
+		at, err := s.auth.RotateDevice(ctx, token, msgFor, newPub, sigOld, sigNew, remoteIP(req.Session, peer))
+		if errors.Is(err, auth.ErrRemoteDeviceProofInvalid) {
+			return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+				Message: "the rotation proof does not verify; nothing changed"}
+		}
+		if err != nil {
+			return nil, s.wireErrFor(req, err)
+		}
+		return map[string]any{"key_created_at": at}, nil
+	})
+}
+
+// admitRemote claims the idle gate's remote admission for a sign-in or a
+// resume, or refuses it as restarting (uncounted).
+func (s *Server) admitRemote(req *golibrpc.Request) (func(), error) {
+	if s.eng == nil {
+		return func() {}, nil
+	}
+	rel, err := s.eng.AdmitRemoteSession()
+	if errors.Is(err, exec.ErrRemoteAdmissionClosed) {
+		return nil, &golibrpc.Error{Code: CodeServerRestarting,
+			Message: "the server is restarting; sign in again shortly"}
+	}
+	if err != nil {
+		return nil, s.wireErrFor(req, err)
+	}
+	return rel, nil
+}
+
+// signedIn finishes a sign-in or a resume that committed: the connection is
+// signed in to its one session, bound to device; when it ends, its admission
+// is released and its session detached for the reconnect grace; and its
+// address's run of refusals ends.
+func (s *Server) signedIn(req *golibrpc.Request, peer *remote.Peer, session, device int64, release func(), ip string) error {
+	if !peer.SignIn(session, device) {
+		// The gate admits one sign-in per connection; a second session is
+		// never left behind if that ever fails.
+		release()
+		if _, derr := s.auth.DetachRemoteSession(0, peer.ConnID, 0); derr != nil {
+			s.logger.Log(logger.SeverityError, fmt.Sprintf("remote: revoking a second session on %s: %v", peer.ConnID, derr))
+		}
+		return s.remoteRefusal(req, peer, auth.DenialProtocolViolation)
+	}
+	peer.OnEnd(func() {
+		release()
+		extra, derr := s.auth.DetachRemoteSession(session, peer.ConnID, s.grace)
+		if derr != nil {
+			s.logger.Log(logger.SeverityError, fmt.Sprintf("remote: the close write for session %d failed; it stays attached "+
+				"to the ended connection until it is taken up, expires or the daemon restarts: %v", session, derr))
+		}
+		if extra > 0 {
+			s.logger.Log(logger.SeverityError, fmt.Sprintf("remote_extra_session_on_close: %d session(s) besides %d were attached to %s; revoked",
+				extra, session, peer.ConnID))
+		}
+	})
+	if s.remoteSignedIn != nil {
+		s.remoteSignedIn(ip)
+	}
+	return nil
 }
 
 // remoteLogin is auth.login on a remote connection: auth.LoginRemote with
@@ -81,17 +225,9 @@ func (s *Server) remoteLogin(ctx context.Context, req *golibrpc.Request, peer *r
 	if peer == nil {
 		return nil, s.remoteRefusal(req, peer, auth.DenialProtocolViolation)
 	}
-	release := func() {}
-	if s.eng != nil {
-		rel, err := s.eng.AdmitRemoteSession()
-		if errors.Is(err, exec.ErrRemoteAdmissionClosed) {
-			return nil, &golibrpc.Error{Code: CodeServerRestarting,
-				Message: "the server is restarting; sign in again shortly"}
-		}
-		if err != nil {
-			return nil, s.wireErrFor(req, err)
-		}
-		release = rel
+	release, rerr := s.admitRemote(req)
+	if rerr != nil {
+		return nil, rerr
 	}
 	clientVersion, _ := req.Session.Value(sessClientVersion).(string)
 	ip := remoteIP(req.Session, peer)
@@ -107,29 +243,8 @@ func (s *Server) remoteLogin(ctx context.Context, req *golibrpc.Request, peer *r
 		}
 		return nil, s.wireErrFor(req, err)
 	}
-	if !peer.SignIn(res.SessionID, res.DeviceID) {
-		// The gate admits one sign-in per connection; a second session is
-		// never left behind if that ever fails.
-		release()
-		if _, derr := s.auth.DetachRemoteSession(0, peer.ConnID, 0); derr != nil {
-			s.logger.Log(logger.SeverityError, fmt.Sprintf("remote: revoking a second session on %s: %v", peer.ConnID, derr))
-		}
-		return nil, s.remoteRefusal(req, peer, auth.DenialProtocolViolation)
-	}
-	peer.OnEnd(func() {
-		release()
-		extra, derr := s.auth.DetachRemoteSession(res.SessionID, peer.ConnID, s.grace)
-		if derr != nil {
-			s.logger.Log(logger.SeverityError, fmt.Sprintf("remote: the close write for session %d failed; it stays attached "+
-				"to the ended connection until it is taken up, expires or the daemon restarts: %v", res.SessionID, derr))
-		}
-		if extra > 0 {
-			s.logger.Log(logger.SeverityError, fmt.Sprintf("remote_extra_session_on_close: %d session(s) besides %d were attached to %s; revoked",
-				extra, res.SessionID, peer.ConnID))
-		}
-	})
-	if s.remoteSignedIn != nil {
-		s.remoteSignedIn(ip)
+	if err := s.signedIn(req, peer, res.SessionID, res.DeviceID, release, ip); err != nil {
+		return nil, err
 	}
 	return map[string]any{"token": res.Token, "user": identMap(res.Identity), "enrolled": res.Enrolled}, nil
 }

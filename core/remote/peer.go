@@ -11,6 +11,7 @@
 package remote
 
 import (
+	"encoding/binary"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -291,4 +292,20 @@ func AttestMessage(sessionID []byte, hostKeyFP, sshKeyFP string, devicePub []byt
 	m = append(m, hostKeyFP...)
 	m = append(m, sshKeyFP...)
 	return append(m, devicePub...)
+}
+
+// rotateLabel is the domain of a device-key rotation proof.
+const rotateLabel = "autodb-remote-rotate-v1\x00"
+
+// RotateMessage is what both the old and the new device key sign to rotate
+// device deviceID on one connection: the label, the SSH session id, the
+// device id (8 bytes, big-endian), the old public key and the new one. The
+// old key's signature proves continuity, the new one's possession.
+func RotateMessage(sessionID []byte, deviceID int64, oldPub, newPub []byte) []byte {
+	m := make([]byte, 0, len(rotateLabel)+len(sessionID)+8+len(oldPub)+len(newPub))
+	m = append(m, rotateLabel...)
+	m = append(m, sessionID...)
+	m = binary.BigEndian.AppendUint64(m, uint64(deviceID))
+	m = append(m, oldPub...)
+	return append(m, newPub...)
 }

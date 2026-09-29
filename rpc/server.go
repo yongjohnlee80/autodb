@@ -53,13 +53,13 @@ import (
 // interrupted, for an update to take effect).
 // Protocol 8 added sys.inflight -- what a restart would interrupt, which the
 // restart confirmation has to name before it asks.
-// Protocol 10 added remote.attest (4 added exec.run_script, 3 history.list and sys.shutdown). BUMP THIS whenever the
+// Protocol 11 added remote.resume and remote.rotate_device, 10 remote.attest (4 added exec.run_script, 3 history.list and sys.shutdown). BUMP THIS whenever the
 // verb surface changes: the handshake is what tells a NEWER frontend that
 // it is talking to an OLDER server (the shared server outlives frontends
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 10
+const Protocol int64 = 11
 
 // Session keys the gate and the hello handler share.
 //
@@ -140,6 +140,13 @@ type Server struct {
 	// grace is how long a remote session whose connection dropped may be
 	// taken up again (WithReconnectGrace).
 	grace time.Duration
+	// deviceKeyMaxAge is how old a device key may be before the proof's
+	// reply says to rotate it (WithDeviceKeyMaxAge).
+	deviceKeyMaxAge time.Duration
+	// remoteClose ends the live remote connections match accepts
+	// (WithRemoteClose): a resume that took a session over ends the
+	// connection it took it from.
+	remoteClose func(match func(*remote.Peer) bool) int
 	// logger is the transport logger, for what an operator must see.
 	logger logger.Logger
 
@@ -263,15 +270,17 @@ type FrontDoorInfo struct {
 type Option func(*options)
 
 type options struct {
-	logger         logger.Logger
-	listener       net.Listener
-	notesDir       string
-	frontDoor      func() FrontDoorInfo
-	pressure       func() (pressure.Snapshot, error)
-	discloseDetail bool
-	remoteDenied   func(ip, reason string, userID int64)
-	remoteSignedIn func(ip string)
-	grace          time.Duration
+	logger          logger.Logger
+	listener        net.Listener
+	notesDir        string
+	frontDoor       func() FrontDoorInfo
+	pressure        func() (pressure.Snapshot, error)
+	discloseDetail  bool
+	remoteDenied    func(ip, reason string, userID int64)
+	remoteSignedIn  func(ip string)
+	grace           time.Duration
+	deviceKeyMaxAge time.Duration
+	remoteClose     func(match func(*remote.Peer) bool) int
 }
 
 // WithRemoteDenials sets what the server tells of a remote connection's
@@ -287,6 +296,21 @@ func WithRemoteDenials(fn func(ip, reason string, userID int64)) Option {
 // address, whose run of refusals it ends.
 func WithRemoteSignIns(fn func(ip string)) Option {
 	return func(o *options) { o.remoteSignedIn = fn }
+}
+
+// WithDeviceKeyMaxAge sets how old a device key may be before remote.attest
+// tells the client to rotate it. Zero is the default ([remote]
+// device_key_max_age).
+func WithDeviceKeyMaxAge(d time.Duration) Option {
+	return func(o *options) { o.deviceKeyMaxAge = d }
+}
+
+// WithRemoteClose sets how the server ends live remote connections: the
+// remote Registry's Close. Without it a resume that took a session over
+// leaves the stale connection to its own end, and its requests fail the
+// owner check.
+func WithRemoteClose(fn func(match func(*remote.Peer) bool) int) Option {
+	return func(o *options) { o.remoteClose = fn }
 }
 
 // WithReconnectGrace sets how long a remote session whose connection dropped
@@ -361,18 +385,23 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 	s := &Server{
 		auth: authSvc, eng: eng, version: version,
 		instance: newInstanceID(), stop: make(chan struct{}),
-		notesDir:       o.notesDir,
-		frontDoor:      o.frontDoor,
-		pressure:       o.pressure,
-		discloseDetail: o.discloseDetail,
-		remoteDenied:   o.remoteDenied,
-		remoteSignedIn: o.remoteSignedIn,
-		grace:          o.grace,
-		logger:         o.logger,
-		verbs:          make(map[string]struct{}),
+		notesDir:        o.notesDir,
+		frontDoor:       o.frontDoor,
+		pressure:        o.pressure,
+		discloseDetail:  o.discloseDetail,
+		remoteDenied:    o.remoteDenied,
+		remoteSignedIn:  o.remoteSignedIn,
+		grace:           o.grace,
+		deviceKeyMaxAge: o.deviceKeyMaxAge,
+		remoteClose:     o.remoteClose,
+		logger:          o.logger,
+		verbs:           make(map[string]struct{}),
 	}
 	if s.grace <= 0 {
 		s.grace = config.DefaultRemoteReconnectGrace
+	}
+	if s.deviceKeyMaxAge <= 0 {
+		s.deviceKeyMaxAge = config.DefaultRemoteDeviceKeyMaxAge
 	}
 
 	ropts := []golibrpc.Option{
@@ -494,6 +523,7 @@ var remotePreLogin = map[string]bool{
 	"auth.needs_bootstrap": true,
 	"remote.attest":        true,
 	"auth.login":           true,
+	"remote.resume":        true,
 }
 
 // remoteSignIn are the calls that prove a remote connection's device and
@@ -502,6 +532,7 @@ var remotePreLogin = map[string]bool{
 var remoteSignIn = map[string]bool{
 	"remote.attest": true,
 	"auth.login":    true,
+	"remote.resume": true,
 }
 
 // remoteHangupBackstop is how long a remote connection that violated the
