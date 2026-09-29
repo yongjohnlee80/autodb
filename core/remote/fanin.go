@@ -20,6 +20,7 @@ type FanIn struct {
 	once  sync.Once
 
 	mu      sync.Mutex
+	closed  bool
 	sources map[net.Listener]struct{}
 }
 
@@ -34,14 +35,13 @@ func NewFanIn(base net.Listener) *FanIn {
 // Add serves src until it fails, is removed, or the fan-in closes.
 func (f *FanIn) Add(src net.Listener) {
 	f.mu.Lock()
-	f.sources[src] = struct{}{}
-	f.mu.Unlock()
-	select {
-	case <-f.done:
+	if f.closed {
+		f.mu.Unlock()
 		_ = src.Close()
 		return
-	default:
 	}
+	f.sources[src] = struct{}{}
+	f.mu.Unlock()
 	go f.pump(src, false)
 }
 
@@ -87,17 +87,23 @@ func (f *FanIn) Accept() (net.Conn, error) {
 }
 
 // Close closes the base listener and every source.
+//
+// In that order, and only then does Accept answer closed: a caller that sees
+// the fan-in closed can rely on no source still accepting. (Closing done
+// first let Accept report closed while a source was still listening.)
 func (f *FanIn) Close() error {
 	var err error
 	f.once.Do(func() {
-		close(f.done)
-		err = f.base.Close()
 		f.mu.Lock()
-		for src := range f.sources {
-			_ = src.Close()
-		}
+		f.closed = true
+		srcs := f.sources
 		f.sources = map[net.Listener]struct{}{}
 		f.mu.Unlock()
+		err = f.base.Close()
+		for src := range srcs {
+			_ = src.Close()
+		}
+		close(f.done)
 	})
 	return err
 }
