@@ -32,6 +32,7 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.bootstrap":          threeStrings("App.bootstrap", h.bootstrap),
 		"App.signInDeclined":     none(h.signInDeclined),
 		"App.explorerActivated":  oneIndex("App.explorerActivated", h.explorerActivated),
+		"App.explorerMoved":      oneIndex("App.explorerMoved", h.explorerMoved),
 		"App.queryEdited":        none(h.queryEdited),
 		"App.noteOpenFilter":     oneString("App.noteOpenFilter", "a note filter", h.filterNoteOpen),
 		"App.noteOpenSelect":     oneNumber("App.noteOpenSelect", "a note row", h.selectNoteOpen),
@@ -191,7 +192,7 @@ func (h *Host) hints() string {
 		"q         quit (asks first)",
 		"Ctrl+Q    quit (asks first)",
 		"?         these keys",
-		"/         find in the focused query or results pane",
+		"/         find in the focused explorer, query or results pane",
 		"n / N     next / previous match after searching",
 		"h / l     explorer: collapse / expand; parent / first child",
 	}, "\n")

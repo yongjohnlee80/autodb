@@ -309,6 +309,14 @@ func (h *Host) ViewSubscriberCounts() (explorer, results int) {
 	return v.explorer, v.results
 }
 
+// ExplorerCursor is the explorer row under the cursor as the host last heard
+// it (App.explorerMoved), as its key path from the top.
+func (h *Host) ExplorerCursor() []string {
+	got := make(chan []string, 1)
+	h.p.Post(func() { got <- append([]string(nil), h.explorerAt...) })
+	return <-got
+}
+
 func (h *Host) SearchCursor(target string) (int, int) {
 	type pos struct{ row, col int }
 	got := make(chan pos, 1)

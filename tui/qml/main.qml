@@ -171,6 +171,7 @@ Window {
                            model.kind === "note" ? Theme.syntax.string : palette.text
                 }
                 onActivated: App.explorerActivated(index)
+                onCurrentIndexChanged: App.explorerMoved(index)
             }
         }
 

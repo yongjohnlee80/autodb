@@ -105,6 +105,52 @@ func TestResultsSearchTargetsTheVisibleTableThenJSON(t *testing.T) {
 	}
 }
 
+// / in the explorer searches every row the host has loaded, closed folders
+// included: a hit under a closed folder opens it and takes the cursor there,
+// n goes on from the cursor, and a miss says so.
+func TestExplorerSearchRevealsALoadedRowUnderAClosedFolder(t *testing.T) {
+	h, s := signedIn(t)
+	s.WaitForText(t, "main")
+	s.Keys(t, key(' '), key('e'), enter())
+	s.WaitForText(t, "▸ connections")
+	s.Keys(t, key('j'), enter())
+	s.WaitForText(t, "bravo")
+	s.Keys(t, key('j'), enter())
+	s.WaitFor(t, "schema", func(string) bool { return rowUnder(s, "bravo sqlite", "main") })
+	s.Keys(t, key('j'), enter())
+	s.WaitForText(t, "▸ tables")
+	s.Keys(t, key('j'), enter())
+	s.WaitFor(t, "table", func(string) bool { return rowUnder(s, "tables", "items") })
+	// Back to the top and close the workspace: items is loaded but not shown.
+	s.Keys(t, key('g'), key('h'))
+	s.WaitFor(t, "the workspace closed", func(sc string) bool { return !strings.Contains(sc, "items") })
+
+	s.Keys(t, key('/'))
+	s.WaitForText(t, "┌ find in explorer ")
+	s.Keys(t, decltest.Type("ITEMS")...)
+	s.Keys(t, enter())
+	s.WaitForText(t, "ITEMS: match 1/1 in the explorer")
+	s.WaitFor(t, "items revealed and under the cursor", func(sc string) bool {
+		at := h.ExplorerCursor()
+		return strings.Contains(sc, "items") && len(at) > 0 && strings.HasPrefix(at[len(at)-1], "tbl:") &&
+			h.PaneWithFocus() == "explorerTree"
+	})
+	// n wraps to the only match; the cursor stays on it.
+	s.Keys(t, key('n'))
+	s.WaitForText(t, "ITEMS: match 1/1 in the explorer")
+	// A miss is reported, and the cursor does not move.
+	before := h.ExplorerCursor()
+	s.Keys(t, key('/'))
+	s.WaitForText(t, "┌ find in explorer ")
+	s.Keys(t, decltest.Ctrl('u'))
+	s.Keys(t, decltest.Type("no-such-row")...)
+	s.Keys(t, enter())
+	s.WaitForText(t, "no match for no-such-row in the explorer")
+	if after := h.ExplorerCursor(); strings.Join(after, "/") != strings.Join(before, "/") {
+		t.Fatalf("a miss moved the cursor from %v to %v", before, after)
+	}
+}
+
 func TestSearchDialogClosesWhenItsWorkspaceIsRetired(t *testing.T) {
 	h, s := signedIn(t)
 	s.Keys(t, key('/'))

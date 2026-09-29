@@ -63,6 +63,7 @@ type Host struct {
 	search         searchState
 	searchPending  string
 	searchQueryRev uint64
+	explorerAt     []string // the explorer row under the cursor, as its key path from the top: where "next" starts
 	active         activeConn
 	explorer       *explorer
 	results        *results
