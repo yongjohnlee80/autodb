@@ -117,7 +117,18 @@ func remoteFixtureOn(t *testing.T, ln *twoSurfaces, opts ...rpc.Option) (*fixtur
 	rem := dialAt(t, ln.remote.Addr().String())
 	local.hello()
 	rem.hello()
+	f.remoteAddr = ln.remote.Addr().String()
 	return f, local, rem
+}
+
+// freshRemote is a new remote connection, past its greeting: a connection
+// that violated the surface once is done, so each refused method is tried on
+// its own.
+func (f *fixture) freshRemote(t *testing.T) *client {
+	t.Helper()
+	c := dialAt(t, f.remoteAddr)
+	c.hello()
+	return c
 }
 
 // Before it has signed in, a remote connection reaches only the greeting: every
@@ -134,9 +145,10 @@ func TestARemoteConnectionReachesOnlyTheGreetingBeforeSigningIn(t *testing.T) {
 		{"auth.whoami", []any{f.rootTok}},
 		{"conn.list", []any{f.rootTok}},
 	} {
-		errVal, _ := rem.call(call.method, call.params...)
+		errVal, _ := f.freshRemote(t).call(call.method, call.params...)
 		mustErr(t, errVal, rpc.CodeRemoteLoginRequired)
 	}
+	_ = rem
 	if errVal, _ := local.call("auth.whoami", f.rootTok); errVal != nil {
 		t.Fatalf("the local connection on the same server was refused: %#v", errVal)
 	}
@@ -154,9 +166,10 @@ func TestTheRemoteSurfaceRefusesRestartAndBootstrap(t *testing.T) {
 		{"sys.restart_if_idle", []any{f.rootTok}},
 		{"auth.bootstrap", []any{"eve", "a long enough passphrase"}},
 	} {
-		errVal, _ := rem.call(call.method, call.params...)
+		errVal, _ := f.freshRemote(t).call(call.method, call.params...)
 		mustErr(t, errVal, rpc.CodeRemoteRefused)
 	}
+	_ = rem
 	// The local surface still reaches the handler: bootstrap on a store that
 	// already has users is refused by the handler, not by the gate.
 	errVal, _ := local.call("auth.bootstrap", "eve", "a long enough passphrase")

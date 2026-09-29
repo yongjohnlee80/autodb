@@ -12,6 +12,7 @@ package remote
 
 import (
 	"net"
+	"sync/atomic"
 )
 
 // Conn is a connection the remote listener accepted. Only this package's
@@ -44,7 +45,21 @@ type Peer struct {
 	// hangup ends the connection's SSH session; set by the listener that
 	// accepted it.
 	hangup func()
+	// violated is claimed by the first protocol violation reported for the
+	// connection, by the listener or the RPC server: a connection is counted
+	// once, whatever it goes on to send.
+	violated atomic.Bool
 }
+
+// ClaimViolation reports whether this is the connection's first protocol
+// violation: true once, false after. The caller that gets true counts it. A
+// nil Peer never claims.
+func (p *Peer) ClaimViolation() bool {
+	return p != nil && p.violated.CompareAndSwap(false, true)
+}
+
+// Violated reports whether a protocol violation was already claimed.
+func (p *Peer) Violated() bool { return p != nil && p.violated.Load() }
 
 // Hangup ends the connection's SSH session, as the RPC server does after
 // refusing a remote connection's protocol violation. A Peer the listener did
