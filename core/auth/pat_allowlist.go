@@ -172,7 +172,7 @@ func subsetOf(small, big []string) bool {
 // approved; a preview is a proposal, never a permission. Returning an empty
 // set means the operation does not widen and needs no confirmation.
 func (s *Service) PATAllowlistAdditions(ctx context.Context, token string, cidrs []string) ([]string, error) {
-	ident, _, err := s.resolveToken(ctx, token)
+	ident, _, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return nil, err
 	}

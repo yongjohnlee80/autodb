@@ -414,7 +414,7 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 		// Ownership grant: token-proven actor, creator relationship verified
 		// against the inserted row, role capped at editor (found in
 		// review, plus the auto-grant policy ruling).
-		creator, terr := e.auth.GrantCreatorTx(tx, token, id)
+		creator, terr := e.auth.GrantCreatorTx(tx, auth.CallerFrom(ctx), token, id)
 		if terr != nil {
 			return fmt.Errorf("exec: granting creator ownership: %w", terr)
 		}

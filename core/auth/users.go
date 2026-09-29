@@ -255,7 +255,7 @@ func (s *Service) RemoveUser(ctx context.Context, token string, userID int64, ip
 // the new KEK. Every OTHER session of the user is revoked;
 // the calling session stays live.
 func (s *Service) ChangePassphrase(ctx context.Context, token, oldPass, newPass, ip string) error {
-	actor, sess, err := s.resolveToken(ctx, token)
+	actor, sess, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return err
 	}
@@ -289,7 +289,7 @@ func (s *Service) ChangePassphrase(ctx context.Context, token, oldPass, newPass,
 			// and this commit must not be silently overwritten.
 			// resolveTokenTx also proves the session is still
 			// live and the account still enabled.
-			cur, terr := s.resolveTokenTx(tx, token)
+			cur, terr := s.resolveTokenTx(tx, CallerFrom(ctx), token)
 			if terr != nil {
 				return terr
 			}

@@ -35,7 +35,7 @@ const maxUserIPs = 32
 // probing another user's rows learns only ErrDenied, never whether the
 // user exists.
 func (s *Service) requireSelfOrAdmin(ctx context.Context, token string, userID int64) (Identity, error) {
-	ident, _, err := s.resolveToken(ctx, token)
+	ident, _, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return Identity{}, err
 	}

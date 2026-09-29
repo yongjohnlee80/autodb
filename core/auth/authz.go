@@ -79,7 +79,7 @@ func requiredRank(a Action) int {
 //	               ▼         ▼
 //	             PERMIT    DENY
 func (s *Service) Authorize(ctx context.Context, token string, connID int64, action Action) (Identity, error) {
-	ident, _, err := s.resolveToken(ctx, token)
+	ident, _, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -190,17 +190,17 @@ func (s *Service) RemoveGrant(ctx context.Context, token string, userID, connID 
 // GrantCreatorTx writes the ownership grant a connection creator receives,
 // inside the creation transaction. It is NOT general grant management:
 //
-//   - the actor is proven by token, re-resolved inside this call (no
-//     caller-supplied identity);
+//   - the actor is proven by token, re-resolved inside this call for
+//     caller (no caller-supplied identity);
 //   - the creator relationship is verified against the row just inserted
 //     (connections.created_by must be the token's user);
 //   - the granted role is capped at editor — min(global role, editor) — so
 //     creation can never mint connection-admin rights; arbitrary grant
 //     management stays admin-only via AddGrant.
-func (s *Service) GrantCreatorTx(tx *dao.Transaction, token string, connID int64) (Identity, error) {
+func (s *Service) GrantCreatorTx(tx *dao.Transaction, caller Caller, token string, connID int64) (Identity, error) {
 	// Resolve on the transaction: the caller already holds it, and pool
 	// access here would deadlock single-connection stores.
-	actor, err := s.resolveTokenTx(tx, token)
+	actor, err := s.resolveTokenTx(tx, caller, token)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -252,7 +252,7 @@ func (s *Service) GrantCreatorTx(tx *dao.Transaction, token string, connID int64
 // with StillAuthorized. The id is not a credential — it names a row, and the
 // row is what carries revocation and expiry.
 func (s *Service) SessionRef(ctx context.Context, token string) (Identity, int64, error) {
-	ident, sess, err := s.resolveToken(ctx, token)
+	ident, sess, err := s.resolveToken(ctx, CallerFrom(ctx), token)
 	if err != nil {
 		return Identity{}, 0, err
 	}

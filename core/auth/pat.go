@@ -263,7 +263,7 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 		// a stale admin role, so it could mint an ADMIN-ONLY credential for an
 		// account that no longer had the role. Re-checking and then not using
 		// the answer is worse than not checking -- it reads as a guard.
-		fresh, terr := s.resolveTokenTx(tx, token)
+		fresh, terr := s.resolveTokenTx(tx, CallerFrom(ctx), token)
 		if terr != nil {
 			return terr
 		}
