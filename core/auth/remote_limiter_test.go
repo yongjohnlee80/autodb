@@ -248,3 +248,99 @@ func TestAPendingDenialSurvivesACrash(t *testing.T) {
 		t.Fatalf("the spill file still holds %q after the replay", data)
 	}
 }
+
+// An append that fails after writing half a line leaves a torn
+// line; the next denial must not be appended behind it, or a restart that
+// cannot read past the tear loses it. After the failed append the spill file
+// is rewritten whole, so a restart finds BOTH pending denials.
+func TestATornSpillAppendDoesNotHideTheNextDenial(t *testing.T) {
+	s, store, _ := newSvc(t)
+	fail := failDenials(s)
+	spill := filepath.Join(t.TempDir(), "spill")
+	l := newLimiter(t, s, spill)
+	fail.Store(true) // both stay pending
+	var tornOnce atomic.Bool
+	l.hookSpillWrite = func(b []byte) ([]byte, error) {
+		if tornOnce.CompareAndSwap(false, true) {
+			return b[:len(b)/2], errors.New("injected: the disk filled mid-line")
+		}
+		return b, nil
+	}
+	_ = l.Deny("203.0.113.7", DenialKeyNotRegistered, "", 0) // torn
+	deny(t, l, "203.0.113.7")                                // must survive
+	l.Close()
+
+	fail.Store(false)
+	again := newLimiter(t, s, spill)
+	deadline := time.Now().Add(3 * time.Second)
+	for again.Paused() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if b := blockOf(t, store, "203.0.113.7/32"); b.ConsecutiveFailures != 2 {
+		t.Fatalf("after the restart the prefix counts %d, want both pending denials (2)", b.ConsecutiveFailures)
+	}
+}
+
+// A spill file with a torn line in the middle still yields the complete
+// records after it.
+func TestTheSpillReaderSkipsATornLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spill")
+	body := `{"event_id":"a","prefix":"p","at":1}` + "\n" + `{"event_id":"b","pre` + "\n" + `{"event_id":"c","prefix":"p","at":3}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readSpill(path)
+	if err != nil || len(got) != 2 || got[0].EventID != "a" || got[1].EventID != "c" {
+		t.Fatalf("readSpill: %+v, %v; want a and c", got, err)
+	}
+}
+
+// A denial that fails to be recorded WHILE Admit reads the
+// blocks pauses admission, and that Admit must not answer yes.
+func TestAdmitRechecksThePauseAfterItsRead(t *testing.T) {
+	s, _, _ := newSvc(t)
+	fail := failDenials(s)
+	l := newLimiter(t, s, filepath.Join(t.TempDir(), "spill"))
+	fail.Store(true)
+	l.hookAdmitRead = func() {
+		l.hookAdmitRead = nil
+		_ = l.Deny("198.51.100.9", DenialLoginFailed, "", 0) // pauses
+	}
+	if ok, why := l.Admit(context.Background(), "203.0.113.7"); ok {
+		t.Fatalf("Admit answered yes although admission paused during its read (%q)", why)
+	}
+}
+
+// A sign-in must not reset the count ahead of a denial that came
+// before it. Two denials are counted; the third is queued but its own write is
+// held back; the sign-in then arrives. The third is counted first (and blocks,
+// three in a row), and only then is the count reset; the block stands.
+func TestASuccessCannotResetAheadOfAnEarlierDenial(t *testing.T) {
+	s, store, _ := newSvc(t)
+	l := newLimiter(t, s, filepath.Join(t.TempDir(), "spill"))
+	deny(t, l, "203.0.113.7")
+	deny(t, l, "203.0.113.7")
+	queued, release := make(chan struct{}), make(chan struct{})
+	l.hookBeforeApply = func(Denial) {
+		close(queued)
+		<-release
+	}
+	done := make(chan struct{})
+	go func() { deny(t, l, "203.0.113.7"); close(done) }()
+	<-queued
+	if err := l.Succeeded(context.Background(), "203.0.113.7"); err != nil {
+		t.Fatalf("Succeeded: %v", err)
+	}
+	close(release)
+	<-done
+	b := blockOf(t, store, "203.0.113.7/32")
+	if b.BlockedUntil == 0 {
+		t.Fatalf("%+v: the third denial was not counted before the reset, so three in a row did not block", b)
+	}
+	if b.ConsecutiveFailures != 0 {
+		t.Fatalf("%+v: the sign-in's reset was lost or came first", b)
+	}
+	if n := auditCount(t, store, "remote_access_denied"); n != 3 {
+		t.Fatalf("remote_access_denied rows %d, want 3: the held-back write counted twice or not at all", n)
+	}
+}
