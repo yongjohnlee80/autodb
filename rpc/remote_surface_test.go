@@ -2,12 +2,20 @@ package rpc_test
 
 import (
 	"bufio"
+	"context"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/config"
+	"github.com/yongjohnlee80/autodb/core/engine"
+	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/core/remote"
 	"github.com/yongjohnlee80/autodb/rpc"
+	"github.com/yongjohnlee80/autodb/sql/deployments"
 )
 
 // remoteConn is a connection the test's "remote listener" accepted: a plain
@@ -30,6 +38,14 @@ type twoSurfaces struct {
 }
 
 func newTwoSurfaces(t *testing.T) *twoSurfaces {
+	return newTwoSurfacesWith(t, func(c net.Conn) *remote.Peer {
+		return &remote.Peer{ConnID: "remote-1", SSHKeyID: 1, UserID: 1, Addr: c.RemoteAddr()}
+	})
+}
+
+// newTwoSurfacesWith is newTwoSurfaces whose remote connections carry the
+// Peer peerOf returns, nil included.
+func newTwoSurfacesWith(t *testing.T, peerOf func(net.Conn) *remote.Peer) *twoSurfaces {
 	t.Helper()
 	local, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -55,9 +71,7 @@ func newTwoSurfaces(t *testing.T) *twoSurfaces {
 		}
 	}
 	go pump(local, func(c net.Conn) net.Conn { return c })
-	go pump(rem, func(c net.Conn) net.Conn {
-		return remoteConn{Conn: c, peer: &remote.Peer{ConnID: "remote-1", SSHKeyID: 1, UserID: 1, Addr: c.RemoteAddr()}}
-	})
+	go pump(rem, func(c net.Conn) net.Conn { return remoteConn{Conn: c, peer: peerOf(c)} })
 	return l
 }
 
@@ -93,7 +107,11 @@ func dialAt(t *testing.T, addr string) *client {
 
 func remoteFixture(t *testing.T, opts ...rpc.Option) (*fixture, *client, *client) {
 	t.Helper()
-	ln := newTwoSurfaces(t)
+	return remoteFixtureOn(t, newTwoSurfaces(t), opts...)
+}
+
+func remoteFixtureOn(t *testing.T, ln *twoSurfaces, opts ...rpc.Option) (*fixture, *client, *client) {
+	t.Helper()
 	f := newFixtureOn(t, ln, nil, opts...)
 	local := dialAt(t, ln.local.Addr().String())
 	rem := dialAt(t, ln.remote.Addr().String())
@@ -170,5 +188,91 @@ func TestARemoteConnectionIsNeverOfferedBootstrap(t *testing.T) {
 	errVal, need := rem.call("auth.needs_bootstrap")
 	if errVal != nil || need != false {
 		t.Fatalf("remote auth.needs_bootstrap: %#v, %#v; want false", errVal, need)
+	}
+}
+
+// A remote connection whose listener supplied no Peer is still remote: the
+// remote restrictions apply and nothing is disclosed. Treating "no facts" as
+// "local" would fail open.
+func TestARemoteConnectionWithoutAPeerIsStillRemote(t *testing.T) {
+	f, _, rem := remoteFixtureOn(t, newTwoSurfacesWith(t, func(net.Conn) *remote.Peer { return nil }),
+		rpc.WithNotesDir("/var/lib/autodb/notes"))
+	errVal, _ := rem.call("auth.whoami", f.rootTok)
+	mustErr(t, errVal, rpc.CodeRemoteLoginRequired)
+	errVal, _ = rem.call("sys.shutdown", f.rootTok)
+	mustErr(t, errVal, rpc.CodeRemoteRefused)
+	_, res := rem.call("sys.hello", map[string]any{"protocol": rpc.Protocol})
+	m, _ := res.(map[string]any)
+	for _, k := range []string{"notes_dir", "addr"} {
+		if _, has := m[k]; has {
+			t.Errorf("a Peer-less remote connection was given %s: %#v", k, m[k])
+		}
+	}
+}
+
+// The greeting gives a remote connection no path on this host: not the notes
+// root, not the local listen address, and not the store backup the start
+// took (non-empty here: the start backed an existing store up before applying
+// a pending script). A local connection gets all three.
+func TestTheRemoteGreetingCarriesNoHostPaths(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Meta{Engine: "sqlite", Path: filepath.Join(t.TempDir(), "meta.db")}
+	first, err := meta.Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, err := deployments.Updates(engine.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := meta.RevertScript(ctx, first, updates[len(updates)-1].Number); err != nil {
+		t.Fatal(err)
+	}
+	_ = first.Close()
+	store, err := meta.Open(ctx, cfg) // backs the store up, then applies the script
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.StartReport().Backup == "" {
+		t.Fatal("setup: the start took no backup, so this cell would prove nothing")
+	}
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := exec.New(store, svc)
+	t.Cleanup(func() { _ = eng.Close() })
+	ln := newTwoSurfaces(t)
+	srv := rpc.New(svc, eng, config.Server{}, "t", rpc.WithListener(ln), rpc.WithNotesDir("/var/lib/autodb/notes"))
+	runCtx, cancel := context.WithCancel(ctx)
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Run(runCtx) }()
+	t.Cleanup(func() { cancel(); <-errc })
+
+	hello := func(addr string) map[string]any {
+		c := dialAt(t, addr)
+		errVal, res := c.call("sys.hello", map[string]any{"protocol": rpc.Protocol})
+		if errVal != nil {
+			t.Fatalf("hello: %#v", errVal)
+		}
+		m, _ := res.(map[string]any)
+		return m
+	}
+	local, rem := hello(ln.local.Addr().String()), hello(ln.remote.Addr().String())
+	if sch, _ := local["schema"].(map[string]any); sch["backup"] == "" || local["notes_dir"] == nil || local["addr"] == nil {
+		t.Fatalf("positive control: the local greeting lacks a host path: %#v", local)
+	}
+	for _, k := range []string{"notes_dir", "addr"} {
+		if _, has := rem[k]; has {
+			t.Errorf("the remote greeting carries %s: %#v", k, rem[k])
+		}
+	}
+	sch, _ := rem["schema"].(map[string]any)
+	if _, has := sch["backup"]; has {
+		t.Errorf("the remote greeting carries the backup path: %#v", sch["backup"])
+	}
+	if _, has := sch["applied_at_start"]; !has {
+		t.Errorf("the remote greeting lost applied_at_start, which names scripts, not paths: %#v", sch)
 	}
 }

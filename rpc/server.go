@@ -372,24 +372,34 @@ func (s *Server) Addr() string { return s.rpc.Addr() }
 // wiring is assertable.
 func (s *Server) DisclosesDetail() bool { return s.discloseDetail }
 
-// attachSurface is the connection's surface, fixed when it is accepted: the
-// remote listener's Peer for one of its connections, nil for every local one
-// (unix socket, TCP, the web gateway's). The client cannot choose it.
+// remoteSurface is what attachSurface attaches to a remote connection. A
+// connection is remote because the remote listener accepted it (it is a
+// remote.Conn), not because its Peer is present: a remote.Conn that carries
+// no Peer is still remote, with nothing proven about it, so every remote
+// restriction applies to it and nothing is disclosed. Keying "remote" on the
+// Peer being non-nil would turn such a connection LOCAL, failing open.
+type remoteSurface struct{ peer *remote.Peer }
+
+// attachSurface is the connection's surface, fixed when it is accepted: a
+// remoteSurface for every connection the remote listener accepted, nil for
+// every local one (unix socket, TCP, the web gateway's). The client cannot
+// choose it.
 func attachSurface(nc net.Conn) any {
 	if rc, ok := nc.(remote.Conn); ok {
-		return rc.RemotePeer()
+		return remoteSurface{peer: rc.RemotePeer()}
 	}
 	return nil
 }
 
 // remotePeer reports whether sess is a remote connection, and what its SSH
-// handshake proved.
+// handshake proved: the Peer is nil for a remote connection whose listener
+// supplied none, and ok is true all the same.
 func remotePeer(sess *golibrpc.Session) (*remote.Peer, bool) {
 	if sess == nil {
 		return nil, false
 	}
-	p, ok := sess.Attachment().(*remote.Peer)
-	return p, ok && p != nil
+	rs, ok := sess.Attachment().(remoteSurface)
+	return rs.peer, ok
 }
 
 // remoteRefused are the methods the remote surface never offers: restarting
@@ -469,10 +479,18 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 	}
 	// Notes are client-side files under <notes_dir>/ws-<id>/; the server is
 	// the authority on the path (config may override the default), so it
-	// reports it here for the frontends to list. Not to a remote connection:
-	// it is a path on this host, which a remote client can neither use nor
-	// needs to know.
-	if _, ok := remotePeer(req.Session); !ok {
+	// reports it here for the frontends to list.
+	//
+	// A remote connection is given no path on this host: not the notes root,
+	// not the address the local surface listens on (a socket path on a unix
+	// endpoint), not the file the start backed the store up to. None is any
+	// use to a remote client, and each says where things live here.
+	if _, remote := remotePeer(req.Session); remote {
+		delete(reply, "addr")
+		if sch, ok := reply["schema"].(map[string]any); ok {
+			delete(sch, "backup")
+		}
+	} else {
 		reply["notes_dir"] = s.notesDir
 	}
 	if len(req.Params) > 1 {
