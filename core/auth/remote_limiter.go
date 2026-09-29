@@ -90,8 +90,22 @@ type RemoteLimiter struct {
 	pending []Denial // not yet in the store, oldest first; mirrors the spill file
 	paused  bool
 	probing bool
-	closed  chan struct{}
-	wg      sync.WaitGroup
+	// spillDirty is set when an append to the spill file failed, and may have
+	// left a torn line: the next write replaces the whole file from pending
+	// rather than appending behind it.
+	spillDirty bool
+	closed     chan struct{}
+	wg         sync.WaitGroup
+
+	// applyMu orders every store write that moves a prefix's count, denials
+	// and resets alike, so a sign-in cannot reset a count before a denial
+	// that came first has been counted.
+	applyMu sync.Mutex
+
+	// Test seams; nil in use.
+	hookAdmitRead   func()                       // between Admit's pause check and its store read
+	hookBeforeApply func(Denial)                 // in Deny, after queueing, before its store write
+	hookSpillWrite  func([]byte) ([]byte, error) // what an append writes, and whether it fails
 }
 
 // PrefixOf is the prefix an address is counted and blocked under: the IPv4
@@ -132,6 +146,10 @@ func (s *Service) NewRemoteLimiter(cfg LimiterConfig) (*RemoteLimiter, error) {
 	if err := os.MkdirAll(filepath.Dir(cfg.SpillPath), 0o700); err != nil {
 		return nil, fmt.Errorf("auth: remote limiter: spill directory: %w", err)
 	}
+	// Its own entry in ITS parent, when MkdirAll just made it.
+	if err := syncDir(filepath.Dir(filepath.Dir(cfg.SpillPath))); err != nil {
+		return nil, err
+	}
 	pending, err := readSpill(cfg.SpillPath)
 	if err != nil {
 		return nil, err
@@ -167,7 +185,15 @@ func (l *RemoteLimiter) Admit(ctx context.Context, ip string) (bool, string) {
 	if paused {
 		return false, "remote admission is paused: denials cannot be recorded"
 	}
+	if l.hookAdmitRead != nil {
+		l.hookAdmitRead()
+	}
 	block, err := l.svc.store.RemoteIPBlocks.OnCtx(ctx).With(meta.BlockPrefix, PrefixOf(ip)).Get()
+	// The pause is checked again at the decision: a denial that failed to be
+	// recorded while the read ran must not be followed by an admission.
+	if l.Paused() {
+		return false, "remote admission is paused: denials cannot be recorded"
+	}
 	if errors.Is(err, dao.ErrNoRows) {
 		return true, ""
 	}
@@ -196,7 +222,7 @@ func (l *RemoteLimiter) Deny(ip string, reason DenialReason, offeredKeyFP string
 
 	l.mu.Lock()
 	l.pending = append(l.pending, d)
-	spillErr := appendSpill(l.cfg.SpillPath, d)
+	spillErr := l.spillAppend(d)
 	if spillErr != nil {
 		// The memory queue still holds it and admission pauses below: no
 		// further guess can arrive while it is in doubt.
@@ -210,9 +236,15 @@ func (l *RemoteLimiter) Deny(ip string, reason DenialReason, offeredKeyFP string
 		l.startProbe()
 		return spillErr
 	}
+	if l.hookBeforeApply != nil {
+		l.hookBeforeApply(d)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := l.apply(ctx, d); err != nil {
+	l.applyMu.Lock()
+	err := l.apply(ctx, d)
+	l.applyMu.Unlock()
+	if err != nil {
 		l.mu.Lock()
 		l.paused = true
 		l.mu.Unlock()
@@ -227,8 +259,35 @@ func (l *RemoteLimiter) Deny(ip string, reason DenialReason, offeredKeyFP string
 
 // Succeeded resets ip's prefix count: a sign-in from it ends the run of
 // consecutive denials. A block in force is not lifted by it.
+//
+// In ORDER with the denials: every denial of the prefix queued before this
+// call is counted first, so a sign-in cannot reset a count ahead of a denial
+// that came before it. If one of them cannot be written, the count is left
+// as it is and the error returned; the pause that follows replays it.
 func (l *RemoteLimiter) Succeeded(ctx context.Context, ip string) error {
 	prefix := PrefixOf(ip)
+	l.applyMu.Lock()
+	defer l.applyMu.Unlock()
+	l.mu.Lock()
+	var earlier []Denial
+	for _, d := range l.pending {
+		if d.Prefix == prefix {
+			earlier = append(earlier, d)
+		}
+	}
+	l.mu.Unlock()
+	for _, d := range earlier {
+		if err := l.apply(ctx, d); err != nil {
+			l.mu.Lock()
+			l.paused = true
+			l.mu.Unlock()
+			l.startProbe()
+			return err
+		}
+		l.mu.Lock()
+		l.drop(d.EventID)
+		l.mu.Unlock()
+	}
 	return l.svc.store.RemoteIPBlocks.OnCtx(ctx).With(meta.BlockPrefix, prefix).
 		Set(meta.BlockFailures, int64(0)).Update()
 }
@@ -364,6 +423,7 @@ func (l *RemoteLimiter) replay() bool {
 				l.mu.Unlock()
 				return false
 			}
+			l.spillDirty = false
 			l.paused = false
 			l.probing = false
 			l.mu.Unlock()
@@ -372,7 +432,9 @@ func (l *RemoteLimiter) replay() bool {
 		next := l.pending[0]
 		l.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		l.applyMu.Lock()
 		err := l.apply(ctx, next)
+		l.applyMu.Unlock()
 		cancel()
 		if err != nil {
 			return false
@@ -393,7 +455,28 @@ func (l *RemoteLimiter) drop(eventID string) {
 			break
 		}
 	}
-	_ = writeSpill(l.cfg.SpillPath, l.pending)
+	if writeSpill(l.cfg.SpillPath, l.pending) == nil {
+		l.spillDirty = false
+	}
+}
+
+// spillAppend makes d durable in the spill file. Normally an append; after an
+// append failed (which may have left a torn line) a full rewrite from pending,
+// which d is already in, so a later record never sits behind a torn one. Caller
+// holds mu.
+func (l *RemoteLimiter) spillAppend(d Denial) error {
+	if l.spillDirty {
+		if err := writeSpill(l.cfg.SpillPath, l.pending); err != nil {
+			return err
+		}
+		l.spillDirty = false
+		return nil
+	}
+	if err := appendSpill(l.cfg.SpillPath, d, l.hookSpillWrite); err != nil {
+		l.spillDirty = true
+		return err
+	}
+	return nil
 }
 
 // --- the spill file: JSON lines, 0600 ----------------------------------------
@@ -414,10 +497,11 @@ func readSpill(path string) ([]Denial, error) {
 			continue
 		}
 		var d Denial
-		if err := json.Unmarshal(sc.Bytes(), &d); err != nil {
-			// A torn last line from a crash mid-append: that denial was not
-			// yet durable, so it was never acknowledged. Stop at it.
-			break
+		if err := json.Unmarshal(sc.Bytes(), &d); err != nil || d.EventID == "" {
+			// A torn line: a crash mid-append, whose denial was never
+			// acknowledged. Skipped, not stopped at: the writer never appends
+			// behind one, but a later complete record must survive regardless.
+			continue
 		}
 		out = append(out, d)
 	}
@@ -427,24 +511,56 @@ func readSpill(path string) ([]Denial, error) {
 	return out, nil
 }
 
-func appendSpill(path string, d Denial) error {
+func appendSpill(path string, d Denial, hook func([]byte) ([]byte, error)) error {
 	line, err := json.Marshal(d)
 	if err != nil {
 		return err
 	}
+	_, statErr := os.Stat(path)
+	created := errors.Is(statErr, os.ErrNotExist)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("auth: remote limiter: spill: %w", err)
 	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
+	data := append(line, '\n')
+	var hookErr error
+	if hook != nil {
+		data, hookErr = hook(data)
+	}
+	if _, err := f.Write(data); err != nil {
 		f.Close()
 		return fmt.Errorf("auth: remote limiter: spill: %w", err)
+	}
+	if hookErr != nil {
+		f.Close()
+		return fmt.Errorf("auth: remote limiter: spill: %w", hookErr)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
 		return fmt.Errorf("auth: remote limiter: spill: %w", err)
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// A new file's directory entry is durable only once its directory is.
+	if created {
+		return syncDir(filepath.Dir(path))
+	}
+	return nil
+}
+
+// syncDir fsyncs a directory, so an entry created or renamed in it survives a
+// power loss.
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("auth: remote limiter: spill directory: %w", err)
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("auth: remote limiter: spill directory: %w", err)
+	}
+	return nil
 }
 
 // writeSpill replaces the spill file with ds, atomically: temp file, fsync,
@@ -475,5 +591,9 @@ func writeSpill(path string, ds []Denial) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	// The rename is durable only once the directory is.
+	return syncDir(filepath.Dir(path))
 }
