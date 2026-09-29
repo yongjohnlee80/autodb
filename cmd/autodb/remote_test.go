@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,9 @@ type remoteRig struct {
 	fan   *remote.FanIn
 	key   ssh.Signer
 	eng   *coreexec.Engine
+	// ctl is the Remote Control the rig's control() started, which the RPC
+	// server ends connections through.
+	ctl atomic.Pointer[remotectl.Control]
 }
 
 // newRemoteRig is a store with root, root's SSH key registered, and an RPC
@@ -87,9 +91,16 @@ func newRemoteRigAllowing(t *testing.T, allowlist string) *remoteRig {
 		t.Fatal(err)
 	}
 	fan := remote.NewFanIn(local)
+	rig := &remoteRig{}
 	srv := rpc.New(svc, eng, config.Server{}, "t", rpc.WithListener(fan), rpc.WithNotesDir("/srv/notes"),
 		rpc.WithRemoteDenials(func(ip, reason string, userID int64) {
 			remotectl.Deny(lim, func(string) {}, ip, reason, "", userID)
+		}),
+		rpc.WithRemoteClose(func(match func(*remote.Peer) bool) int {
+			if ctl := rig.ctl.Load(); ctl != nil {
+				return ctl.Registry().Close(match)
+			}
+			return 0
 		}),
 		rpc.WithRemoteSignIns(func(ip string) {
 			if err := lim.Succeeded(context.Background(), ip); err != nil {
@@ -101,7 +112,8 @@ func newRemoteRigAllowing(t *testing.T, allowlist string) *remoteRig {
 	go func() { errc <- srv.Run(runCtx) }()
 	t.Cleanup(func() { cancel(); <-errc })
 
-	return &remoteRig{cfg: cfg, store: store, svc: svc, lim: lim, fan: fan, key: key, eng: eng}
+	rig.cfg, rig.store, rig.svc, rig.lim, rig.fan, rig.key, rig.eng = cfg, store, svc, lim, fan, key, eng
+	return rig
 }
 
 // control is Remote Control over the rig, with what it logs collected.
@@ -118,6 +130,7 @@ func (r *remoteRig) control(t *testing.T, lim *auth.RemoteLimiter, tweak func(*r
 	if err := ctl.Start(t.Context()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	r.ctl.Store(ctl)
 	t.Cleanup(ctl.Close)
 	return ctl, func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(logged) }
 }

@@ -44,7 +44,7 @@ func DenialFor(err error) (DenialReason, bool) {
 		return DenialDeviceRevoked, true
 	case errors.Is(err, ErrRemoteUserMismatch):
 		return DenialLoginUserMismatch, true
-	case errors.Is(err, ErrRemoteNotAttested):
+	case errors.Is(err, ErrRemoteNotAttested), errors.Is(err, ErrRemoteTokenForeign):
 		return DenialProtocolViolation, true
 	case errors.Is(err, ErrBadCredentials), errors.Is(err, ErrDenied), errors.Is(err, ErrNoKeyslot):
 		return DenialLoginFailed, true

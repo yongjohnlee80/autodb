@@ -711,7 +711,9 @@ func runServe(configPath string) error {
 			}
 		}))
 	}
-	rpcOpts = append(rpcOpts, rpc.WithReconnectGrace(cfg.Remote.Grace()))
+	rpcOpts = append(rpcOpts, rpc.WithReconnectGrace(cfg.Remote.Grace()),
+		rpc.WithDeviceKeyMaxAge(cfg.Remote.DeviceKeyAge()),
+		rpc.WithRemoteClose(ctl.Registry().Close))
 	srv := rpc.New(svc, eng, cfg.Server, version, rpcOpts...)
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)

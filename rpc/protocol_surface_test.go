@@ -15,7 +15,7 @@ import (
 
 // thisBumpAdded is the verb the CURRENT protocol number bought. Update it with
 // the number, in the same change: the pair is what makes a bump accountable.
-const thisBumpAdded = "remote.attest"
+const thisBumpAdded = "remote.resume"
 
 // adminOnlyVerbs are the verbs whose answer describes the whole server, so
 // only an admin reads them: sys.inflight (what a restart would interrupt,

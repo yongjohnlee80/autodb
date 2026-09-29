@@ -65,6 +65,11 @@ func BySSHKey(keyID int64) func(*Peer) bool {
 	return func(p *Peer) bool { return p.SSHKeyID == keyID }
 }
 
+// ByConn matches the one connection with id connID.
+func ByConn(connID string) func(*Peer) bool {
+	return func(p *Peer) bool { return p.ConnID == connID }
+}
+
 // ByUser matches the connections of one user.
 func ByUser(userID int64) func(*Peer) bool {
 	return func(p *Peer) bool { return p.UserID == userID }

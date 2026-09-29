@@ -616,6 +616,9 @@ type Remote struct {
 	// without a sign-out can be taken up again by the same device, without
 	// the passphrase.
 	ReconnectGrace Duration `toml:"reconnect_grace"`
+	// DeviceKeyMaxAge is how old a device key may grow before the TUI
+	// rotates it, on the next connect after that.
+	DeviceKeyMaxAge Duration `toml:"device_key_max_age"`
 }
 
 // BindAddr is [remote] bind, or its default when unset.
@@ -666,6 +669,14 @@ func (r Remote) Grace() time.Duration {
 	return r.ReconnectGrace.Duration()
 }
 
+// DeviceKeyAge is [remote] device_key_max_age, or its default when unset.
+func (r Remote) DeviceKeyAge() time.Duration {
+	if r.DeviceKeyMaxAge <= 0 {
+		return DefaultRemoteDeviceKeyMaxAge
+	}
+	return r.DeviceKeyMaxAge.Duration()
+}
+
 // DenialSpillPath is where refused remote connections are spilled before the
 // store: [remote] denial_spill, or remote-denials.pending in autodb's data
 // directory.
@@ -691,6 +702,7 @@ const (
 	DefaultRemoteMaxUnauthenticated = 16
 	DefaultRemoteHandshakeTimeout   = 10 * time.Second
 	DefaultRemoteReconnectGrace     = 2 * time.Minute
+	DefaultRemoteDeviceKeyMaxAge    = 90 * 24 * time.Hour
 )
 
 // HostKeyPath is where the remote listener's host key lives: [remote]
@@ -850,6 +862,7 @@ func Default() Config {
 			BlockAfterFailures: DefaultRemoteBlockAfterFailures,
 			BlockDuration:      Duration(DefaultRemoteBlockDuration),
 			ReconnectGrace:     Duration(DefaultRemoteReconnectGrace),
+			DeviceKeyMaxAge:    Duration(DefaultRemoteDeviceKeyMaxAge),
 		},
 	}
 }
@@ -1304,6 +1317,9 @@ func (c Config) validate() error {
 	}
 	if c.Remote.ReconnectGrace < 0 {
 		return fmt.Errorf("%w: remote.reconnect_grace must not be negative", ErrInvalid)
+	}
+	if c.Remote.DeviceKeyMaxAge < 0 {
+		return fmt.Errorf("%w: remote.device_key_max_age must not be negative", ErrInvalid)
 	}
 	if c.Exec.MaxStatementBytes <= 0 {
 		return fmt.Errorf("%w: exec.max_statement_bytes %d must be positive", ErrInvalid, c.Exec.MaxStatementBytes)

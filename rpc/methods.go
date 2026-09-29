@@ -59,6 +59,11 @@ const (
 	// CodeServerRestarting: the daemon is restarting and is not taking remote
 	// sign-ins. Not counted: sign in again shortly.
 	CodeServerRestarting int64 = -32064
+	// CodeResumeUnavailable: the session is this device's but can no longer
+	// be taken up (the grace passed, it was revoked or expired, or another
+	// connection took it). Not counted, and the connection stays open: sign
+	// in with the passphrase on it.
+	CodeResumeUnavailable int64 = -32065
 	// CodeProtocolMismatch refuses an incompatible client (re-provision).
 	CodeProtocolMismatch int64 = -32020
 	// CodeAuth carries credential/session failures (bad login, stale token,
