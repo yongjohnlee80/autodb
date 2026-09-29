@@ -131,7 +131,7 @@ func (s *Server) registerHistorySearch() {
 		}
 		rows, next, herr := s.eng.SearchHistory(ctx, token, f)
 		if herr != nil {
-			return nil, s.wireErr(herr)
+			return nil, s.wireErrFor(req, herr)
 		}
 		out := make([]any, 0, len(rows))
 		for _, r := range rows {
@@ -154,7 +154,7 @@ func (s *Server) registerHistorySearch() {
 		}
 		c, cerr := s.eng.DispositionCounts(ctx, token)
 		if cerr != nil {
-			return nil, s.wireErr(cerr)
+			return nil, s.wireErrFor(req, cerr)
 		}
 		if c.HistoryDisabled {
 			// Not zeros: with history off nothing is promised to count.

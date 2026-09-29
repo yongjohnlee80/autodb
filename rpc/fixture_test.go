@@ -99,6 +99,14 @@ func newFixture(t *testing.T, opts ...rpc.Option) *fixture {
 // real status from a fabricated one.
 func newFixtureWithAuth(t *testing.T, authOpts []auth.Option, opts ...rpc.Option) *fixture {
 	t.Helper()
+	return newFixtureOn(t, nil, authOpts, opts...)
+}
+
+// newFixtureOn is newFixtureWithAuth serving on ln, or on a fresh loopback TCP
+// listener when ln is nil: for a cell about what the LISTENER decides, such as
+// which connections are the remote surface.
+func newFixtureOn(t *testing.T, ln net.Listener, authOpts []auth.Option, opts ...rpc.Option) *fixture {
+	t.Helper()
 	ctx := context.Background()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
 	if err != nil {
@@ -125,9 +133,10 @@ func newFixtureWithAuth(t *testing.T, authOpts []auth.Option, opts ...rpc.Option
 		t.Fatalf("CreateConnection: %v", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	if ln == nil {
+		if ln, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "test-version",
 		append([]rpc.Option{rpc.WithListener(ln)}, opts...)...)

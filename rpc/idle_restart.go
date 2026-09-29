@@ -31,7 +31,7 @@ func (s *Server) registerIdleRestart() {
 		}
 		ident, aerr := s.auth.RequireAdmin(ctx, token)
 		if aerr != nil {
-			return nil, s.wireErr(aerr)
+			return nil, s.wireErrFor(req, aerr)
 		}
 		counts, owner := s.eng.BeginIdleShutdown()
 		if owner == 0 {
@@ -61,7 +61,7 @@ func (s *Server) registerIdleRestart() {
 		}
 		if err := audit(); err != nil {
 			s.eng.AbortIdleShutdown(owner)
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		s.RequestShutdown()
 		return map[string]any{"stopping": true}, nil

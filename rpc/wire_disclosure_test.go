@@ -34,7 +34,7 @@ func wireError(t *testing.T, err error) *golibrpc.Error {
 func TestWireErr_DialFailure_HostLocalDisclosesScrubbedCause(t *testing.T) {
 	t.Parallel()
 	de := exec.NewDialFailure(7, errors.New(leakyCause))
-	e := wireError(t, (&Server{discloseDetail: true}).wireErr(de))
+	e := wireError(t, (&Server{discloseDetail: true}).wireErrFor(nil, de))
 
 	if e.Code != CodeDialFailed {
 		t.Errorf("code = %d, want CodeDialFailed (%d)", e.Code, CodeDialFailed)
@@ -57,7 +57,7 @@ func TestWireErr_DialFailure_HostLocalDisclosesScrubbedCause(t *testing.T) {
 func TestWireErr_DialFailure_OffHostWithholdsCause(t *testing.T) {
 	t.Parallel()
 	de := exec.NewDialFailure(7, errors.New(leakyCause))
-	e := wireError(t, (&Server{discloseDetail: false}).wireErr(de))
+	e := wireError(t, (&Server{discloseDetail: false}).wireErrFor(nil, de))
 
 	if e.Code != CodeDialFailed {
 		t.Errorf("code = %d, want CodeDialFailed (%d)", e.Code, CodeDialFailed)
@@ -79,7 +79,7 @@ func TestWireErr_DialFailure_UnparseableCauseFallsBackToTheShape(t *testing.T) {
 	t.Parallel()
 	const unterminated = "failed to connect to `user=u password='never closed and the rest is secret"
 	de := exec.NewDialFailure(7, errors.New(unterminated))
-	e := wireError(t, (&Server{discloseDetail: true}).wireErr(de))
+	e := wireError(t, (&Server{discloseDetail: true}).wireErrFor(nil, de))
 
 	if e.Message != de.Error() {
 		t.Errorf("an unparseable cause was disclosed instead of withheld:\n got  %s\n want %s",
@@ -109,7 +109,7 @@ func TestWireErr_DialFailure_AnUnverifiableCauseFallsBackToTheShape(t *testing.T
 	}
 
 	de := exec.NewDialFailure(7, errors.New(oversized))
-	e := wireError(t, (&Server{discloseDetail: true}).wireErr(de))
+	e := wireError(t, (&Server{discloseDetail: true}).wireErrFor(nil, de))
 	if e.Message != de.Error() {
 		t.Errorf("a cause too large to verify was disclosed instead of withheld:\n got  %s",
 			e.Message)
@@ -117,7 +117,7 @@ func TestWireErr_DialFailure_AnUnverifiableCauseFallsBackToTheShape(t *testing.T
 
 	// And the bound is the ONLY reason: the same cause, short, is disclosed.
 	short := "failed to connect to `user=u host=db7.internal`: connection refused"
-	short_e := wireError(t, (&Server{discloseDetail: true}).wireErr(exec.NewDialFailure(7, errors.New(short))))
+	short_e := wireError(t, (&Server{discloseDetail: true}).wireErrFor(nil, exec.NewDialFailure(7, errors.New(short))))
 	if !strings.Contains(short_e.Message, "db7.internal") {
 		t.Errorf("the short form was withheld too, so the cell above proves nothing about the bound:\n  %s",
 			short_e.Message)
@@ -206,7 +206,7 @@ func TestWireErr_GrammarFormsAreScrubbedOnTheRealPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			de := exec.NewDialFailure(7, errors.New(tc.cause))
-			e := wireError(t, (&Server{discloseDetail: true}).wireErr(de))
+			e := wireError(t, (&Server{discloseDetail: true}).wireErrFor(nil, de))
 			if e.Message == de.Error() {
 				t.Fatalf("fell back to the shape on a parseable cause; the cell would "+
 					"pass for the wrong reason:\n  %s", e.Message)
@@ -233,14 +233,14 @@ func TestCauseOrShape_BothDirections(t *testing.T) {
 	clean := errors.New("dial error: connection refused")
 	de := exec.NewDialFailure(7, clean)
 
-	if got := (&Server{discloseDetail: false}).causeOrShape(de, clean); got != de.Error() {
+	if got := causeOrShape(false, de, clean); got != de.Error() {
 		t.Errorf("off-host answered something other than the shape: %s", got)
 	}
-	if got := (&Server{discloseDetail: true}).causeOrShape(de, clean); got != clean.Error() {
+	if got := causeOrShape(true, de, clean); got != clean.Error() {
 		t.Errorf("host-local did not answer the clean cause: %s", got)
 	}
 	// A nil cause has nothing to disclose and must not panic into one.
-	if got := (&Server{discloseDetail: true}).causeOrShape(de, nil); got != de.Error() {
+	if got := causeOrShape(true, de, nil); got != de.Error() {
 		t.Errorf("a nil cause did not answer the shape: %s", got)
 	}
 }
@@ -248,7 +248,7 @@ func TestCauseOrShape_BothDirections(t *testing.T) {
 func TestWireErr_ConfigFailure_HostLocalDisclosesScrubbedCause(t *testing.T) {
 	t.Parallel()
 	cf := exec.NewConfigFailure(exec.ConfigStageDSN, 7, exec.DetailDSNUnusable, errors.New(leakyCause))
-	e := wireError(t, (&Server{discloseDetail: true}).wireErr(cf))
+	e := wireError(t, (&Server{discloseDetail: true}).wireErrFor(nil, cf))
 
 	if e.Code != CodeConfigFailed {
 		t.Errorf("code = %d, want CodeConfigFailed (%d)", e.Code, CodeConfigFailed)
@@ -268,7 +268,7 @@ func TestWireErr_ConfigFailure_HostLocalDisclosesScrubbedCause(t *testing.T) {
 func TestWireErr_ConfigFailure_OffHostWithholdsCause(t *testing.T) {
 	t.Parallel()
 	cf := exec.NewConfigFailure(exec.ConfigStageDSN, 7, exec.DetailDSNUnusable, errors.New(leakyCause))
-	e := wireError(t, (&Server{discloseDetail: false}).wireErr(cf))
+	e := wireError(t, (&Server{discloseDetail: false}).wireErrFor(nil, cf))
 
 	if e.Code != CodeConfigFailed {
 		t.Errorf("code = %d, want CodeConfigFailed (%d)", e.Code, CodeConfigFailed)
@@ -292,7 +292,7 @@ func TestWireErr_MethodDelegatesSurfaceIndependentMapping(t *testing.T) {
 		s := &Server{discloseDetail: disclose}
 
 		// A mapped sentinel keeps its established code and constant text.
-		e := wireError(t, s.wireErr(exec.ErrEmptyStatement))
+		e := wireError(t, s.wireErrFor(nil, exec.ErrEmptyStatement))
 		if e.Code != CodeStatementRejected || e.Message != exec.ErrEmptyStatement.Error() {
 			t.Errorf("discloseDetail=%v: sentinel mapping changed: %+v", disclose, e)
 		}
@@ -300,7 +300,7 @@ func TestWireErr_MethodDelegatesSurfaceIndependentMapping(t *testing.T) {
 		// An unmapped error still passes through untouched, so the transport
 		// withholds it. Disclosure must not widen this.
 		unmapped := errors.New("dsn parse: postgres://user:SECRET@10.0.0.5/prod")
-		if got := s.wireErr(unmapped); got != unmapped {
+		if got := s.wireErrFor(nil, unmapped); got != unmapped {
 			t.Errorf("discloseDetail=%v: unmapped error transformed: %v", disclose, got)
 		}
 	}

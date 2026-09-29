@@ -102,7 +102,7 @@ func (s *Server) registerAuditSearch() {
 		}
 		page, aerr := s.eng.SearchAudit(ctx, token, f)
 		if aerr != nil {
-			return nil, s.wireErr(aerr)
+			return nil, s.wireErrFor(req, aerr)
 		}
 		rows := make([]any, 0, len(page.Rows))
 		for _, r := range page.Rows {
