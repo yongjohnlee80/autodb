@@ -25,6 +25,7 @@ import (
 	coreexec "github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/core/outcome"
+	"github.com/yongjohnlee80/autodb/core/remote"
 	"github.com/yongjohnlee80/autodb/frontdoor"
 	"github.com/yongjohnlee80/autodb/rpc"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
@@ -668,8 +669,23 @@ func runServe(configPath string) error {
 		}
 		return fd.PressureSnapshot(eng)
 	}
+	// ONE RPC server behind every surface: the local listener, and the remote
+	// listener while Remote Control is on, fanned into one. Which surface a
+	// connection is on is decided by the listener that accepted it.
+	fan := remote.NewFanIn(ln)
+	remoteAddr, stopRemote, rerr := startRemote(serveCtx, cfg, store, svc, fan, version,
+		func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) })
+	if rerr != nil {
+		// NEVER FAILS THE START. The local surface is the operators' way in,
+		// and a remote listener that cannot bind must not take it down; the
+		// failure is said loudly instead.
+		fmt.Fprintf(os.Stderr, "autodb: REMOTE CONTROL IS ON BUT THE REMOTE LISTENER DID NOT START: %v\n", rerr)
+	} else if remoteAddr != nil {
+		fmt.Printf("autodb: remote listener on %s\n", remoteAddr)
+	}
+	defer stopRemote()
 	srv := rpc.New(svc, eng, cfg.Server, version,
-		rpcServerOptions(ep, ln, oplog, notesRoot, frontDoorState, pressureState)...)
+		rpcServerOptions(ep, fan, oplog, notesRoot, frontDoorState, pressureState)...)
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the

@@ -360,3 +360,35 @@ func TestLoad_RejectsNonPositiveSessionCaps(t *testing.T) {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// The remote listener's mechanics are validated at load, whether or not Remote
+// Control is on: a bad bind must not wait for the admin who flips the switch.
+func TestRemoteMechanicsAreValidatedAtLoad(t *testing.T) {
+	for name, mutate := range map[string]func(*Config){
+		"a bind without a port": func(c *Config) { c.Remote.Bind = "0.0.0.0" },
+		"a port out of range":   func(c *Config) { c.Remote.Bind = "0.0.0.0:70000" },
+		"negative slots":        func(c *Config) { c.Remote.MaxUnauthenticated = -1 },
+		"negative time":         func(c *Config) { c.Remote.HandshakeTimeout = -1 },
+	} {
+		c := Default()
+		mutate(&c)
+		if err := c.Validate(); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: %v; want ErrInvalid", name, err)
+		}
+	}
+	if err := Default().Validate(); err != nil {
+		t.Fatalf("the defaults: %v", err)
+	}
+	// An unset section is the defaults, as a Config built without Default()
+	// has it.
+	var zero Remote
+	if zero.BindAddr() != DefaultRemoteBind || zero.HandshakeSlots() != DefaultRemoteMaxUnauthenticated ||
+		zero.HandshakeLimit() != DefaultRemoteHandshakeTimeout {
+		t.Fatalf("an unset [remote] is not the defaults: %q %d %v", zero.BindAddr(), zero.HandshakeSlots(), zero.HandshakeLimit())
+	}
+	c := Default()
+	c.Remote = Remote{}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("an unset [remote] does not validate: %v", err)
+	}
+}

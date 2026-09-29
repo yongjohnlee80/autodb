@@ -703,3 +703,24 @@ reserved_headroom = 4
 # ~116 MiB legitimately, so size the host for the sessions you actually expect,
 # not for the lane alone.
 # general_lane_bytes = 1073741824      # 1 GiB = 256 sessions x 4 MiB
+
+[remote]
+# The remote listener: an SSH listener through which the autodb TUI on another
+# machine reaches this daemon, so nobody needs a login on this host. It carries
+# autodb RPC only -- no shell, no psql, no port forwarding -- and admits only
+# the SSH keys registered on a user's autodb profile.
+#
+# WHETHER IT RUNS IS NOT SET HERE. An admin turns Remote Control on and off from
+# the TUI (Remote > Manage > Remote Control); the switch lives in the meta
+# store, and it is off until someone turns it on. These keys are the mechanics
+# it runs with. Open the port in the cloud firewall when you turn it on.
+bind = "0.0.0.0:7422"
+# The listener's ed25519 host key, created on first use, 0600 in a 0700
+# directory. Clients pin its fingerprint (shown in Remote Control). Empty means
+# remote_host_ed25519 in autodb's data directory; a service install keeps it
+# beside the service keyfile.
+# host_key = "/var/lib/autodb-keys/remote_host_ed25519"
+# Connections still in their SSH handshake at once; one more is closed at once.
+max_unauthenticated = 16
+# How long a connection has to authenticate and ask for the autodb subsystem.
+handshake_timeout = "10s"

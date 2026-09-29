@@ -1,0 +1,328 @@
+package remote
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+)
+
+// Subsystem is the only SSH subsystem the remote listener serves: autodb RPC.
+const Subsystem = "autodb-rpc@autodb"
+
+// The handshake's permissions carry the authenticated key under these names.
+const (
+	extKeyID  = "autodb-ssh-key-id"
+	extUserID = "autodb-user-id"
+)
+
+// ErrUnknownKey is what an Authorize answers for a key that is not a live
+// registered key of an enabled user.
+var ErrUnknownKey = errors.New("remote: not a registered SSH key")
+
+// Authorize answers whose live registered key has fingerprint (SHA256:…), or
+// ErrUnknownKey. It is asked for every key a client offers.
+type Authorize func(ctx context.Context, fingerprint string) (keyID, userID int64, err error)
+
+// Config is what a remote listener needs.
+type Config struct {
+	// HostKey is the server's identity; HostKeyFP its SHA256 fingerprint,
+	// which clients pin.
+	HostKey   ssh.Signer
+	HostKeyFP string
+	// Authorize resolves an offered key.
+	Authorize Authorize
+	// MaxUnauthenticated caps connections still in their handshake; one more
+	// is closed at once. Zero means 16.
+	MaxUnauthenticated int
+	// HandshakeTimeout bounds the handshake: authentication and the subsystem
+	// request. Zero means 10s.
+	HandshakeTimeout time.Duration
+	// Version goes into the server's SSH banner: SSH-2.0-autodb_<version>.
+	Version string
+	// Logf receives the listener's operational messages; nil discards them.
+	Logf func(format string, args ...any)
+}
+
+// Listener is the remote listener: it accepts SSH connections on a TCP
+// listener and hands the RPC server one Conn per connection that
+// authenticated with a registered key and asked for the autodb subsystem.
+//
+// It speaks nothing else. There is no password or keyboard-interactive
+// authentication, no shell, exec, pty, agent or X11 forwarding, no port
+// forwarding in either direction, and one subsystem channel per connection;
+// anything else is refused, and a second channel ends the connection.
+type Listener struct {
+	tcp    net.Listener
+	cfg    Config
+	server *ssh.ServerConfig
+
+	ready  chan net.Conn
+	done   chan struct{}
+	once   sync.Once
+	unauth chan struct{} // one token per connection still in its handshake
+}
+
+// Listen starts serving tcp. Close stops accepting; connections already
+// handed to Accept are the RPC server's to close.
+func Listen(tcp net.Listener, cfg Config) (*Listener, error) {
+	if cfg.HostKey == nil || cfg.Authorize == nil {
+		return nil, errors.New("remote: a listener needs a host key and an Authorize")
+	}
+	if cfg.MaxUnauthenticated <= 0 {
+		cfg.MaxUnauthenticated = 16
+	}
+	if cfg.HandshakeTimeout <= 0 {
+		cfg.HandshakeTimeout = 10 * time.Second
+	}
+	if cfg.Logf == nil {
+		cfg.Logf = func(string, ...any) {}
+	}
+	l := &Listener{
+		tcp: tcp, cfg: cfg,
+		ready:  make(chan net.Conn),
+		done:   make(chan struct{}),
+		unauth: make(chan struct{}, cfg.MaxUnauthenticated),
+	}
+	l.server = &ssh.ServerConfig{
+		ServerVersion: "SSH-2.0-autodb_" + bannerSafe(cfg.Version),
+		MaxAuthTries:  6,
+		// Asked for every key the client offers. What it returns for one key
+		// is that key's; the connection's identity is taken from the
+		// permissions of the authentication that SUCCEEDED
+		// (ssh.ServerConn.Permissions), never from state kept across these
+		// calls, which is the misuse behind CVE-2024-45337.
+		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), cfg.HandshakeTimeout)
+			defer cancel()
+			keyID, userID, err := cfg.Authorize(ctx, ssh.FingerprintSHA256(key))
+			if err != nil {
+				return nil, err
+			}
+			return &ssh.Permissions{Extensions: map[string]string{
+				extKeyID:  strconv.FormatInt(keyID, 10),
+				extUserID: strconv.FormatInt(userID, 10),
+			}}, nil
+		},
+	}
+	l.server.AddHostKey(cfg.HostKey)
+	go l.acceptLoop()
+	return l, nil
+}
+
+// bannerSafe keeps the banner a single token: SSH forbids spaces in it.
+func bannerSafe(v string) string {
+	if v == "" {
+		return "dev"
+	}
+	return strings.Map(func(r rune) rune {
+		if r <= ' ' || r > '~' || r == '-' {
+			return '_'
+		}
+		return r
+	}, v)
+}
+
+// Accept returns the next authenticated remote connection.
+func (l *Listener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.ready:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+// Close stops accepting. It does not close connections Accept returned.
+func (l *Listener) Close() error {
+	var err error
+	l.once.Do(func() {
+		close(l.done)
+		err = l.tcp.Close()
+	})
+	return err
+}
+
+// Addr is the TCP address the listener is bound to.
+func (l *Listener) Addr() net.Addr { return l.tcp.Addr() }
+
+// HostKeyFingerprint is the fingerprint clients pin.
+func (l *Listener) HostKeyFingerprint() string { return l.cfg.HostKeyFP }
+
+func (l *Listener) acceptLoop() {
+	for {
+		c, err := l.tcp.Accept()
+		if err != nil {
+			select {
+			case <-l.done:
+				return
+			default:
+			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
+			l.cfg.Logf("remote listener: accept: %v", err)
+			return
+		}
+		select {
+		case l.unauth <- struct{}{}:
+			go l.serve(c)
+		default:
+			// The handshake cap is full: closed before a byte of SSH. Not the
+			// peer's failure, so nothing is charged to it.
+			l.cfg.Logf("remote listener: %d handshakes in progress, refusing %s", cap(l.unauth), c.RemoteAddr())
+			_ = c.Close()
+		}
+	}
+}
+
+func (l *Listener) serve(c net.Conn) {
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			<-l.unauth
+		}
+	}
+	defer release()
+
+	_ = c.SetDeadline(time.Now().Add(l.cfg.HandshakeTimeout))
+	sconn, chans, reqs, err := ssh.NewServerConn(c, l.server)
+	if err != nil {
+		_ = c.Close()
+		return
+	}
+	// No global request is honoured: port forwarding (tcpip-forward) and every
+	// other one is answered no.
+	go ssh.DiscardRequests(reqs)
+
+	peer, err := peerOf(sconn, l.cfg.HostKeyFP)
+	if err != nil {
+		l.cfg.Logf("remote listener: %s: %v", sconn.RemoteAddr(), err)
+		_ = sconn.Close()
+		return
+	}
+	ch, rest, ok := l.subsystem(sconn, chans)
+	if !ok {
+		_ = sconn.Close()
+		return
+	}
+	release()
+	_ = c.SetDeadline(time.Time{})
+
+	// Any further channel ends the connection: one subsystem per connection.
+	go func() {
+		for nc := range rest {
+			_ = nc.Reject(ssh.Prohibited, "one autodb-rpc channel per connection")
+			_ = sconn.Close()
+		}
+	}()
+	rc := &conn{Conn: Bridge(closeBoth{ch, sconn}, sconn.LocalAddr(), sconn.RemoteAddr()), peer: peer}
+	select {
+	case l.ready <- rc:
+	case <-l.done:
+		_ = rc.Close()
+	}
+}
+
+// peerOf builds a connection's Peer from the handshake that succeeded.
+func peerOf(sconn *ssh.ServerConn, hostFP string) (*Peer, error) {
+	if sconn.Permissions == nil {
+		return nil, errors.New("authenticated without permissions")
+	}
+	keyID, err := strconv.ParseInt(sconn.Permissions.Extensions[extKeyID], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("authenticated key id: %w", err)
+	}
+	userID, err := strconv.ParseInt(sconn.Permissions.Extensions[extUserID], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("authenticated user id: %w", err)
+	}
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return nil, fmt.Errorf("connection id: %w", err)
+	}
+	return &Peer{
+		ConnID:    hex.EncodeToString(id),
+		SSHKeyID:  keyID,
+		UserID:    userID,
+		SessionID: append([]byte(nil), sconn.SessionID()...),
+		HostKeyFP: hostFP,
+		Addr:      sconn.RemoteAddr(),
+	}, nil
+}
+
+// subsystem waits, within the handshake deadline, for the one session channel
+// and its autodb-rpc subsystem request. A channel of another type, or a
+// session request for a shell, a command, a terminal, agent or X11
+// forwarding, ends the connection. It returns the channel and the stream of
+// any later channel opens.
+func (l *Listener) subsystem(sconn *ssh.ServerConn, chans <-chan ssh.NewChannel) (ssh.Channel, <-chan ssh.NewChannel, bool) {
+	nc, ok := <-chans
+	if !ok {
+		return nil, nil, false
+	}
+	if nc.ChannelType() != "session" {
+		_ = nc.Reject(ssh.UnknownChannelType, "only an autodb-rpc session is served")
+		return nil, nil, false
+	}
+	ch, reqs, err := nc.Accept()
+	if err != nil {
+		return nil, nil, false
+	}
+	for req := range reqs {
+		switch {
+		case req.Type == "subsystem" && subsystemName(req.Payload) == Subsystem:
+			_ = req.Reply(true, nil)
+			// Later requests on the channel are all answered no.
+			go func() {
+				for r := range reqs {
+					_ = r.Reply(false, nil)
+				}
+			}()
+			return ch, chans, true
+		case req.Type == "env":
+			// Clients send these unasked; refused, and harmless.
+			_ = req.Reply(false, nil)
+		default:
+			// shell, exec, pty-req, x11-req, auth-agent-req@openssh.com, a
+			// different subsystem: none is served, and asking ends it.
+			_ = req.Reply(false, nil)
+			_ = ch.Close()
+			return nil, nil, false
+		}
+	}
+	return nil, nil, false
+}
+
+// subsystemName decodes a subsystem request's payload: one SSH string.
+func subsystemName(payload []byte) string {
+	var p struct{ Name string }
+	if err := ssh.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return p.Name
+}
+
+// closeBoth closes the channel and then its SSH connection: a remote
+// connection is one channel, so the RPC side closing it ends the connection.
+type closeBoth struct {
+	ssh.Channel
+	sconn io.Closer
+}
+
+func (c closeBoth) Close() error {
+	err := c.Channel.Close()
+	_ = c.sconn.Close()
+	return err
+}
