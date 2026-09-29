@@ -901,6 +901,18 @@ func startEngine(
 		return nil, nil, nil, func() {}, fmt.Errorf("refusing to serve: %w", err)
 	}
 
+	// A REMOTE SESSION DOES NOT OUTLIVE ITS DAEMON. No
+	// remote transport survives the process that accepted it, so every
+	// device-bound token from before this start is revoked before anything
+	// serves; a crash that lost a session's reconnect-grace write would
+	// otherwise leave its token live until expiry. It refuses rather than
+	// warns: a token this start cannot account for must not become usable.
+	if n, err := svc.RevokeRemoteSessions(ctx); err != nil {
+		return nil, nil, nil, func() {}, fmt.Errorf("refusing to serve: revoking the previous start's remote sessions: %w", err)
+	} else if n > 0 {
+		onLog(fmt.Sprintf("revoked %d remote session(s) left from the previous start", n))
+	}
+
 	serveCtx, stopServing := context.WithCancel(ctx)
 
 	// The lease has to be CONSUMED, not merely acquired. Lost() closes when

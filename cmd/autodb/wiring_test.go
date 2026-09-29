@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -165,6 +166,50 @@ func startedEngine(t *testing.T, cfg config.Config, lost <-chan struct{}) (*core
 	}
 	t.Cleanup(func() { stop(); _ = eng.Close() })
 	return eng, serveCtx, store, svc, tok
+}
+
+// startEngine revokes the device-bound sessions a previous start left, before
+// it serves, and says so; a local session survives. Through
+// startEngine, not the helper: deleting the call must fail this cell.
+func TestStartEngineRevokesThePreviousStartsRemoteSessions(t *testing.T) {
+	store, err := meta.Open(t.Context(), config.Meta{Engine: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("meta.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	if _, _, err := svc.Bootstrap(t.Context(), "root", "root-passphrase", "127.0.0.1"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	remote, err := store.Sessions.OnCtx(t.Context()).
+		Set(meta.SessTokenHash, []byte("remote")).Set(meta.SessUserID, int64(1)).
+		Set(meta.SessIP, "203.0.113.7").Set(meta.SessCreatedAt, int64(1)).
+		Set(meta.SessExpiresAt, int64(9_999_999_999)).Set(meta.SessRevoked, int64(0)).
+		Set(meta.SessDeviceID, int64(7)).Insert()
+	if err != nil {
+		t.Fatalf("seeding a remote session: %v", err)
+	}
+	var logged []string
+	eng, _, _, stop, err := startEngine(t.Context(), execConfig(), store, svc, make(chan struct{}), wiredEpoch,
+		func(msg string) { logged = append(logged, msg) })
+	if err != nil {
+		t.Fatalf("startEngine: %v", err)
+	}
+	t.Cleanup(func() { stop(); _ = eng.Close() })
+	got, err := store.Sessions.OnCtx(t.Context()).With(meta.SessID, remote).Get()
+	if err != nil || got.Revoked != 1 {
+		t.Fatalf("the previous start's remote session: %+v, %v; want revoked", got, err)
+	}
+	local, err := store.Sessions.OnCtx(t.Context()).With(meta.SessDeviceID, int64(0)).With(meta.SessRevoked, int64(0)).Count()
+	if err != nil || local != 1 {
+		t.Errorf("live local sessions after the start: %d, %v; want the bootstrap's 1", local, err)
+	}
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "revoked 1 remote session") }) {
+		t.Errorf("the start did not say what it revoked: %q", logged)
+	}
 }
 
 // wiredEpoch stands in for the lease's epoch in startedEngine.

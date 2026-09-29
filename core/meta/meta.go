@@ -40,6 +40,13 @@ type Store struct {
 	KV             *dao.Schema[*MetaKV, MetaKVField, Sort, string]
 	Keyslots       *dao.Schema[*Keyslot, KeyslotField, Sort, string]
 
+	// Remote access (schema script 000004_update_remote_access).
+	SSHKeys         *dao.Schema[*UserSSHKey, UserSSHKeyField, Sort, int64]
+	RemoteDevices   *dao.Schema[*RemoteDevice, RemoteDeviceField, Sort, int64]
+	RemoteDeviceIPs *dao.Schema[*RemoteDeviceIP, RemoteDeviceIPField, Sort, int64]
+	RemoteIPBlocks  *dao.Schema[*RemoteIPBlock, RemoteIPBlockField, Sort, string]
+	RemoteDenials   *dao.Schema[*RemoteDenial, RemoteDenialField, Sort, string]
+
 	// schemaWarnings are what Open's upgrade found (scripts.go).
 	schemaWarnings []string
 	// sqlitePath is a SQLite store's resolved file, "" for :memory: and
@@ -156,6 +163,12 @@ func OpenNoMigrate(ctx context.Context, mcfg StoreConfig) (*Store, error) {
 		UserIPs:        newUserIPs(conn),
 		KV:             newKV(conn),
 		Keyslots:       newKeyslots(conn),
+
+		SSHKeys:         newSSHKeys(conn),
+		RemoteDevices:   newRemoteDevices(conn),
+		RemoteDeviceIPs: newRemoteDeviceIPs(conn),
+		RemoteIPBlocks:  newRemoteIPBlocks(conn),
+		RemoteDenials:   newRemoteDenials(conn),
 	}, nil
 }
 
