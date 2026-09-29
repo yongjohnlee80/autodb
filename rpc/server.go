@@ -14,6 +14,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/config"
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/remote"
 	"github.com/yongjohnlee80/golib/logger"
 	"github.com/yongjohnlee80/golib/msgpack"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
@@ -320,6 +321,9 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 		golibrpc.WithLogger(o.logger),
 		golibrpc.MaxMessageBytes(4 << 20),
 		golibrpc.WithGate(s.gate),
+		// The surface is decided per connection, by the listener that accepted
+		// it, before the first request is read: see remotePeer.
+		golibrpc.WithSessionAttach(attachSurface),
 	}
 	if o.listener != nil {
 		ropts = append(ropts, golibrpc.WithListener(o.listener))
@@ -368,6 +372,44 @@ func (s *Server) Addr() string { return s.rpc.Addr() }
 // wiring is assertable.
 func (s *Server) DisclosesDetail() bool { return s.discloseDetail }
 
+// attachSurface is the connection's surface, fixed when it is accepted: the
+// remote listener's Peer for one of its connections, nil for every local one
+// (unix socket, TCP, the web gateway's). The client cannot choose it.
+func attachSurface(nc net.Conn) any {
+	if rc, ok := nc.(remote.Conn); ok {
+		return rc.RemotePeer()
+	}
+	return nil
+}
+
+// remotePeer reports whether sess is a remote connection, and what its SSH
+// handshake proved.
+func remotePeer(sess *golibrpc.Session) (*remote.Peer, bool) {
+	if sess == nil {
+		return nil, false
+	}
+	p, ok := sess.Attachment().(*remote.Peer)
+	return p, ok && p != nil
+}
+
+// remoteRefused are the methods the remote surface never offers: restarting
+// the daemon is for someone on the server host, and a store with no users can
+// never be claimed from the network.
+var remoteRefused = map[string]bool{
+	"sys.shutdown":        true,
+	"sys.restart_if_idle": true,
+	"auth.bootstrap":      true,
+}
+
+// remotePreLogin is what a remote connection may call before it has signed
+// in. Signing in over the remote surface is its own path, which this set
+// grows to include when it exists; until then a remote connection can only
+// greet.
+var remotePreLogin = map[string]bool{
+	"sys.hello":            true,
+	"auth.needs_bootstrap": true,
+}
+
 // gate enforces handshake-before-methods: sys.hello is the
 // only reachable method until a compatible hello lands; an incompatible
 // hello poisons the session — every later call, hello included, is refused
@@ -377,6 +419,18 @@ func (s *Server) gate(sess *golibrpc.Session, method string) error {
 	if refused, _ := sess.Value(sessRefused).(bool); refused {
 		return &golibrpc.Error{Code: CodeProtocolMismatch,
 			Message: "protocol mismatch: reconnect with a compatible client"}
+	}
+	// The remote surface, decided here and not in handlers: a refused method
+	// never reaches its handler.
+	if _, ok := remotePeer(sess); ok {
+		if remoteRefused[method] {
+			return &golibrpc.Error{Code: CodeRemoteRefused,
+				Message: method + " is available on the server host only"}
+		}
+		if !remotePreLogin[method] {
+			return &golibrpc.Error{Code: CodeRemoteLoginRequired,
+				Message: "sign in on this remote connection first"}
+		}
 	}
 	if method == "sys.hello" {
 		return nil
@@ -412,10 +466,14 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		// it applied and the backup it took first, so a frontend that
 		// restarted it can say so. Additive: an older frontend ignores it.
 		"schema": s.schemaAtStart(),
-		// Notes are client-side files under <notes_dir>/ws-<id>/; the
-		// server is the authority on the path (config may override the
-		// default), so it reports it here for the frontends to list.
-		"notes_dir": s.notesDir,
+	}
+	// Notes are client-side files under <notes_dir>/ws-<id>/; the server is
+	// the authority on the path (config may override the default), so it
+	// reports it here for the frontends to list. Not to a remote connection:
+	// it is a path on this host, which a remote client can neither use nor
+	// needs to know.
+	if _, ok := remotePeer(req.Session); !ok {
+		reply["notes_dir"] = s.notesDir
 	}
 	if len(req.Params) > 1 {
 		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,

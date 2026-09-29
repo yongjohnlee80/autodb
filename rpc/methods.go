@@ -37,6 +37,17 @@ import (
 const (
 	// CodeHandshakeRequired gates methods before a compatible sys.hello.
 	CodeHandshakeRequired int64 = -32021
+
+	// The remote surface: an SSH channel from the daemon's remote listener.
+	//
+	// CodeRemoteLoginRequired: a remote connection may call only the methods
+	// that lead to signing in until it has signed in. Sign in on this
+	// connection first.
+	CodeRemoteLoginRequired int64 = -32060
+	// CodeRemoteRefused: the method is not available over the remote surface
+	// at all, whoever calls it: restarting the daemon, and claiming an empty
+	// store. It is available on the server host only.
+	CodeRemoteRefused int64 = -32061
 	// CodeProtocolMismatch refuses an incompatible client (re-provision).
 	CodeProtocolMismatch int64 = -32020
 	// CodeAuth carries credential/session failures (bad login, stale token,
@@ -283,15 +294,26 @@ func wireErr(err error) error {
 // of its own. Either way this is the RPC surface only: the pgwire front
 // door redacts these through a physically separate path (frontdoor/) that this
 // method never touches.
-func (s *Server) wireErr(err error) error {
+//
+// The decision is per CONNECTION as well as per surface: a remote connection
+// (an SSH channel from the remote listener) is never shown the cause, whatever
+// this server's endpoint is. That is why it takes the request: a handler
+// cannot map an error without naming the connection it answers.
+func (s *Server) wireErrFor(req *golibrpc.Request, err error) error {
 	if err == nil {
 		return nil
 	}
+	disclose := s.discloseDetail
+	if req != nil {
+		if _, remote := remotePeer(req.Session); remote {
+			disclose = false
+		}
+	}
 	if de, ok := exec.DialFailureOf(err); ok {
-		return &golibrpc.Error{Code: CodeDialFailed, Message: s.causeOrShape(de, de.Cause())}
+		return &golibrpc.Error{Code: CodeDialFailed, Message: causeOrShape(disclose, de, de.Cause())}
 	}
 	if ce, ok := exec.ConfigFailureOf(err); ok {
-		return &golibrpc.Error{Code: CodeConfigFailed, Message: s.causeOrShape(ce, ce.Cause())}
+		return &golibrpc.Error{Code: CodeConfigFailed, Message: causeOrShape(disclose, ce, ce.Cause())}
 	}
 	return wireErr(err)
 }
@@ -304,8 +326,8 @@ func (s *Server) wireErr(err error) error {
 // withheld ENTIRELY rather than published half-masked. A partly-masked
 // credential is worse than no detail, because it reads as though it had been
 // scrubbed — which is the defect the first version of the scrubber shipped.
-func (s *Server) causeOrShape(shaped, cause error) string {
-	if !s.discloseDetail || cause == nil {
+func causeOrShape(disclose bool, shaped, cause error) string {
+	if !disclose || cause == nil {
 		return shaped.Error()
 	}
 	scrubbed, confident := scrubSecrets(cause.Error())
@@ -423,8 +445,14 @@ func (s *Server) register() {
 		if err := exactArgs(req.Params, 0); err != nil {
 			return nil, err
 		}
+		// A remote connection is always told no: an empty store is claimed
+		// on the server host, never from the network (auth.bootstrap is
+		// refused there), so a remote client must not offer the form.
+		if _, ok := remotePeer(req.Session); ok {
+			return false, nil
+		}
 		need, err := s.auth.NeedsBootstrap(ctx)
-		return need, s.wireErr(err)
+		return need, s.wireErrFor(req, err)
 	})
 	// auth.global_ip_admitted answers the GLOBAL layer alone, for a caller
 	// that has no user to ask about yet.
@@ -452,7 +480,7 @@ func (s *Server) register() {
 		}
 		admitted, aerr := s.auth.IPAllowed(ctx, addr)
 		if aerr != nil {
-			return nil, s.wireErr(aerr)
+			return nil, s.wireErrFor(req, aerr)
 		}
 		return admitted, nil
 	})
@@ -470,7 +498,7 @@ func (s *Server) register() {
 		}
 		token, id, err := s.auth.Bootstrap(ctx, name, pass, peerIP(req))
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
@@ -488,7 +516,7 @@ func (s *Server) register() {
 		}
 		token, id, err := s.auth.Login(ctx, name, pass, peerIP(req))
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
@@ -527,7 +555,7 @@ func (s *Server) register() {
 		}
 		token, id, err := s.auth.LoginAt(ctx, name, pass, peerIP(req), browser)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
@@ -545,7 +573,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.EnrollServiceKeyslot(ctx, token, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.EnrollServiceKeyslot(ctx, token, peerIP(req)))
 	})
 	s.handle("keyslot.remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
@@ -555,7 +583,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.RemoveServiceKeyslot(ctx, token, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.RemoveServiceKeyslot(ctx, token, peerIP(req)))
 	})
 	// keyslot.status is what makes the locked-daemon banner honest at a DISTANCE. The daemon prints
 	// its banner once, at start, to a terminal nobody may be watching; this is
@@ -582,7 +610,7 @@ func (s *Server) register() {
 		// R13 -- deny before you disclose.
 		st, err := s.auth.ServiceKeyslotStatusFor(ctx, token)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		// TWO RECORDS, and they answer different questions. attempted/unlocked/
 		// reason are what the BOOT probe found and never change; the verified_*
@@ -622,7 +650,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.Logout(ctx, token, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.Logout(ctx, token, peerIP(req)))
 	})
 	s.handle("auth.whoami", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
@@ -634,7 +662,7 @@ func (s *Server) register() {
 		}
 		id, err := s.auth.ValidateToken(ctx, token)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return identMap(id), nil
 	})
@@ -662,7 +690,7 @@ func (s *Server) register() {
 		}
 		id, err := s.auth.CreateUser(ctx, token, name, pass, role, peerIP(req))
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return id, nil
 	})
@@ -677,7 +705,7 @@ func (s *Server) register() {
 		}
 		opts, err := s.auth.UserOptions(ctx, token)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		// Widened to any: the wire encoder has no view of map[string]string,
 		// and the TUI reads it back key by key.
@@ -704,7 +732,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if err := s.auth.SetUserOption(ctx, token, key, value, peerIP(req)); err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return true, nil
 	})
@@ -724,7 +752,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.SetUserRole(ctx, token, userID, role, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.SetUserRole(ctx, token, userID, role, peerIP(req)))
 	})
 	s.handle("auth.user_disable", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -742,7 +770,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.SetUserDisabled(ctx, token, userID, disabled, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.SetUserDisabled(ctx, token, userID, disabled, peerIP(req)))
 	})
 	s.handle("auth.user_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
@@ -756,7 +784,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.RemoveUser(ctx, token, userID, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.RemoveUser(ctx, token, userID, peerIP(req)))
 	})
 	s.handle("auth.passphrase_change", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -774,7 +802,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.ChangePassphrase(ctx, token, oldPass, newPass, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.ChangePassphrase(ctx, token, oldPass, newPass, peerIP(req)))
 	})
 	// exec.run_script runs a multi-statement buffer sequentially and
 	// returns the LAST statement's result. The core splits with the
@@ -804,7 +832,7 @@ func (s *Server) register() {
 		// atomic is not three changes.
 		out, xerr := s.eng.ExecuteScriptAtomic(ctx, token, connID, sqlText, peerIP(req))
 		if xerr != nil {
-			return nil, s.wireErr(xerr)
+			return nil, s.wireErrFor(req, xerr)
 		}
 		reply := map[string]any{"statements": int64(out.Statements)}
 		if out.Last != nil {
@@ -830,7 +858,7 @@ func (s *Server) register() {
 		}
 		rows, herr := s.eng.ListHistory(ctx, token, int(limit))
 		if herr != nil {
-			return nil, s.wireErr(herr)
+			return nil, s.wireErrFor(req, herr)
 		}
 		out := make([]any, 0, len(rows))
 		for _, r := range rows {
@@ -876,7 +904,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if _, aerr := s.auth.RequireAdmin(ctx, token); aerr != nil {
-			return nil, s.wireErr(aerr)
+			return nil, s.wireErrFor(req, aerr)
 		}
 		return map[string]any{
 			"executing":      int64(s.eng.SessionsExecuting()),
@@ -894,7 +922,7 @@ func (s *Server) register() {
 		}
 		ident, aerr := s.auth.RequireAdmin(ctx, token)
 		if aerr != nil {
-			return nil, s.wireErr(aerr)
+			return nil, s.wireErrFor(req, aerr)
 		}
 		// REFUSED BEFORE THE AUDIT, because a refusal is not a privileged
 		// effect -- nothing is stopped, so there is nothing that could have
@@ -955,7 +983,7 @@ func (s *Server) register() {
 			// Otherwise the daemon keeps refusing to begin transactions it is
 			// never going to end.
 			s.eng.AbortShutdown(owner)
-			return nil, s.wireErr(err) // an unaudited privileged effect never happens
+			return nil, s.wireErrFor(req, err) // an unaudited privileged effect never happens
 		}
 		s.RequestShutdown()
 		return map[string]any{"stopping": true}, nil
@@ -977,7 +1005,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.ResetPassphrase(ctx, token, userID, newPass, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.ResetPassphrase(ctx, token, userID, newPass, peerIP(req)))
 	})
 
 	// --- auth: grants & allowlist (admin, token-first) ---
@@ -1001,7 +1029,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.AddGrant(ctx, token, userID, connID, role, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.AddGrant(ctx, token, userID, connID, role, peerIP(req)))
 	})
 	s.handle("auth.grant_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -1019,7 +1047,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.RemoveGrant(ctx, token, userID, connID, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.RemoveGrant(ctx, token, userID, connID, peerIP(req)))
 	})
 	s.handle("auth.allowlist_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -1037,7 +1065,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.AddAllowedIP(ctx, token, cidr, note, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.AddAllowedIP(ctx, token, cidr, note, peerIP(req)))
 	})
 	s.handle("auth.allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
@@ -1051,7 +1079,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.RemoveAllowedIP(ctx, token, cidr, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.RemoveAllowedIP(ctx, token, cidr, peerIP(req)))
 	})
 	s.handle("auth.allowlist_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
@@ -1063,7 +1091,7 @@ func (s *Server) register() {
 		}
 		cfg, rows, err := s.auth.ListAllowedIPs(ctx, token)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		outRows := make([]any, 0, len(rows))
 		for _, r := range rows {
@@ -1092,7 +1120,7 @@ func (s *Server) register() {
 		}
 		rows, err := s.auth.UserIPs(ctx, token, userID)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		out := make([]any, 0, len(rows))
 		for _, r := range rows {
@@ -1138,11 +1166,11 @@ func (s *Server) register() {
 		}
 		ident, verr := s.auth.ValidateToken(ctx, token)
 		if verr != nil {
-			return nil, s.wireErr(verr)
+			return nil, s.wireErrFor(req, verr)
 		}
 		src, aerr := s.auth.IPAllowedForUser(ctx, nil, ident.UserID(), addr)
 		if aerr != nil {
-			return nil, s.wireErr(aerr)
+			return nil, s.wireErrFor(req, aerr)
 		}
 		// The SOURCE is returned as well as the verdict, so the caller can
 		// audit which layer admitted rather than only that something did.
@@ -1212,7 +1240,7 @@ func (s *Server) register() {
 		// belongs here, on the wire value, before any arithmetic touches it.
 		const maxTokenDays = 365
 		if days < 0 || days > maxTokenDays {
-			return nil, s.wireErr(fmt.Errorf("%w: %d days requested; the range is 1..%d, or 0 for "+
+			return nil, s.wireErrFor(req, fmt.Errorf("%w: %d days requested; the range is 1..%d, or 0 for "+
 				"the default", auth.ErrPATBadExpiry, days, maxTokenDays))
 		}
 		rawApproved, err := optStr(req.Params, 6, "approved_ips")
@@ -1237,7 +1265,7 @@ func (s *Server) register() {
 					"missing":        strsToAny(stale.Missing),
 				}, nil
 			}
-			return nil, s.wireErr(cerr)
+			return nil, s.wireErrFor(req, cerr)
 		}
 		return map[string]any{
 			"name": out.Name,
@@ -1269,7 +1297,7 @@ func (s *Server) register() {
 		}
 		missing, merr := s.auth.PATAllowlistAdditions(ctx, token, want)
 		if merr != nil {
-			return nil, s.wireErr(merr)
+			return nil, s.wireErrFor(req, merr)
 		}
 		return map[string]any{"missing": strsToAny(missing)}, nil
 	})
@@ -1287,7 +1315,7 @@ func (s *Server) register() {
 		}
 		rows, lerr := s.auth.ListPATs(ctx, token, userID)
 		if lerr != nil {
-			return nil, s.wireErr(lerr)
+			return nil, s.wireErrFor(req, lerr)
 		}
 		out := make([]any, 0, len(rows))
 		for _, r := range rows {
@@ -1323,7 +1351,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if rerr := s.auth.RevokePAT(ctx, token, userID, name); rerr != nil {
-			return nil, s.wireErr(rerr)
+			return nil, s.wireErrFor(req, rerr)
 		}
 		return map[string]any{"revoked": true}, nil
 	})
@@ -1354,7 +1382,7 @@ func (s *Server) register() {
 		if cidr == "" {
 			cidr = peerIP(req)
 		}
-		return nil, s.wireErr(s.auth.AddUserIP(ctx, token, userID, cidr, label, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.AddUserIP(ctx, token, userID, cidr, label, peerIP(req)))
 	})
 	s.handle("auth.user_allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -1372,7 +1400,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.auth.RemoveUserIP(ctx, token, userID, rowID, peerIP(req)))
+		return nil, s.wireErrFor(req, s.auth.RemoveUserIP(ctx, token, userID, rowID, peerIP(req)))
 	})
 
 	// --- conn: connection management ---
@@ -1398,7 +1426,7 @@ func (s *Server) register() {
 		// a row that no later comparison matches.
 		eng, err := engine.Parse(engineArg)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		dsn, err := argStr(req.Params, 3, "dsn")
 		if err != nil {
@@ -1406,7 +1434,7 @@ func (s *Server) register() {
 		}
 		id, err := s.eng.CreateConnection(ctx, token, name, eng, dsn, peerIP(req))
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return id, nil
 	})
@@ -1420,7 +1448,7 @@ func (s *Server) register() {
 		}
 		conns, err := s.eng.ListConnections(ctx, token)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		// THE EFFECTIVE CAP, NOT THE REQUEST.
 		//
@@ -1477,7 +1505,7 @@ func (s *Server) register() {
 		// caller is told which.
 		archived, derr := s.eng.DeleteConnection(ctx, token, connID, peerIP(req))
 		if derr != nil {
-			return nil, s.wireErr(derr)
+			return nil, s.wireErrFor(req, derr)
 		}
 		return map[string]any{"archived": archived}, nil
 	})
@@ -1515,7 +1543,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if _, err := s.auth.ValidateToken(ctx, token); err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		var info FrontDoorInfo
 		if s.frontDoor != nil {
@@ -1528,7 +1556,7 @@ func (s *Server) register() {
 		}
 		pem, rerr := os.ReadFile(info.RootCAFile)
 		if rerr != nil {
-			return nil, s.wireErr(fmt.Errorf("reading the CA certificate at %s: %w",
+			return nil, s.wireErrFor(req, fmt.Errorf("reading the CA certificate at %s: %w",
 				info.RootCAFile, rerr))
 		}
 		return map[string]any{
@@ -1548,7 +1576,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if _, err := s.auth.ValidateToken(ctx, token); err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		var info FrontDoorInfo
 		if s.frontDoor != nil {
@@ -1589,7 +1617,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.eng.SetConnectionProfile(ctx, token, connID, profile, peerIP(req)))
+		return nil, s.wireErrFor(req, s.eng.SetConnectionProfile(ctx, token, connID, profile, peerIP(req)))
 	})
 	s.handle("conn.rename", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -1607,7 +1635,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.eng.RenameConnection(ctx, token, connID, name, peerIP(req)))
+		return nil, s.wireErrFor(req, s.eng.RenameConnection(ctx, token, connID, name, peerIP(req)))
 	})
 	s.handle("conn.set_exposure", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -1625,7 +1653,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.eng.SetConnectionExposure(ctx, token, connID, exposed, peerIP(req)))
+		return nil, s.wireErrFor(req, s.eng.SetConnectionExposure(ctx, token, connID, exposed, peerIP(req)))
 	})
 	// The operator surface for the reloadable bounds. Without these the
 	// engine's reload existed and nothing could reach it, which is the state
@@ -1683,7 +1711,7 @@ func (s *Server) register() {
 			MaxTargetConns:       int(vals[4]),
 		}, peerIP(req))
 		if rerr != nil {
-			return nil, s.wireErr(rerr)
+			return nil, s.wireErrFor(req, rerr)
 		}
 		return exec.PolicyView(set), nil
 	})
@@ -1699,7 +1727,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.eng.TestConnection(ctx, token, connID, peerIP(req)))
+		return nil, s.wireErrFor(req, s.eng.TestConnection(ctx, token, connID, peerIP(req)))
 	})
 
 	// --- exec ---
@@ -1725,7 +1753,7 @@ func (s *Server) register() {
 		}
 		sid, oerr := s.eng.OpenSession(ctx, token, connID, peerIP(req))
 		if oerr != nil {
-			return nil, s.wireErr(oerr)
+			return nil, s.wireErrFor(req, oerr)
 		}
 		return map[string]any{"session_id": string(sid)}, nil
 	})
@@ -1747,7 +1775,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if cerr := s.eng.CloseSession(ctx, token, exec.SessionID(sid), peerIP(req)); cerr != nil {
-			return nil, s.wireErr(cerr)
+			return nil, s.wireErrFor(req, cerr)
 		}
 		return map[string]any{"closed": true}, nil
 	})
@@ -1773,7 +1801,7 @@ func (s *Server) register() {
 		}
 		res, rerr := s.eng.SessionExecute(ctx, token, exec.SessionID(sid), sqlText, peerIP(req))
 		if rerr != nil {
-			return nil, s.wireErr(rerr)
+			return nil, s.wireErrFor(req, rerr)
 		}
 		return resultMap(res), nil
 	})
@@ -1819,7 +1847,7 @@ func (s *Server) register() {
 			}
 			st, terr := s.eng.TxOutcome(ctx, token, txID)
 			if terr != nil {
-				return nil, s.wireErr(terr)
+				return nil, s.wireErrFor(req, terr)
 			}
 			return txStatusMap(st), nil
 		}
@@ -1833,7 +1861,7 @@ func (s *Server) register() {
 		}
 		list, perr := s.eng.PendingOutcomes(ctx, token, limit)
 		if perr != nil {
-			return nil, s.wireErr(perr)
+			return nil, s.wireErrFor(req, perr)
 		}
 		out := make([]any, 0, len(list))
 		for _, st := range list {
@@ -1860,7 +1888,7 @@ func (s *Server) register() {
 		}
 		res, err := s.eng.Execute(ctx, token, connID, sqlText, peerIP(req))
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return resultMap(res), nil
 	})
@@ -1993,7 +2021,7 @@ func (s *Server) registerM6() {
 		}
 		names, err := s.eng.ListSchemas(ctx, token, connID)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		out := make([]any, 0, len(names))
 		for _, n := range names {
@@ -2019,7 +2047,7 @@ func (s *Server) registerM6() {
 		}
 		tables, err := s.eng.ListTables(ctx, token, connID, schema)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		out := make([]any, 0, len(tables))
 		for _, t := range tables {
@@ -2054,7 +2082,7 @@ func (s *Server) registerM6() {
 		}
 		cols, err := s.eng.ListColumns(ctx, token, connID, schema, table)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		out := make([]any, 0, len(cols))
 		for _, c := range cols {
@@ -2084,7 +2112,7 @@ func (s *Server) registerM6() {
 		}
 		supported, routines, err := s.eng.ListRoutines(ctx, token, connID, schema)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		list := make([]any, 0, len(routines))
 		for _, r := range routines {
@@ -2107,7 +2135,7 @@ func (s *Server) registerM6() {
 		}
 		users, err := s.auth.ListUsers(ctx, token)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		out := make([]any, 0, len(users))
 		for _, u := range users {
@@ -2133,7 +2161,7 @@ func (s *Server) registerM6() {
 		}
 		id, err := s.eng.CreateWorkspace(ctx, token, name, peerIP(req))
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return id, nil
 	})
@@ -2147,7 +2175,7 @@ func (s *Server) registerM6() {
 		}
 		views, err := s.eng.ListWorkspaces(ctx, token)
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		out := make([]any, 0, len(views))
 		for _, w := range views {
@@ -2180,7 +2208,7 @@ func (s *Server) registerM6() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.eng.RenameWorkspace(ctx, token, wsID, name, peerIP(req)))
+		return nil, s.wireErrFor(req, s.eng.RenameWorkspace(ctx, token, wsID, name, peerIP(req)))
 	})
 	s.handle("workspace.delete", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
@@ -2194,7 +2222,7 @@ func (s *Server) registerM6() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.eng.DeleteWorkspace(ctx, token, wsID, peerIP(req)))
+		return nil, s.wireErrFor(req, s.eng.DeleteWorkspace(ctx, token, wsID, peerIP(req)))
 	})
 	s.handle("workspace.attach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -2212,7 +2240,7 @@ func (s *Server) registerM6() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.eng.AttachConnection(ctx, token, wsID, connID, peerIP(req)))
+		return nil, s.wireErrFor(req, s.eng.AttachConnection(ctx, token, wsID, connID, peerIP(req)))
 	})
 	s.handle("workspace.detach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -2230,7 +2258,7 @@ func (s *Server) registerM6() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.eng.DetachConnection(ctx, token, wsID, connID, peerIP(req)))
+		return nil, s.wireErrFor(req, s.eng.DetachConnection(ctx, token, wsID, connID, peerIP(req)))
 	})
 }
 
@@ -2278,14 +2306,14 @@ func (s *Server) registerPressure() {
 		// The authorization lives in core, so this handler cannot be the place
 		// the rule is decided.
 		if _, err := s.auth.RequireAdminToken(ctx, token); err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		if s.pressure == nil {
-			return nil, s.wireErr(errNoPressure)
+			return nil, s.wireErrFor(req, errNoPressure)
 		}
 		snap, err := s.pressure()
 		if err != nil {
-			return nil, s.wireErr(err)
+			return nil, s.wireErrFor(req, err)
 		}
 		return pressureWire(snap), nil
 	})
