@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/autodb/core/config"
+	"github.com/yongjohnlee80/autodb/core/engine"
+	"github.com/yongjohnlee80/autodb/sql/deployments"
 )
 
 // backup_test.go holds the copy a SQLite store gets before its schema changes:
@@ -49,13 +52,15 @@ func TestEverySchemaChangeOfAnExistingStoreIsBackedUpFirst(t *testing.T) {
 	}{
 		"a legacy v16 upgrade": {func(t *testing.T, cfg config.Meta) { _ = openLegacyStore(t, cfg, 16).Close() }, "pre-legacy-v16-"},
 		"a v17 adoption":       {func(t *testing.T, cfg config.Meta) { _ = legacyV17(t, cfg).Close() }, "pre-000001-"},
-		"a pending 000003": {func(t *testing.T, cfg config.Meta) {
+		// The latest script, whichever it is: naming one number here broke
+		// this cell the day a later script shipped.
+		"a pending latest script": {func(t *testing.T, cfg config.Meta) {
 			s := open(t, cfg)
-			if _, err := RevertScript(context.Background(), s, 3); err != nil {
+			if _, err := RevertScript(context.Background(), s, latestUpdate(t).Number); err != nil {
 				t.Fatal(err)
 			}
 			_ = s.Close()
-		}, "pre-000003-"},
+		}, fmt.Sprintf("pre-%06d-", latestUpdateNumberSQLite())},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg, dir := fileStore(t)
@@ -240,4 +245,25 @@ func TestRotationKeepsThreeAndOnlyItsOwn(t *testing.T) {
 	if got := len(entries) - len(notOwn); got != backupsKept {
 		t.Errorf("%d of this store's backups kept, want %d: %v", got, backupsKept, have)
 	}
+}
+
+// latestUpdate is the newest SQLite update script, which the backup cells revert.
+func latestUpdate(t *testing.T) deployments.Script {
+	t.Helper()
+	updates, err := deployments.Updates(engine.SQLite)
+	if err != nil || len(updates) == 0 {
+		t.Fatalf("SQLite update scripts: %v (%d found)", err, len(updates))
+	}
+	return updates[len(updates)-1]
+}
+
+// latestUpdateNumberSQLite is latestUpdate's number where no *testing.T is in
+// scope yet (building the table of cells). A failure there is reported by
+// latestUpdate when the cell runs.
+func latestUpdateNumberSQLite() int {
+	updates, err := deployments.Updates(engine.SQLite)
+	if err != nil || len(updates) == 0 {
+		return 0
+	}
+	return updates[len(updates)-1].Number
 }

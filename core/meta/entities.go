@@ -300,6 +300,13 @@ type Session struct {
 	CreatedAt int64
 	ExpiresAt int64
 	Revoked   int64 // 0/1 flag
+	// A remote session's binding (schema script 000004_update_remote_access): the
+	// device its token is bound to, the connection that owns it, and the end
+	// of its reconnect grace once that connection drops. 0/"" for a local
+	// session.
+	DeviceID      int64
+	AttachedConn  string
+	DetachedUntil int64
 }
 
 type SessionField string
@@ -312,6 +319,10 @@ const (
 	SessCreatedAt SessionField = "created_at"
 	SessExpiresAt SessionField = "expires_at"
 	SessRevoked   SessionField = "revoked"
+
+	SessDeviceID      SessionField = "device_id"
+	SessAttachedConn  SessionField = "attached_conn"
+	SessDetachedUntil SessionField = "detached_until"
 )
 
 func newSessions(conn dao.DataConn) *dao.Schema[*Session, SessionField, Sort, int64] {
@@ -323,6 +334,10 @@ func newSessions(conn dao.DataConn) *dao.Schema[*Session, SessionField, Sort, in
 		SessCreatedAt: {Column: "created_at", Scan: func(r *Session) any { return &r.CreatedAt }, Value: func(r *Session) any { return r.CreatedAt }},
 		SessExpiresAt: {Column: "expires_at", Scan: func(r *Session) any { return &r.ExpiresAt }, Value: func(r *Session) any { return r.ExpiresAt }},
 		SessRevoked:   {Column: "revoked", Scan: func(r *Session) any { return &r.Revoked }, Value: func(r *Session) any { return r.Revoked }},
+
+		SessDeviceID:      {Column: "device_id", Scan: func(r *Session) any { return &r.DeviceID }, Value: func(r *Session) any { return r.DeviceID }},
+		SessAttachedConn:  {Column: "attached_conn", Scan: func(r *Session) any { return &r.AttachedConn }, Value: func(r *Session) any { return r.AttachedConn }},
+		SessDetachedUntil: {Column: "detached_until", Scan: func(r *Session) any { return &r.DetachedUntil }, Value: func(r *Session) any { return r.DetachedUntil }},
 	})
 }
 

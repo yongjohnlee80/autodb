@@ -107,7 +107,9 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 			return copyAll(ctx, src.Sessions, dst.Sessions, func(r *Session) map[SessionField]any {
 				return map[SessionField]any{SessID: r.ID, SessTokenHash: nb(r.TokenHash),
 					SessUserID: r.UserID, SessIP: r.IP, SessCreatedAt: r.CreatedAt,
-					SessExpiresAt: r.ExpiresAt, SessRevoked: r.Revoked}
+					SessExpiresAt: r.ExpiresAt, SessRevoked: r.Revoked,
+					SessDeviceID: r.DeviceID, SessAttachedConn: r.AttachedConn,
+					SessDetachedUntil: r.DetachedUntil}
 			})
 		}},
 		{"script_history", func() (int64, error) {
@@ -184,6 +186,52 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					PATLastUsedAt: r.LastUsedAt, PATRevoked: r.Revoked,
 					PATConnID: r.ConnID, PATDebugCleartext: r.DebugCleartext,
 				}
+			})
+		}},
+		// REMOTE ACCESS. SSH keys after users; devices after
+		// keys; a device's addresses after devices. Blocks and denial claims
+		// reference nothing. Every column: a migration that carried the rows
+		// and lost a fingerprint would refuse every remote connection with
+		// the counts still matching.
+		{"user_ssh_keys", func() (int64, error) {
+			return copyAll(ctx, src.SSHKeys, dst.SSHKeys, func(r *UserSSHKey) map[UserSSHKeyField]any {
+				return map[UserSSHKeyField]any{SSHKeyID: r.ID, SSHKeyUserID: r.UserID,
+					SSHKeyLabel: r.Label, SSHKeyPublicKey: r.PublicKey,
+					SSHKeyFingerprint: r.Fingerprint, SSHKeyAddedBy: r.AddedBy,
+					SSHKeyCreatedAt: r.CreatedAt, SSHKeyLastUsedAt: r.LastUsedAt,
+					SSHKeyRevokedAt: r.RevokedAt, SSHKeyRevokedBy: r.RevokedBy}
+			})
+		}},
+		{"remote_devices", func() (int64, error) {
+			return copyAll(ctx, src.RemoteDevices, dst.RemoteDevices, func(r *RemoteDevice) map[RemoteDeviceField]any {
+				return map[RemoteDeviceField]any{DevID: r.ID, DevSSHKeyID: r.SSHKeyID,
+					DevUserID: r.UserID, DevPublicKey: r.PublicKey,
+					DevFingerprint: r.Fingerprint, DevEnrolledAt: r.EnrolledAt,
+					DevEnrolledIP: r.EnrolledIP, DevKeyCreatedAt: r.KeyCreatedAt,
+					DevLastSeenAt: r.LastSeenAt, DevRevokedAt: r.RevokedAt,
+					DevRevokedBy: r.RevokedBy}
+			})
+		}},
+		{"remote_device_ips", func() (int64, error) {
+			return copyAll(ctx, src.RemoteDeviceIPs, dst.RemoteDeviceIPs, func(r *RemoteDeviceIP) map[RemoteDeviceIPField]any {
+				return map[RemoteDeviceIPField]any{DevIPID: r.ID, DevIPDeviceID: r.DeviceID,
+					DevIPIP: r.IP, DevIPFirstSeenAt: r.FirstSeenAt, DevIPLastSeenAt: r.LastSeenAt}
+			})
+		}},
+		{"remote_ip_blocks", func() (int64, error) {
+			return copyAll(ctx, src.RemoteIPBlocks, dst.RemoteIPBlocks, func(r *RemoteIPBlock) map[RemoteIPBlockField]any {
+				return map[RemoteIPBlockField]any{BlockPrefix: r.Prefix,
+					BlockFailures: r.ConsecutiveFailures, BlockLastFailureAt: r.LastFailureAt,
+					BlockUntil: r.BlockedUntil, BlockUnblockedBy: r.UnblockedBy,
+					BlockUnblockedAt: r.UnblockedAt}
+			})
+		}},
+		{"remote_denial_events", func() (int64, error) {
+			return copyAll(ctx, src.RemoteDenials, dst.RemoteDenials, func(r *RemoteDenial) map[RemoteDenialField]any {
+				return map[RemoteDenialField]any{DenialEventID: r.EventID, DenialPrefix: r.Prefix,
+					DenialOccurredAt: r.OccurredAt, DenialReason: r.Reason,
+					DenialOfferedKeyFP: r.OfferedKeyFP, DenialUserID: r.UserID,
+					DenialAuditID: r.AuditID}
 			})
 		}},
 		{"store_meta", func() (int64, error) {
@@ -295,6 +343,11 @@ func countableTables(ctx context.Context, s *Store) []countableTable {
 		{"pats", s.PATs.OnCtx(ctx).Count},
 		{"store_meta", s.KV.OnCtx(ctx).Count},
 		{"keyslots", s.Keyslots.OnCtx(ctx).Count},
+		{"user_ssh_keys", s.SSHKeys.OnCtx(ctx).Count},
+		{"remote_devices", s.RemoteDevices.OnCtx(ctx).Count},
+		{"remote_device_ips", s.RemoteDeviceIPs.OnCtx(ctx).Count},
+		{"remote_ip_blocks", s.RemoteIPBlocks.OnCtx(ctx).Count},
+		{"remote_denial_events", s.RemoteDenials.OnCtx(ctx).Count},
 	}
 }
 
@@ -333,13 +386,14 @@ func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error 
 }
 
 // serialTables lists the tables whose BIGSERIAL sequences must advance past
-// the explicitly-copied ids (store_meta and keyslots have natural keys — a
-// string `key` and a string `kind` — so neither is listed and neither has a
-// sequence to advance).
+// the explicitly-copied ids (store_meta, keyslots, remote_ip_blocks and
+// remote_denial_events have natural keys — a string `key`, `kind`, `prefix`
+// and `event_id` — so none is listed and none has a sequence to advance).
 var serialTables = []string{
 	"users", "connections", "workspaces", "workspace_connections",
 	"grants", "sessions", "script_history", "audit_log", "tx_outcomes",
 	"tx_pending", "ip_allowlist", "user_ip_allowlist", "pats",
+	"user_ssh_keys", "remote_devices", "remote_device_ips",
 }
 
 // fixSequences advances each table's id sequence: setval(max, is_called) so
