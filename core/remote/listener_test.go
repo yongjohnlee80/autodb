@@ -499,3 +499,30 @@ func TestHangupEndsTheSession(t *testing.T) {
 		t.Fatal("the session is still open after Hangup")
 	}
 }
+
+// Extra channels opened together after the subsystem are ONE violation: the
+// connection is counted once, however many opens were queued.
+func TestQueuedExtraChannelsAreCountedOnce(t *testing.T) {
+	k := newSigner(t)
+	d := &denials{}
+	s := startListener(t, map[string]registered{ssh.FingerprintSHA256(k.PublicKey()): {1, 1}}, func(c *remote.Config) {
+		c.Denied = d.record
+	})
+	c, err := s.dial(t, ssh.PublicKeys(k))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	openRPC(t, c)
+	s.accept(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _, _, _ = c.OpenChannel("session", nil) }()
+	}
+	wg.Wait()
+	time.Sleep(200 * time.Millisecond)
+	if got := d.list(); len(got) != 1 || got[0].reason != remote.DeniedProtocol {
+		t.Fatalf("five queued extra channels were counted as %+v; want one protocol violation", got)
+	}
+}

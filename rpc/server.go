@@ -440,20 +440,30 @@ var remotePreLogin = map[string]bool{
 	"auth.needs_bootstrap": true,
 }
 
-// remoteRefusalGrace is how long a remote connection that violated the
-// surface keeps its session after the refusal, so the refusal is delivered
-// before the connection ends.
-const remoteRefusalGrace = 250 * time.Millisecond
+// remoteHangupBackstop is how long a remote connection that violated the
+// surface may stay open doing nothing. Its refusal is written first; its NEXT
+// request hangs it up at once (remoteViolation). The backstop only frees a
+// connection that sends nothing more, and it is long enough that a client
+// reading the refusal slowly still receives it.
+const remoteHangupBackstop = 10 * time.Second
 
 // remoteViolation counts a remote connection's call of a method it may not
-// make there, once per connection, and ends the connection after the refusal
-// has had time to arrive: one violation per connection, and the next attempt
-// needs a new connection, which the limiter admits or not.
-func (s *Server) remoteViolation(sess *golibrpc.Session, peer *remote.Peer) {
-	if done, _ := sess.Value(sessRemoteViolated).(bool); done {
-		return
+// make there, once per connection (the Peer's claim, shared with the
+// listener's own refusals), and returns whether the connection had ALREADY
+// violated: then the caller hangs it up at once, uncounted, because its
+// refusal was answered and it has no further guess to make.
+func (s *Server) remoteViolation(sess *golibrpc.Session, peer *remote.Peer) (again bool) {
+	first := peer.ClaimViolation()
+	if peer == nil {
+		// A connection with no Peer cannot be hung up; count it once by the
+		// session instead.
+		done, _ := sess.Value(sessRemoteViolated).(bool)
+		sess.SetValue(sessRemoteViolated, true)
+		first = !done
 	}
-	sess.SetValue(sessRemoteViolated, true)
+	if !first {
+		return true
+	}
 	if s.remoteDenied != nil {
 		ip, user := "", int64(0)
 		if peer != nil {
@@ -470,7 +480,8 @@ func (s *Server) remoteViolation(sess *golibrpc.Session, peer *remote.Peer) {
 		}
 		s.remoteDenied(ip, "protocol_violation", user)
 	}
-	time.AfterFunc(remoteRefusalGrace, peer.Hangup)
+	time.AfterFunc(remoteHangupBackstop, peer.Hangup)
+	return false
 }
 
 // gate enforces handshake-before-methods: sys.hello is the
@@ -486,13 +497,24 @@ func (s *Server) gate(sess *golibrpc.Session, method string) error {
 	// The remote surface, decided here and not in handlers: a refused method
 	// never reaches its handler.
 	if peer, ok := remotePeer(sess); ok {
+		// A connection that already violated the surface had its refusal;
+		// whatever it sends next ends it, uncounted.
+		if peer.Violated() {
+			peer.Hangup()
+			return &golibrpc.Error{Code: CodeRemoteLoginRequired,
+				Message: "this remote connection is closed"}
+		}
 		if remoteRefused[method] {
-			s.remoteViolation(sess, peer)
+			if s.remoteViolation(sess, peer) {
+				peer.Hangup()
+			}
 			return &golibrpc.Error{Code: CodeRemoteRefused,
 				Message: method + " is available on the server host only"}
 		}
 		if !remotePreLogin[method] {
-			s.remoteViolation(sess, peer)
+			if s.remoteViolation(sess, peer) {
+				peer.Hangup()
+			}
 			return &golibrpc.Error{Code: CodeRemoteLoginRequired,
 				Message: "sign in on this remote connection first"}
 		}

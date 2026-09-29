@@ -299,7 +299,11 @@ func (l *Listener) serve(c net.Conn) {
 		for nc := range rest {
 			_ = nc.Reject(ssh.Prohibited, "one autodb-rpc channel per connection")
 			_ = sconn.Close()
-			l.denied(ip, DeniedProtocol, offered, peer.UserID)
+			// Counted once per connection: several opens already queued
+			// when the first is refused are one violation.
+			if peer.ClaimViolation() {
+				l.denied(ip, DeniedProtocol, offered, peer.UserID)
+			}
 		}
 	}()
 	rc := &conn{Conn: Bridge(closeBoth{ch, sconn}, sconn.LocalAddr(), sconn.RemoteAddr()), peer: peer}

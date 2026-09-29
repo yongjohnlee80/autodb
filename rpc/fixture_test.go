@@ -49,6 +49,9 @@ type fixture struct {
 	// srv is the server object itself, for the few claims that are about the
 	// daemon rather than about a round-trip -- the pinned verb surface, so far.
 	srv *rpc.Server
+	// remoteAddr is the remote-surface listener's address, for a fixture
+	// built with remoteFixture.
+	remoteAddr string
 }
 
 // frontDoorConn creates an explicitly exposed v1compat connection a PAT may

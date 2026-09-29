@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/yongjohnlee80/golib/msgpack"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
 
@@ -288,7 +290,7 @@ func TestThreeFailedRemoteLoginsBlockTheAddress(t *testing.T) {
 }
 
 // End to end: a remote connection's call of a method it may not make before
-// signing in is refused, counted, and the connection ends after the refusal.
+// signing in is refused and counted, and the connection's next request ends it.
 func TestARemoteProtocolViolationIsCountedAndHungUp(t *testing.T) {
 	r := newRemoteRig(t)
 	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
@@ -310,10 +312,13 @@ func TestARemoteProtocolViolationIsCountedAndHungUp(t *testing.T) {
 	if !errors.As(err, &re) || re.Code != rpc.CodeRemoteLoginRequired {
 		t.Fatalf("conn.list: %v; want the refusal delivered", err)
 	}
+	// Its next request ends it: the refusal was answered, and no further
+	// guess is made on this connection.
+	_, _ = cli.Call(ctx, "sys.hello", map[string]any{"protocol": rpc.Protocol})
 	select {
 	case <-cli.Done():
 	case <-time.After(3 * time.Second):
-		t.Fatal("the connection was not hung up after the violation")
+		t.Fatal("the connection was not hung up after its next request")
 	}
 	if n := auditRows(t, r.store, "remote_access_denied"); n != 1 {
 		t.Fatalf("remote_access_denied rows %d, want 1", n)
@@ -331,5 +336,85 @@ func TestStartRemoteRefusesToRunWithoutItsLimiter(t *testing.T) {
 	defer stop()
 	if err == nil || addr != nil {
 		t.Fatalf("startRemote without a limiter: %v, %v; want it refused", addr, err)
+	}
+}
+
+// A remote violation's refusal is written before the connection ends, however
+// slowly the client reads it; and the connection's NEXT request ends it. Here
+// the client waits 600ms before reading the refusal (a timer that hung up at a
+// fixed delay would already have closed the session), then sends again and
+// the session ends. One violation is counted.
+func TestARemoteRefusalArrivesBeforeTheHangupAndTheNextRequestEndsIt(t *testing.T) {
+	r := newRemoteRig(t)
+	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
+		t.Fatal(err)
+	}
+	addr, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.lim, r.fan, "t", func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	c, err := ssh.Dial("tcp", addr.String(), &ssh.ClientConfig{User: "autodb",
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(r.key)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ch, reqs, err := c.OpenChannel("session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go ssh.DiscardRequests(reqs)
+	if ok, err := ch.SendRequest("subsystem", true, ssh.Marshal(struct{ Name string }{remote.Subsystem})); err != nil || !ok {
+		t.Fatalf("subsystem: %v %v", ok, err)
+	}
+	br := bufio.NewReader(ch)
+	send := func(id int64, method string, params ...any) {
+		b, err := msgpack.Marshal([]any{int64(0), id, method, params})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ch.Write(b); err != nil {
+			t.Fatalf("write %s: %v", method, err)
+		}
+	}
+	read := func() ([]any, error) {
+		v, err := msgpack.Decode(br, nil)
+		if err != nil {
+			return nil, err
+		}
+		arr, _ := v.([]any)
+		return arr, nil
+	}
+	send(1, "sys.hello", map[string]any{"protocol": rpc.Protocol})
+	if _, err := read(); err != nil {
+		t.Fatalf("hello: %v", err)
+	}
+	send(2, "conn.list", "any-token")
+	time.Sleep(600 * time.Millisecond) // a slow reader
+	arr, err := read()
+	if err != nil || len(arr) != 4 {
+		t.Fatalf("the refusal was lost before a slow reader read it: %v, %#v", err, arr)
+	}
+	if m, _ := arr[2].(map[string]any); m["code"] != rpc.CodeRemoteLoginRequired {
+		t.Fatalf("refusal %#v; want CodeRemoteLoginRequired", arr[2])
+	}
+	send(3, "sys.hello", map[string]any{"protocol": rpc.Protocol})
+	done := make(chan error, 1)
+	go func() {
+		for {
+			if _, err := read(); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the next request did not end the connection")
+	}
+	if n := auditRows(t, r.store, "remote_access_denied"); n != 1 {
+		t.Fatalf("remote_access_denied rows %d, want 1", n)
 	}
 }
