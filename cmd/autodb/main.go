@@ -24,6 +24,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/config"
 	coreexec "github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/notes"
 	"github.com/yongjohnlee80/autodb/core/outcome"
 	"github.com/yongjohnlee80/autodb/core/remote"
 	"github.com/yongjohnlee80/autodb/core/remotectl"
@@ -1169,7 +1170,7 @@ func runUI(configPath string) error {
 	// root is `<base>/u-<subject>`, and the subject is the daemon's canonical
 	// identity, which does not exist until afterLogin. Constructing here is what
 	// forced the terminal onto the ownerless base.
-	notesFor := tuiapp.PersonalNotesIn(notesRoot)
+	notesFor := notes.PersonalNotesIn(notesRoot)
 
 	// NO SPAWN FROM A CLIENT-ONLY CONFIG.
 	//

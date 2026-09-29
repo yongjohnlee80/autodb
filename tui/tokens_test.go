@@ -11,6 +11,7 @@ import (
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
 
+	"github.com/yongjohnlee80/autodb/core/notes"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
@@ -298,7 +299,7 @@ func TestMintCommittedBeforeUndeliveredUIHandoffIsRevokedOnQuit(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := tuicore.NewTestBackend(120, 32)
-	h, err := tuiapp.New(uiSession, tuiapp.PersonalNotesIn(t.TempDir()), nil,
+	h, err := tuiapp.New(uiSession, notes.PersonalNotesIn(t.TempDir()), nil,
 		tuiapp.Options{Frontend: tuiapp.FrontendWeb,
 			App: []tuicore.AppOption{tuicore.WithBackend(backend), tuicore.WithMinFrameInterval(0)}})
 	if err != nil {

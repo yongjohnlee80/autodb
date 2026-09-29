@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yongjohnlee80/autodb/core/notes"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/logger"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
@@ -106,7 +107,7 @@ func TestUsersManagerGrantsAConnectionAndOpensItsPersonalAddresses(t *testing.T)
 	if !visible {
 		t.Fatal("the grant did not make bravo visible to the reader")
 	}
-	_, readerScreen := tuiapp.RunHost(t, verify, tuiapp.PersonalNotesIn(t.TempDir()),
+	_, readerScreen := tuiapp.RunHost(t, verify, notes.PersonalNotesIn(t.TempDir()),
 		tuiapp.Options{Frontend: tuiapp.FrontendWeb}, 120, 32)
 	readerScreen.WaitForText(t, "signed in as new-reader")
 	readerScreen.Keys(t, key(' '))

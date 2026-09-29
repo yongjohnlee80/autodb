@@ -1,6 +1,6 @@
 //go:build unix
 
-package tui
+package notes
 
 import (
 	"fmt"
@@ -21,7 +21,7 @@ func openNoFollow(path string) (*os.File, error) {
 	}
 	if !st.Mode().IsRegular() {
 		f.Close()
-		return nil, fmt.Errorf("tui: %s is not a regular file", path)
+		return nil, fmt.Errorf("notes: %s is not a regular file", path)
 	}
 	return f, nil
 }
@@ -34,7 +34,7 @@ func fileIdentity(f *os.File) (dev, ino uint64, err error) {
 	}
 	sys, ok := st.Sys().(*syscall.Stat_t)
 	if !ok {
-		return 0, 0, fmt.Errorf("tui: no stat identity available")
+		return 0, 0, fmt.Errorf("notes: no stat identity available")
 	}
 	return uint64(sys.Dev), uint64(sys.Ino), nil
 }

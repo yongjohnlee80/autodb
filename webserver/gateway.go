@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/autodb/core/config"
+	"github.com/yongjohnlee80/autodb/core/notes"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/auth"
 	"github.com/yongjohnlee80/golib/auth/ipallow"
@@ -80,7 +81,7 @@ type Config struct {
 	// that appRunner calls it. Restoring the old construction while leaving the
 	// helper intact reintroduced the bug with every test green. A test
 	// that captures this factory fails if the runner stops going through it.
-	newHost func(*tuiapp.Session, tuiapp.NotesFactory, func(), tuiapp.Options) (*tuiapp.Host, error)
+	newHost func(*tuiapp.Session, notes.NotesFactory, func(), tuiapp.Options) (*tuiapp.Host, error)
 }
 
 // ListenAddr is where the browser surface listens, and the ONLY place that is
@@ -167,7 +168,7 @@ func New(cfg Config) (*Gateway, error) {
 
 	// No shared note store. One root per authenticated user, built when the
 	// session is: a single root would hand every web user every other web user's
-	// notes, because tuiapp.NoteStore reads from disk and disk has no identity
+	// notes, because notes.Store reads from disk and disk has no identity
 	// The terminal frontend never had this problem — the OS gave it one
 	// user per process.
 	g := &Gateway{cfg: cfg}
@@ -353,11 +354,11 @@ func (r *appRunner) Run(ctx context.Context) error {
 	// Built here as well as passed as a factory, because the gateway wants to
 	// FAIL THE SESSION on an unusable subject rather than start a UI that will
 	// report notes unavailable — the browser user cannot fix it from there.
-	notes, err := tuiapp.NewPersonalNotes(r.gw.cfg.NotesRoot, r.user.subject)
+	store, err := notes.NewPersonalNotes(r.gw.cfg.NotesRoot, r.user.subject)
 	if err != nil {
 		return fmt.Errorf("webserver: note store for %q: %w", r.user.subject, err)
 	}
-	notesFor := tuiapp.PersonalNotesIn(r.gw.cfg.NotesRoot)
+	notesFor := notes.PersonalNotesIn(r.gw.cfg.NotesRoot)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -373,7 +374,7 @@ func (r *appRunner) Run(ctx context.Context) error {
 	if newHost == nil {
 		newHost = tuiapp.New
 	}
-	host, err := newHost(r.user.sess, notesFor, cancel, r.gw.hostOptions(notes.Root(), r.backend))
+	host, err := newHost(r.user.sess, notesFor, cancel, r.gw.hostOptions(store.Root(), r.backend))
 	if err != nil {
 		return fmt.Errorf("webserver: build the TUI: %w", err)
 	}

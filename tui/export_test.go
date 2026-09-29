@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"github.com/yongjohnlee80/autodb/core/notes"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,7 +24,7 @@ func ProgramOptions(opt Options) []tuidecl.ProgramOption {
 
 // RunHost runs the QML host over session on a test screen, as New would:
 // built, attached, then run. The host's background work stops with the test.
-func RunHost(t testing.TB, session *Session, notesFor NotesFactory, opt Options, w, height int) (*Host, *decltest.Screen) {
+func RunHost(t testing.TB, session *Session, notesFor notes.NotesFactory, opt Options, w, height int) (*Host, *decltest.Screen) {
 	t.Helper()
 	h := newHost(session, notesFor, nil, opt)
 	s := decltest.RunWith(t, w, height, h.attach, h.options(opt)...)
@@ -354,7 +355,7 @@ func (h *Host) HoldNoteListing(started chan<- struct{}, resume <-chan struct{}, 
 	ready := make(chan struct{})
 	h.p.Post(func() {
 		h.noteOpenListed = func() { applied <- struct{}{} }
-		h.listNotes = func(store *NoteStore, names map[int64]string) ([]noteChoice, error) {
+		h.listNotes = func(store *notes.Store, names map[int64]string) ([]noteChoice, error) {
 			started <- struct{}{}
 			<-resume
 			return listNoteChoices(store, names)

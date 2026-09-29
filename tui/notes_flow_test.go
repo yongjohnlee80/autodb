@@ -10,6 +10,7 @@ import (
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
 
+	"github.com/yongjohnlee80/autodb/core/notes"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
@@ -23,7 +24,7 @@ func notesHost(t *testing.T) (*tuiapp.Host, *decltest.Screen, string) {
 	base := t.TempDir()
 	session := tuiapp.NewSession(seeded(t), logger.Nop{}, nil)
 	t.Cleanup(session.Close)
-	h, s := tuiapp.RunHost(t, session, tuiapp.PersonalNotesIn(base), tuiapp.Options{}, 120, 32)
+	h, s := tuiapp.RunHost(t, session, notes.PersonalNotesIn(base), tuiapp.Options{}, 120, 32)
 	loginAs(t, s, "root", rootPass)
 	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
 	s.WaitForText(t, "main (1)")

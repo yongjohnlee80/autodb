@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yongjohnlee80/autodb/core/notes"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/logger"
 )
@@ -61,11 +62,11 @@ func serveGatewayCfg(t *testing.T, cfg Config) string {
 func TestNotesMode_DefaultIsPerUserIsolation(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	as, err := tuiapp.NewPersonalNotes(base, "alice")
+	as, err := notes.NewPersonalNotes(base, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	bs, err := tuiapp.NewPersonalNotes(base, "bob")
+	bs, err := notes.NewPersonalNotes(base, "bob")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestNotesMode_UnsafeSubjectStillRefused(t *testing.T) {
 		// There is no mode to vary any more; the predicate is unconditional. A
 		// name that cannot be a safe path component is REFUSED, never rewritten:
 		// two names that sanitise alike would share notes.
-		if _, err := tuiapp.NewPersonalNotes(base, subject); err == nil {
+		if _, err := notes.NewPersonalNotes(base, subject); err == nil {
 			t.Errorf("NewPersonalNotes(%q) was accepted; it must be refused, never "+
 				"rewritten", subject)
 		}
@@ -237,7 +238,7 @@ func TestNotesMode_RunnerBuildsTheHostWithTheEffectiveRoot(t *testing.T) {
 
 	var mu sync.Mutex
 	var built *tuiapp.Options
-	factory := func(sess *tuiapp.Session, notesFor tuiapp.NotesFactory, cancel func(),
+	factory := func(sess *tuiapp.Session, notesFor notes.NotesFactory, cancel func(),
 		opt tuiapp.Options) (*tuiapp.Host, error) {
 		mu.Lock()
 		built = &opt

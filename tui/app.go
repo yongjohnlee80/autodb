@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/yongjohnlee80/autodb/core/notes"
 	"github.com/yongjohnlee80/autodb/core/pressure"
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
@@ -38,7 +39,7 @@ import (
 type Host struct {
 	p        *tuidecl.Program
 	session  *Session
-	notesFor NotesFactory
+	notesFor notes.NotesFactory
 	quit     func()
 	frontend Frontend
 	catalog  *CatalogOf[*Host]
@@ -50,7 +51,7 @@ type Host struct {
 	// about is the runner's build and location detail (about.go); notes is
 	// the signed-in user's note store, nil before sign-in.
 	about AboutInfo
-	notes *NoteStore
+	notes *notes.Store
 	// auth is where sign-in stands, as App.auth tells the document; idEpoch
 	// counts the identities signed in, so a late answer asked under one is
 	// dropped under the next.
@@ -82,7 +83,7 @@ type Host struct {
 	buf            noteBuffer
 	workspaces     *tuidecl.ListModel
 	noteOpen       *noteOpenState
-	listNotes      func(*NoteStore, map[int64]string) ([]noteChoice, error)
+	listNotes      func(*notes.Store, map[int64]string) ([]noteChoice, error)
 	noteOpenListed func() // test-only: the held listing callback reached the UI loop
 	// prefs is the editor profile and themePref the theme, each stored on the
 	// account (accountpref.go).
@@ -216,7 +217,7 @@ type Options struct {
 //
 // One tuidecl.NewProgram over Host.options, then the host attached to it — the
 // same options every test and the QML check build from.
-func New(session *Session, notesFor NotesFactory, quit func(), opt Options) (*Host, error) {
+func New(session *Session, notesFor notes.NotesFactory, quit func(), opt Options) (*Host, error) {
 	h := newHost(session, notesFor, quit, opt)
 	p, err := tuidecl.NewProgram(h.options(opt)...)
 	if err != nil {
@@ -231,7 +232,7 @@ func New(session *Session, notesFor NotesFactory, quit func(), opt Options) (*Ho
 
 // newHost is the host before its program exists: options needs it, to hand
 // the document its commands.
-func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) *Host {
+func newHost(session *Session, notesFor notes.NotesFactory, quit func(), opt Options) *Host {
 	if quit == nil {
 		quit = func() {}
 	}
