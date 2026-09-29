@@ -1,11 +1,18 @@
 package tui_test
 
 import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/yongjohnlee80/golib/logger"
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
+
+	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
 func TestQuerySearchFindsAndWrapsWithoutChangingEditorMode(t *testing.T) {
@@ -179,5 +186,124 @@ func TestUnicodeQuerySearchLandsAtAGraphemeColumn(t *testing.T) {
 	row, col := h.SearchCursor("query")
 	if row != 0 || col != 5 {
 		t.Fatalf("Unicode match landed at row %d, col %d instead of grapheme column 5", row, col)
+	}
+}
+
+// seededTwice is one connection with two tables whose names both match
+// "items", attached to two workspaces: the same table rows, with the same
+// keys, under each.
+func seededTwice(t *testing.T) string {
+	t.Helper()
+	addr := startRealServer(t)
+	sess := tuiapp.NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(sess.Close)
+	ctx := context.Background()
+	if _, err := sess.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Bind().Bootstrap(ctx, "root", rootPass); err != nil {
+		t.Fatal(err)
+	}
+	b := sess.Bind()
+	cid, err := b.CreateConnection(ctx, "bravo", "sqlite", filepath.Join(t.TempDir(), "b.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		`CREATE TABLE items (id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE items_archive (id INTEGER PRIMARY KEY)`,
+	} {
+		if _, err := b.Run(ctx, cid, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"main", "zeta"} {
+		ws, err := b.CreateWorkspace(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.AttachConnection(ctx, ws, cid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return addr
+}
+
+// openTables opens the workspace row under the cursor down to its tables:
+// the workspace, its connections, the connection, its schema, the tables.
+func openTables(t *testing.T, s *decltest.Screen, ws string) {
+	t.Helper()
+	s.Keys(t, enter())
+	s.WaitFor(t, ws+"'s connections", func(sc string) bool { return rowUnder(s, ws, "connections") })
+	// Each step waits for the row to appear UNDER its parent: a bare text wait
+	// is satisfied too early by a row elsewhere (the schema "main" and the
+	// workspace "main").
+	for _, step := range []struct{ parent, child string }{
+		// The schema is anchored by its indent: "▾ main" alone would find the
+		// workspace row "main (1)" first.
+		{"connections", "bravo sqlite"}, {"bravo sqlite", "main"}, {"    ▾ main", "tables"}, {"tables", "items"},
+	} {
+		s.Keys(t, key('j'), enter())
+		s.WaitFor(t, step.child+" under "+step.parent, func(string) bool { return rowUnder(s, step.parent, step.child) })
+	}
+	s.WaitForText(t, "items_archive")
+}
+
+// n and N walk every match in tree order and wrap, from the row the cursor is
+// on — and "the row" is its whole key path: the same table under a second
+// workspace has the same keys, so a cursor kept by its key alone would be
+// found under the first workspace again and n would go backwards.
+func TestExplorerSearchWalksManyMatchesAndTellsTwinRowsApart(t *testing.T) {
+	h, s := runHostSized(t, seededTwice(t), 120, 40)
+	loginAs(t, s, "root", rootPass)
+	s.WaitFor(t, "mounted", func(sc string) bool { return strings.Contains(sc, "▸ zeta") && h.PaneWithFocus() == "editor" })
+	s.Keys(t, key(' '), key('e'))
+	s.WaitFor(t, "explorer focused", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
+	openTables(t, s, "main")
+	s.Keys(t, key('g'), key('h')) // close main; zeta is the next top row
+	s.WaitFor(t, "main closed", func(sc string) bool { return !strings.Contains(sc, "items_archive") })
+	s.Keys(t, key('j'))
+	openTables(t, s, "zeta")
+	s.Keys(t, key('g')) // start above every match
+
+	wsOf := func() string {
+		at := h.ExplorerCursor()
+		if len(at) == 0 {
+			return ""
+		}
+		return at[0]
+	}
+	s.Keys(t, key('/'))
+	s.WaitForText(t, "┌ find in explorer ")
+	s.Keys(t, decltest.Type("items")...)
+	s.Keys(t, enter())
+	var order []string
+	for i := 1; i <= 4; i++ {
+		want := fmt.Sprintf("items: match %d/4 in the explorer", i)
+		s.WaitForText(t, want)
+		s.WaitFor(t, "the cursor on match "+strconv.Itoa(i), func(string) bool {
+			at := h.ExplorerCursor()
+			return len(at) > 0 && strings.HasPrefix(at[len(at)-1], "tbl:")
+		})
+		at := h.ExplorerCursor()
+		order = append(order, wsOf()+" "+at[len(at)-1])
+		if i < 4 {
+			s.Keys(t, key('n'))
+		}
+	}
+	if order[0][:strings.Index(order[0], " ")] == order[2][:strings.Index(order[2], " ")] {
+		t.Fatalf("matches 1 and 3 are under the same workspace %v: the twin under the second workspace was never reached", order)
+	}
+	if order[0][strings.Index(order[0], " "):] != order[2][strings.Index(order[2], " "):] {
+		t.Fatalf("matches 1 and 3 should be the same table under two workspaces: %v", order)
+	}
+	s.Keys(t, key('n')) // wraps
+	s.WaitForText(t, "items: match 1/4 in the explorer")
+	s.Keys(t, key('N')) // back to the last
+	s.WaitForText(t, "items: match 4/4 in the explorer")
+	s.Keys(t, key('N'))
+	s.WaitForText(t, "items: match 3/4 in the explorer")
+	if wsOf() != order[2][:strings.Index(order[2], " ")] {
+		t.Fatalf("N from match 4 landed under %q, want match 3's workspace (%v)", wsOf(), order)
 	}
 }
