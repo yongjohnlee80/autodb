@@ -2,14 +2,24 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	tuicore "github.com/yongjohnlee80/golib/tui"
+	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 )
 
-// Search stays in the host: the query/editor and result model are data, not
-// QML policy. It intentionally moves a caret or result row, as the legacy
-// search did; there is no claim of highlighting a full match substring.
+// Search stays in the host: the explorer, query/editor and result model are
+// data, not QML policy. It intentionally moves a cursor, caret or result row,
+// as the legacy search did; there is no claim of highlighting a full match
+// substring.
+//
+// THE EXPLORER is searched over every row the host has LOADED, in the order
+// the tree shows them, including rows under a folder that is closed now: a
+// hit there is revealed, its folders opened (TreeView.setCurrentIndex). Rows
+// not loaded yet are not searched; opening a folder loads it, and the next
+// search sees it. A hit moves the cursor only: as with the arrow keys, the
+// query's connection changes on Enter, not on arrival.
 type searchState struct {
 	query, target                 string // query, table, json
 	identity, resultSeq, queryRev uint64
@@ -22,6 +32,8 @@ func (h *Host) resultsMoved(row int) error { h.results.cursor = row; return nil 
 func (h *Host) openSearch() error {
 	var target string
 	switch h.paneWithFocus() {
+	case paneExplorer:
+		target = "explorer"
 	case paneEditor:
 		target = "query"
 	case paneResults:
@@ -34,7 +46,7 @@ func (h *Host) openSearch() error {
 			target = "json"
 		}
 	default:
-		h.setStatus("focus the query or results pane before searching")
+		h.setStatus("focus the explorer, query or results pane before searching")
 		return nil
 	}
 	h.searchPending = target
@@ -89,23 +101,39 @@ func (h *Host) searchJump(dir int, includeCurrent bool) {
 		h.setStatus("no current search — / starts one")
 		return
 	}
+	// The explorer's rows are read afresh on every jump, so only a new
+	// identity makes its search stale.
 	if s.identity != h.session.IdentityEpoch() ||
 		(s.target == "query" && s.queryRev != h.searchQueryRev) ||
-		(s.target != "query" && (s.resultSeq != h.results.seq || s.json != h.results.asJSON)) {
+		(s.target == "table" || s.target == "json") && (s.resultSeq != h.results.seq || s.json != h.results.asJSON) {
 		s.target = ""
 		h.setStatus("search document changed — / starts again")
 		return
 	}
 	if !includeCurrent {
 		pane := h.paneWithFocus()
-		if (s.target == "query" && pane != paneEditor) || (s.target != "query" && pane != paneResults) {
+		want := map[string]string{"explorer": paneExplorer, "query": paneEditor}[s.target]
+		if want == "" {
+			want = paneResults
+		}
+		if pane != want {
 			h.setStatus("focus the original search pane or press / for a new one")
 			return
 		}
 	}
 	var rows []string
+	var at []tuidecl.Index
 	cur := 0
 	switch s.target {
+	case "explorer":
+		rows, at = h.explorerRows()
+		cur = -1 // before the first row, unless the cursor is on one
+		for i, ix := range at {
+			if slices.Equal(h.explorerKeys(ix), h.explorerAt) {
+				cur = i
+				break
+			}
+		}
 	case "query":
 		rows = h.editor.Lines()
 		cur, _ = h.editor.Line()
@@ -162,6 +190,13 @@ func (h *Host) searchJump(dir int, includeCurrent bool) {
 	row := hits[selected]
 	s.row = row
 	switch s.target {
+	case "explorer":
+		if err := h.p.Call(paneExplorer, "setCurrentIndex", at[row]); err != nil {
+			h.keep(err)
+			return
+		}
+		h.explorerAt = h.explorerKeys(at[row])
+		h.focusPane(paneExplorer)
 	case "query":
 		h.editor.SetLine(row, cols[row])
 		h.focusEditor()
@@ -195,4 +230,45 @@ func clusterMatch(line, pattern string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// explorerMoved is App.explorerMoved(index): the row now under the explorer's
+// cursor, kept as its path of keys.
+func (h *Host) explorerMoved(ix tuidecl.Index) error {
+	h.explorerAt = h.explorerKeys(ix)
+	return nil
+}
+
+// explorerKeys is a row's identity in the tree: the keys from the top row
+// down to it. A key alone is not enough; a connection attached to two
+// workspaces shows its schemas under both.
+func (h *Host) explorerKeys(ix tuidecl.Index) []string {
+	var keys []string
+	for p := &ix; p != nil; p = p.Parent {
+		keys = append([]string{h.explorer.model.Key(*p)}, keys...)
+	}
+	return keys
+}
+
+// explorerRows are the explorer's loaded rows in the order the tree shows
+// them, with each row's Index: a row's children follow it when they are
+// loaded, whether or not its folder is open now. Only loaded children are
+// walked, which is also what setCurrentIndex needs to reach a row.
+func (h *Host) explorerRows() ([]string, []tuidecl.Index) {
+	m := h.explorer.model
+	var labels []string
+	var at []tuidecl.Index
+	var walk func(parent *tuidecl.Index)
+	walk = func(parent *tuidecl.Index) {
+		for r := 0; r < m.RowCount(parent); r++ {
+			ix := tuidecl.Index{Row: r, Parent: parent}
+			labels = append(labels, m.Data(ix, "label").Raw)
+			at = append(at, ix)
+			if m.RowCount(&ix) > 0 && !m.CanFetchMore(ix) {
+				walk(&ix)
+			}
+		}
+	}
+	walk(nil)
+	return labels, at
 }
