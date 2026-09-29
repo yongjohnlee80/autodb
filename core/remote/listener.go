@@ -66,6 +66,10 @@ type Config struct {
 	// of SSH: false closes it at once, uncounted (a blocked address, or
 	// admission paused).
 	Admit func(ip string) bool
+	// HangupForce bounds a graceful hangup: a connection whose client stops
+	// reading, so its pending bytes never leave, is closed after it. Zero
+	// means 30s.
+	HangupForce time.Duration
 	// Denied, when set, is told of every connection the listener refused
 	// for the client's own doing: the address, why (DeniedKey,
 	// DeniedProtocol), the last key it offered, and the user its key named
@@ -109,6 +113,9 @@ func Listen(tcp net.Listener, cfg Config) (*Listener, error) {
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.HangupForce <= 0 {
+		cfg.HangupForce = 30 * time.Second
 	}
 	l := &Listener{
 		tcp: tcp, cfg: cfg,
@@ -306,8 +313,17 @@ func (l *Listener) serve(c net.Conn) {
 			}
 		}
 	}()
-	rc := &conn{Conn: Bridge(closeBoth{ch, sconn}, sconn.LocalAddr(), sconn.RemoteAddr()), peer: peer}
-	peer.hangup = func() { _ = sconn.Close() }
+	br := bridge(closeBoth{ch, sconn}, sconn.LocalAddr(), sconn.RemoteAddr())
+	rc := &conn{Conn: br, peer: peer}
+	var hangOnce sync.Once
+	peer.hangup = func() {
+		hangOnce.Do(func() {
+			// What the RPC side wrote goes first; then the session ends.
+			br.closeWhenWritten()
+			// A client that stopped reading cannot hold it past this.
+			time.AfterFunc(l.cfg.HangupForce, func() { _ = sconn.Close() })
+		})
+	}
 	select {
 	case l.ready <- rc:
 	case <-l.done:

@@ -13,6 +13,7 @@ package remote
 import (
 	"net"
 	"sync/atomic"
+	"time"
 )
 
 // Conn is a connection the remote listener accepted. Only this package's
@@ -61,12 +62,23 @@ func (p *Peer) ClaimViolation() bool {
 // Violated reports whether a protocol violation was already claimed.
 func (p *Peer) Violated() bool { return p != nil && p.violated.Load() }
 
-// Hangup ends the connection's SSH session, as the RPC server does after
-// refusing a remote connection's protocol violation. A Peer the listener did
-// not build has none, and Hangup does nothing.
+// Hangup ends the connection's SSH session, as the RPC server does after a
+// remote connection's protocol violation. It is graceful: what the RPC side
+// has already written, a refusal included, reaches the SSH channel before the
+// session closes (see Bridge). A client that stops reading entirely cannot
+// hold the connection: the listener closes it anyway after its force delay.
+// A Peer the listener did not build has none, and Hangup does nothing.
 func (p *Peer) Hangup() {
 	if p != nil && p.hangup != nil {
 		p.hangup()
+	}
+}
+
+// HangupAfter hangs the connection up after d, as a backstop for one that
+// violated the surface and then sends nothing more.
+func (p *Peer) HangupAfter(d time.Duration) {
+	if p != nil && p.hangup != nil {
+		time.AfterFunc(d, p.hangup)
 	}
 }
 

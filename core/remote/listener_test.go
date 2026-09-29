@@ -526,3 +526,29 @@ func TestQueuedExtraChannelsAreCountedOnce(t *testing.T) {
 		t.Fatalf("five queued extra channels were counted as %+v; want one protocol violation", got)
 	}
 }
+
+// A client that stops reading cannot hold a hung-up connection: its pending
+// bytes never leave, and the listener closes it after HangupForce.
+func TestAHangupIsForcedWhenTheClientStopsReading(t *testing.T) {
+	k := newSigner(t)
+	s := startListener(t, map[string]registered{ssh.FingerprintSHA256(k.PublicKey()): {1, 1}}, func(c *remote.Config) {
+		c.HangupForce = 300 * time.Millisecond
+	})
+	c, err := s.dial(t, ssh.PublicKeys(k))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	openRPC(t, c) // and never read from it
+	nc := s.accept(t)
+	go func() { _, _ = nc.Write(make([]byte, 8<<20)) }() // far past the client's window
+	time.Sleep(100 * time.Millisecond)
+	nc.(remote.Conn).RemotePeer().Hangup()
+	done := make(chan struct{})
+	go func() { _ = c.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a client that stopped reading held the hung-up connection")
+	}
+}
