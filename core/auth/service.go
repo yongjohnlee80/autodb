@@ -349,7 +349,14 @@ type AuditRecord struct {
 
 // AuditTxRecord appends rec inside tx.
 func (s *Service) AuditTxRecord(tx *dao.Transaction, rec AuditRecord) error {
-	_, err := s.store.Audit.On(tx).
+	_, err := s.auditTxRecordID(tx, rec)
+	return err
+}
+
+// auditTxRecordID is AuditTxRecord that also answers the new row's id, for a
+// record that must point at its audit row (a remote denial's claim).
+func (s *Service) auditTxRecordID(tx *dao.Transaction, rec AuditRecord) (int64, error) {
+	id, err := s.store.Audit.On(tx).
 		Set(meta.AuditUserID, rec.UserID).Set(meta.AuditIP, rec.IP).
 		Set(meta.AuditAction, rec.Action).Set(meta.AuditDetail, rec.Detail).
 		Set(meta.AuditTxID, rec.TxID).
@@ -357,17 +364,17 @@ func (s *Service) AuditTxRecord(tx *dao.Transaction, rec AuditRecord) error {
 		Set(meta.AuditCreatedAt, s.now().Unix()).
 		Insert()
 	if err != nil {
-		return fmt.Errorf("auth: audit write failed: %w", err)
+		return 0, fmt.Errorf("auth: audit write failed: %w", err)
 	}
 	// AFTER the insert, so a cell's injected failure stands downstream of a row
 	// that was really written: the seam cannot be reached by a caller that
 	// skipped the audit.
 	if s.hookAuditWrite != nil {
 		if herr := s.hookAuditWrite(rec.Action); herr != nil {
-			return herr
+			return 0, herr
 		}
 	}
-	return nil
+	return id, nil
 }
 
 // AuditTxConn is AuditTx for a row about connection connID: the column a
