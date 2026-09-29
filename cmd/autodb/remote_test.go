@@ -418,3 +418,86 @@ func TestARemoteRefusalArrivesBeforeTheHangupAndTheNextRequestEndsIt(t *testing.
 		t.Fatalf("remote_access_denied rows %d, want 1", n)
 	}
 }
+
+// PIPELINED: the violating request and the next one arrive in one write. The
+// refusal to the first is still delivered, then the session ends; one
+// violation is counted.
+//
+// What this cell cannot show: a refusal stuck behind a FULL SSH receive
+// window. x/crypto's client opens channels with a 2 MiB window and offers no
+// way to shrink it, so a small refusal is always sent at once, and an
+// immediate close here passes too. The ordering under a blocked channel write
+// is proven in core/remote (TestAGracefulCloseWaitsForBlockedAndQueuedWrites),
+// where the channel's writes block until released.
+func TestAPipelinedNextRequestDoesNotLoseTheRefusal(t *testing.T) {
+	r := newRemoteRig(t)
+	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
+		t.Fatal(err)
+	}
+	addr, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.lim, r.fan, "t", func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	c, err := ssh.Dial("tcp", addr.String(), &ssh.ClientConfig{User: "autodb",
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(r.key)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ch, reqs, err := c.OpenChannel("session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go ssh.DiscardRequests(reqs)
+	if ok, err := ch.SendRequest("subsystem", true, ssh.Marshal(struct{ Name string }{remote.Subsystem})); err != nil || !ok {
+		t.Fatalf("subsystem: %v %v", ok, err)
+	}
+	frame := func(id int64, method string, params ...any) []byte {
+		b, err := msgpack.Marshal([]any{int64(0), id, method, params})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	br := bufio.NewReader(ch)
+	if _, err := ch.Write(frame(1, "sys.hello", map[string]any{"protocol": rpc.Protocol})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := msgpack.Decode(br, nil); err != nil {
+		t.Fatalf("hello: %v", err)
+	}
+	pipelined := append(frame(2, "conn.list", "any-token"), frame(3, "sys.hello", map[string]any{"protocol": rpc.Protocol})...)
+	if _, err := ch.Write(pipelined); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // both are in before anything is read
+	v, err := msgpack.Decode(br, nil)
+	if err != nil {
+		t.Fatalf("the refusal to the violating request was lost: %v", err)
+	}
+	arr, _ := v.([]any)
+	if len(arr) != 4 || arr[1] != int64(2) {
+		t.Fatalf("first reply %#v; want the refusal to request 2", v)
+	}
+	if m, _ := arr[2].(map[string]any); m["code"] != rpc.CodeRemoteLoginRequired {
+		t.Fatalf("refusal %#v", arr[2])
+	}
+	done := make(chan struct{})
+	go func() {
+		for {
+			if _, err := msgpack.Decode(br, nil); err != nil {
+				close(done)
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the session did not end after the pipelined request")
+	}
+	if n := auditRows(t, r.store, "remote_access_denied"); n != 1 {
+		t.Fatalf("remote_access_denied rows %d, want 1", n)
+	}
+}

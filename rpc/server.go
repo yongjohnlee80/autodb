@@ -441,10 +441,10 @@ var remotePreLogin = map[string]bool{
 }
 
 // remoteHangupBackstop is how long a remote connection that violated the
-// surface may stay open doing nothing. Its refusal is written first; its NEXT
-// request hangs it up at once (remoteViolation). The backstop only frees a
-// connection that sends nothing more, and it is long enough that a client
-// reading the refusal slowly still receives it.
+// surface may stay open doing nothing: its NEXT request hangs it up at once
+// (remoteViolation), and this frees one that sends nothing more. Either way
+// the hangup is graceful (remote.Peer.Hangup): the refusal the server wrote
+// reaches the SSH channel before the session closes.
 const remoteHangupBackstop = 10 * time.Second
 
 // remoteViolation counts a remote connection's call of a method it may not
@@ -480,7 +480,7 @@ func (s *Server) remoteViolation(sess *golibrpc.Session, peer *remote.Peer) (aga
 		}
 		s.remoteDenied(ip, "protocol_violation", user)
 	}
-	time.AfterFunc(remoteHangupBackstop, peer.Hangup)
+	peer.HangupAfter(remoteHangupBackstop)
 	return false
 }
 
