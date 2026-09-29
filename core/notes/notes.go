@@ -34,7 +34,7 @@ var ErrNoteConflict = errors.New("notes: note changed on disk since load")
 
 // ErrBadWorkspace reports a workspace id that cannot name a canonical `ws-*`
 // directory.
-var ErrBadWorkspace = errors.New("notes: notes: workspace id is not a canonical positive int64")
+var ErrBadWorkspace = errors.New("notes: workspace id is not a canonical positive int64")
 
 // canonicalWorkspace validates a workspace id before it is formatted into a
 // path. It is the ONE predicate, applied by every operation that names a
@@ -55,7 +55,7 @@ var ErrBadWorkspace = errors.New("notes: notes: workspace id is not a canonical 
 // Distinct from a delete failure on purpose: the
 // file is already gone, so retrying would act on whatever next holds that name.
 // The caller reports uncertainty; it does not retry.
-var ErrRemovedNotDurable = errors.New("notes: notes: removed, but the directory could not be synced")
+var ErrRemovedNotDurable = errors.New("notes: removed, but the directory could not be synced")
 
 func canonicalWorkspace(wsID int64) error {
 	if wsID <= 0 {
@@ -103,13 +103,13 @@ type Store struct {
 
 // ErrRetired reports I/O attempted through a store whose identity has been
 // retired — a logout, a switch, or a lost token.
-var ErrRetired = errors.New("notes: notes: this identity's store has been retired")
+var ErrRetired = errors.New("notes: this identity's store has been retired")
 
 // ErrForeignNote reports a Note handle minted by a DIFFERENT store. It is the
 // cross-identity guard: a handle carries the store that created it, so
 // bob.Save(aliceNote, …) is refused instead of writing Alice's body into Bob's
 // tree — which is exactly what it did before this ADR.
-var ErrForeignNote = errors.New("notes: notes: note belongs to another identity's store")
+var ErrForeignNote = errors.New("notes: note belongs to another identity's store")
 
 // Retire closes the store to new work and WAITS for admitted work to finish.
 // Idempotent — several paths can lose an identity at once.
@@ -284,7 +284,7 @@ func (s *Store) rel(wsID int64, name string) (string, error) {
 // fs returns the confined root, or an error for a zero-value store.
 func (s *Store) fs() (*os.Root, error) {
 	if s == nil || s.confined == nil {
-		return nil, errors.New("notes: notes: store was not created by NewPersonalNotes")
+		return nil, errors.New("notes: store was not created by NewPersonalNotes")
 	}
 	return s.confined, nil
 }
