@@ -595,9 +595,9 @@ type Remote struct {
 	// Bind is the TCP address it listens on, host:port.
 	Bind string `toml:"bind"`
 	// HostKey is the listener's ed25519 host key file, created on first use.
-	// Empty means remote_host_ed25519 in autodb's data directory; a service
-	// install puts it beside the service keyfile, in a 0700 directory the
-	// service user owns.
+	// Empty means beside [security] service_keyfile when that is set (a
+	// service install's 0700 key directory), else remote_host_ed25519 in
+	// autodb's data directory.
 	HostKey string `toml:"host_key"`
 	// MaxUnauthenticated caps connections still in their SSH handshake.
 	MaxUnauthenticated int `toml:"max_unauthenticated"`
@@ -609,8 +609,8 @@ type Remote struct {
 	BlockAfterFailures int      `toml:"block_after_failures"`
 	BlockDuration      Duration `toml:"block_duration"`
 	// DenialSpill is the file each refusal is written to before the store,
-	// so a crash cannot lose one. Empty means remote-denials.pending in
-	// autodb's data directory.
+	// so a crash cannot lose one. Empty means beside an sqlite meta store,
+	// else remote-denials.pending in autodb's data directory.
 	DenialSpill string `toml:"denial_spill"`
 	// ReconnectGrace is how long a remote session whose connection dropped
 	// without a sign-out can be taken up again by the same device, without
@@ -678,20 +678,40 @@ func (r Remote) DeviceKeyAge() time.Duration {
 }
 
 // DenialSpillPath is where refused remote connections are spilled before the
-// store: [remote] denial_spill, or remote-denials.pending in autodb's data
-// directory.
+// store: [remote] denial_spill; or, unset, beside an sqlite meta store (a
+// service install's state directory, which its unit may write); or
+// remote-denials.pending in autodb's data directory.
 func (c Config) DenialSpillPath() (string, error) {
 	if c.Remote.DenialSpill != "" {
 		return c.Remote.DenialSpill, nil
 	}
+	if dir := c.sqliteStoreDir(); dir != "" {
+		return filepath.Join(dir, "remote-denials.pending"), nil
+	}
+	return dataPath("remote-denials.pending")
+}
+
+// sqliteStoreDir is the directory of an sqlite meta store on disk, "" for
+// any other store.
+func (c Config) sqliteStoreDir() string {
+	p := c.Meta.Path
+	if c.Meta.Engine != engine.SQLite || p == "" || p == ":memory:" || strings.HasPrefix(p, "file:") {
+		return ""
+	}
+	return filepath.Dir(p)
+}
+
+// dataPath is name in autodb's data directory: $XDG_DATA_HOME/autodb, or
+// ~/.local/share/autodb.
+func dataPath(name string) (string, error) {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "autodb", "remote-denials.pending"), nil
+		return filepath.Join(xdg, "autodb", name), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".local", "share", "autodb", "remote-denials.pending"), nil
+	return filepath.Join(home, ".local", "share", "autodb", name), nil
 }
 
 // Remote listener defaults.
@@ -706,19 +726,17 @@ const (
 )
 
 // HostKeyPath is where the remote listener's host key lives: [remote]
-// host_key, or remote_host_ed25519 in autodb's data directory.
+// host_key; or, unset, beside [security] service_keyfile (a service
+// install's key directory, 0700 and apart from the store); or
+// remote_host_ed25519 in autodb's data directory.
 func (c Config) HostKeyPath() (string, error) {
 	if c.Remote.HostKey != "" {
 		return c.Remote.HostKey, nil
 	}
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "autodb", "remote_host_ed25519"), nil
+	if c.Security.ServiceKeyfile != "" {
+		return filepath.Join(filepath.Dir(c.Security.ServiceKeyfile), "remote_host_ed25519"), nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".local", "share", "autodb", "remote_host_ed25519"), nil
+	return dataPath("remote_host_ed25519")
 }
 
 // Server configures the RPC listener (consumed by rpc, roadmap M5).
