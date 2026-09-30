@@ -140,6 +140,10 @@ type RemoteSignIn struct {
 	// the one this sign-in enrolled.
 	DeviceID int64
 	Enrolled bool
+	// NewDevices are the user's other live devices enrolled since this
+	// device last signed in: each is told once, to each other device, at its
+	// first sign-in after the enrollment. None for an enrollment itself.
+	NewDevices []DeviceInfo
 }
 
 // LoginRemote is auth.login on a remote connection. It is Login with three
@@ -228,6 +232,9 @@ func (r *remoteSession) commitTx(s *Service, tx *dao.Transaction, u *meta.User, 
 		if derr != nil {
 			return "", derr
 		}
+		if r.out.NewDevices, err = s.newDevicesTx(tx, u, dev); err != nil {
+			return "", err
+		}
 		if err := s.store.RemoteDevices.On(tx).With(meta.DevID, deviceID).Set(meta.DevLastSeenAt, now).Update(); err != nil {
 			return "", err
 		}
@@ -244,6 +251,38 @@ func (r *remoteSession) commitTx(s *Service, tx *dao.Transaction, u *meta.User, 
 	}
 	r.out.SessionID, r.out.DeviceID = sessID, deviceID
 	return token, nil
+}
+
+// newDevicesTx is what device dev's sign-in is told of: u's other live
+// devices enrolled since dev last signed in — its newest session, which a
+// resume does not make — or, before its first, since it enrolled. Read
+// before this sign-in's session is made, so each enrollment is told once to
+// each other device. Seconds compare inclusively: an enrollment in the same
+// second as the last sign-in may be told twice, never missed.
+func (s *Service) newDevicesTx(tx *dao.Transaction, u *meta.User, dev *meta.RemoteDevice) ([]DeviceInfo, error) {
+	since := dev.EnrolledAt
+	sessions, err := s.store.Sessions.On(tx).With(meta.SessDeviceID, dev.ID).Select()
+	if err != nil {
+		return nil, err
+	}
+	for _, sess := range sessions {
+		since = max(since, sess.CreatedAt)
+	}
+	others, err := s.store.RemoteDevices.On(tx).With(meta.DevUserID, u.ID).With(meta.DevRevokedAt, int64(0)).
+		WithPredicate(dao.Gte(string(meta.DevEnrolledAt), since)).Select()
+	if err != nil {
+		return nil, err
+	}
+	var out []DeviceInfo
+	for _, o := range others {
+		if o.ID == dev.ID {
+			continue
+		}
+		out = append(out, DeviceInfo{ID: o.ID, SSHKeyID: o.SSHKeyID, UserID: o.UserID, User: u.Name,
+			Fingerprint: o.Fingerprint, EnrolledAt: o.EnrolledAt, EnrolledIP: o.EnrolledIP,
+			KeyCreatedAt: o.KeyCreatedAt, LastSeenAt: o.LastSeenAt})
+	}
+	return out, nil
 }
 
 // seenAtTx records that enrolled device dev connected from ip: a new address

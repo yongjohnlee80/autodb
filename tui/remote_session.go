@@ -83,7 +83,35 @@ func (s *Session) SwitchToLocal() {
 // forgetLoginLocked drops the token and identity, as a new identity epoch.
 func (s *Session) forgetLoginLocked() {
 	s.token, s.user = "", UserInfo{}
+	s.newDevices = nil
 	s.idEpoch++
+}
+
+// adoptRemoteLogin is adoptLogin for a remote sign-in's reply, which also
+// tells of the user's devices enrolled since this one last signed in.
+func (s *Session) adoptRemoteLogin(res map[string]any, gen uint64) {
+	s.adoptLogin(res, gen)
+	var told []DeviceRow
+	for _, d := range asList(res["new_devices"]) {
+		if m, ok := d.(map[string]any); ok {
+			told = append(told, deviceRowFromWire(m))
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen == gen {
+		s.newDevices = told
+	}
+}
+
+// TakeNewDevices is what the current sign-in was told of, once: a second
+// call answers nothing.
+func (s *Session) TakeNewDevices() []DeviceRow {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	told := s.newDevices
+	s.newDevices = nil
+	return told
 }
 
 // closeTransport closes a remote connection (its SSH session too), or a
@@ -139,7 +167,7 @@ func (s *Session) ConnectRemote(ctx context.Context, passphrase string) (hostKey
 		rs.d.Profile.HostKeyFP = conn.HostKeyFP()
 	}
 	s.mu.Unlock()
-	s.adoptLogin(res, myGen)
+	s.adoptRemoteLogin(res, myGen)
 	if msg, _ := res["rotation_error"].(string); msg != "" {
 		s.log.Log(logger.SeverityWarning, map[string]any{"tui": "session", "event": "device key rotation failed", "error": msg})
 	}
@@ -269,7 +297,7 @@ func (s *Session) remoteSignIn(ctx context.Context, gen uint64, passphrase strin
 	if err != nil {
 		return err
 	}
-	s.adoptLogin(res, gen)
+	s.adoptRemoteLogin(res, gen)
 	return nil
 }
 

@@ -51,6 +51,10 @@ type Session struct {
 	// NEW token, with the same id. Work issued before that must not be applied
 	// after it.
 	idEpoch uint64
+	// newDevices are what the current remote sign-in was told of: the
+	// user's devices enrolled since this one last signed in, until the host
+	// takes them (TakeNewDevices).
+	newDevices []DeviceRow
 	// remote is set for a session whose transport is a remote server
 	// (NewRemoteSession, SwitchToRemote); nil for the local daemon. local is
 	// the local transport kept while switched to a remote one.
