@@ -41,6 +41,10 @@ type Server struct {
 	HostFP  string
 	KeyFile string
 	Key     ssh.Signer
+	// NotesDir is where the server keeps notes; Workspace is a workspace
+	// alice can see (it holds a connection she is granted).
+	NotesDir  string
+	Workspace int64
 }
 
 // Start runs one, for the life of t.
@@ -83,6 +87,22 @@ func Start(t *testing.T) *Server {
 
 	eng := coreexec.New(store, svc)
 	t.Cleanup(func() { _ = eng.Close() })
+	dsn := "file:remotetest" + strconv.FormatInt(time.Now().UnixNano(), 10) + "?mode=memory&cache=shared"
+	connID, err := eng.CreateConnection(ctx, rootTok, "target", engine.SQLite, dsn, auth.LocalPeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := eng.CreateWorkspace(ctx, rootTok, "ops", auth.LocalPeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.AttachConnection(ctx, rootTok, ws, connID, auth.LocalPeer); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddGrant(ctx, rootTok, alice, connID, meta.RoleReader, auth.LocalPeer); err != nil {
+		t.Fatal(err)
+	}
+	notesDir := filepath.Join(t.TempDir(), "notes")
 	cfg := config.Default()
 	cfg.Remote.Bind = "127.0.0.1:0"
 	cfg.Remote.HostKey = filepath.Join(t.TempDir(), "keys", "remote_host_ed25519")
@@ -98,7 +118,7 @@ func Start(t *testing.T) *Server {
 	}
 	fan := remote.NewFanIn(local)
 	ctl := remotectl.New(remotectl.Config{Cfg: cfg, Store: store, Auth: svc, Limiter: lim, Fan: fan, Version: "t"})
-	srv := rpc.New(svc, eng, config.Server{}, "t", rpc.WithListener(fan),
+	srv := rpc.New(svc, eng, config.Server{}, "t", rpc.WithListener(fan), rpc.WithNotesDir(notesDir),
 		rpc.WithRemoteDenials(func(ip, reason string, userID int64) {
 			remotectl.Deny(lim, func(string) {}, ip, reason, "", userID)
 		}),
@@ -123,7 +143,8 @@ func Start(t *testing.T) *Server {
 		time.Sleep(5 * time.Millisecond)
 	}
 	st := ctl.Status()
-	return &Server{Store: store, Svc: svc, Addr: st.Addr, HostFP: st.HostKeyFP, KeyFile: keyFile, Key: signer}
+	return &Server{Store: store, Svc: svc, Addr: st.Addr, HostFP: st.HostKeyFP, KeyFile: keyFile, Key: signer,
+		NotesDir: notesDir, Workspace: ws}
 }
 
 // Profile is alice's profile against s, and a fresh key directory.

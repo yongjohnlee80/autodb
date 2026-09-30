@@ -91,8 +91,8 @@ func TestAReconnectResumesTheSessionWithoutAsking(t *testing.T) {
 }
 
 // Past the grace the resume is refused: the token is dropped, and the
-// sign-in prompt signs in on the same connection, as the profile's user
-// whatever name is typed.
+// sign-in prompt signs in on the same connection as the profile's user;
+// another name typed is refused.
 func TestAnExpiredSessionSignsInAgainOnTheSameConnection(t *testing.T) {
 	srv := remotetest.Start(t)
 	s, _ := remoteSession(t, srv)
@@ -122,7 +122,10 @@ func TestAnExpiredSessionSignsInAgainOnTheSameConnection(t *testing.T) {
 	if s.Token() != "" {
 		t.Fatal("an expired session's token was kept")
 	}
-	if err := s.Bind().Login(rctx(t), "root", remotetest.AlicePass); err != nil {
+	if err := s.Bind().Login(rctx(t), "root", remotetest.AlicePass); err == nil {
+		t.Fatal("signing in as root on alice's profile was accepted")
+	}
+	if err := s.Bind().Login(rctx(t), "alice", remotetest.AlicePass); err != nil {
 		t.Fatalf("sign-in on the reconnected connection: %v", err)
 	}
 	if s.User().Name != "alice" || whoami(t, s) != nil {

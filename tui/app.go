@@ -51,7 +51,7 @@ type Host struct {
 	// about is the runner's build and location detail (about.go); notes is
 	// the signed-in user's note store, nil before sign-in.
 	about AboutInfo
-	notes *notes.Store
+	notes notesBackend
 	// auth is where sign-in stands, as App.auth tells the document; idEpoch
 	// counts the identities signed in, so a late answer asked under one is
 	// dropped under the next.
@@ -83,7 +83,7 @@ type Host struct {
 	buf            noteBuffer
 	workspaces     *tuidecl.ListModel
 	noteOpen       *noteOpenState
-	listNotes      func(*notes.Store, map[int64]string) ([]noteChoice, error)
+	listNotes      func(notesBackend, map[int64]string) ([]noteChoice, error)
 	noteOpenListed func() // test-only: the held listing callback reached the UI loop
 	// prefs is the editor profile and themePref the theme, each stored on the
 	// account (accountpref.go).

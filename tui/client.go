@@ -541,6 +541,11 @@ func (b *Bound) Login(ctx context.Context, name, pass string) error {
 		if err := b.ensure(); err != nil {
 			return err
 		}
+		// A remote profile signs in as its own user: another name typed is
+		// refused rather than quietly replaced.
+		if user := b.s.remote.d.Profile.User; name != "" && name != user {
+			return fmt.Errorf("this remote profile signs in as %s; to sign in as %s, add a profile for them", user, name)
+		}
 		return b.s.remoteSignIn(ctx, b.gen, pass)
 	}
 	res, err := b.call(ctx, "auth.login", name, pass)

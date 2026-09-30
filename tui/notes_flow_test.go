@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/golib/logger"
 	tuicore "github.com/yongjohnlee80/golib/tui"
@@ -181,4 +182,24 @@ func TestEnterOnANoteOpensIt(t *testing.T) {
 	s.WaitFor(t, "first opened", func(sc string) bool {
 		return strings.Contains(sc, "select 'from first'") && strings.Contains(lastRow(s), "first.sql")
 	})
+}
+
+// A save still in flight when the identity ends changes nothing when it
+// completes: no status, no open note, on what comes after.
+func TestALateSaveResultIsDiscarded(t *testing.T) {
+	h, s, _ := notesHost(t)
+	newNote(t, s, "late")
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	h.HoldNoteSaves(started, release)
+	s.Keys(t, key(' '), key('s'))
+	<-started
+	h.RetireIdentityForTest()
+	close(release)
+	time.Sleep(200 * time.Millisecond) // the held save returns and posts its result
+	if name := h.OpenNoteName(); name != "" {
+		t.Fatalf("after the identity ended the open note is %q", name)
+	}
+	if st := h.SourceText("App.status"); strings.Contains(st, "saved") || strings.Contains(st, "save failed") {
+		t.Fatalf("the late save's result was applied: status %q", st)
+	}
 }

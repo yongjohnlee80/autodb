@@ -31,7 +31,7 @@ import (
 // noteBuffer is the note the query buffer holds, and what is being asked
 // about it.
 type noteBuffer struct {
-	note  *notes.Note
+	note  *NoteHandle
 	dirty bool
 	gen   uint64 // numbers the opens; the latest wins
 	// then is what the unsaved-note question guards: run after save or
@@ -43,6 +43,9 @@ type noteBuffer struct {
 	body   string
 	// conflictBody is the text a conflicted save was writing.
 	conflictBody string
+	// saving is the note a save is in flight for: a second save of it is
+	// held off, so two never write through one handle at once.
+	saving *NoteHandle
 }
 
 // noteState are the note dialogs' and models' sources.
@@ -84,9 +87,14 @@ func (h *Host) unsavedAnswered(answer string) error {
 	h.buf.then = nil
 	switch answer {
 	case "save":
-		if h.saveNote(); h.buf.dirty {
-			return nil // not saved — a conflict is being asked about — so nothing moves on
-		}
+		// Moves on only once it is saved: a conflict asks instead, and
+		// nothing moves on.
+		h.saveNote(func() {
+			if then != nil {
+				h.p.Post(then)
+			}
+		})
+		return nil
 	case "discard":
 		h.buf.dirty = false
 	case "stay":
@@ -117,7 +125,7 @@ func (h *Host) loadNote(wsID int64, name string) {
 	h.buf.gen++
 	gen, epoch := h.buf.gen, h.idEpoch
 	type loaded struct {
-		note *notes.Note
+		note *NoteHandle
 		body string
 		err  error
 	}
@@ -151,7 +159,10 @@ func (h *Host) newNote() {
 }
 
 // saveNote is note.save (SPC s): the open note, or the buffer as a new one.
-func (h *Host) saveNote() {
+// The write runs off the UI loop (a remote note goes over the network); its
+// result is applied only if it is still the same identity and the same open
+// note, and after runs once it has saved.
+func (h *Host) saveNote(after ...func()) {
 	store := h.notes
 	if store == nil {
 		h.setStatus("notes appear once you sign in")
@@ -166,21 +177,39 @@ func (h *Host) saveNote() {
 		h.askNoteName("saveas", "save the query as", body)
 		return
 	}
-	switch err := store.Save(h.buf.note, body); {
-	case err == nil:
-		h.buf.dirty = false
-		h.setStatus("saved " + h.buf.note.Name)
-		h.refreshWhere()
-		h.refreshNotes(h.buf.note.WorkspaceID)
-	case errors.Is(err, notes.ErrNoteConflict):
-		h.buf.conflictBody = body
-		h.set("App.conflictQuestion", fmt.Sprintf(
-			"%s was written by someone or something else since you opened it. Overwrite it, save yours as a new note, or keep editing?",
-			h.buf.note.Name))
-		h.open("conflict")
-	default:
-		h.setStatus("save failed: " + err.Error())
+	if h.buf.saving == h.buf.note {
+		h.setStatus("still saving " + h.buf.note.Name)
+		return
 	}
+	n, gen, epoch := h.buf.note, h.buf.gen, h.idEpoch
+	h.buf.saving = n
+	do(h, func(context.Context) error { return store.Save(n, body) }, func(err error) {
+		if h.buf.saving == n {
+			h.buf.saving = nil
+		}
+		if epoch != h.idEpoch || gen != h.buf.gen || h.buf.note != n {
+			return // another identity, or another note, since
+		}
+		switch {
+		case err == nil:
+			// What was typed while it saved is still unsaved.
+			h.buf.dirty = h.editor.Value() != body
+			h.setStatus("saved " + n.Name)
+			h.refreshWhere()
+			h.refreshNotes(n.WorkspaceID)
+			for _, f := range after {
+				f()
+			}
+		case errors.Is(err, notes.ErrNoteConflict):
+			h.buf.conflictBody = body
+			h.set("App.conflictQuestion", fmt.Sprintf(
+				"%s was written by someone or something else since you opened it. Overwrite it, save yours as a new note, or keep editing?",
+				n.Name))
+			h.open("conflict")
+		default:
+			h.setStatus("save failed: " + err.Error())
+		}
+	})
 }
 
 // conflictAnswered is App.conflict(answer): "overwrite", "saveas" or "keep".
@@ -193,17 +222,29 @@ func (h *Host) conflictAnswered(answer string) error {
 		if store == nil || n == nil {
 			return nil
 		}
-		fresh, _, err := store.Load(n.WorkspaceID, n.Name)
-		if err == nil {
-			err = store.Save(fresh, body)
+		gen, epoch := h.buf.gen, h.idEpoch
+		type result struct {
+			fresh *NoteHandle
+			err   error
 		}
-		if err != nil {
-			h.setStatus("overwrite failed: " + err.Error())
-			return nil
-		}
-		h.buf.note, h.buf.dirty = fresh, false
-		h.setStatus("overwrote " + fresh.Name)
-		h.refreshWhere()
+		do(h, func(context.Context) result {
+			fresh, _, err := store.Load(n.WorkspaceID, n.Name)
+			if err == nil {
+				err = store.Save(fresh, body)
+			}
+			return result{fresh, err}
+		}, func(r result) {
+			if epoch != h.idEpoch || gen != h.buf.gen || h.buf.note != n {
+				return
+			}
+			if r.err != nil {
+				h.setStatus("overwrite failed: " + r.err.Error())
+				return
+			}
+			h.buf.note, h.buf.dirty = r.fresh, h.editor.Value() != body
+			h.setStatus("overwrote " + r.fresh.Name)
+			h.refreshWhere()
+		})
 	case "saveas":
 		h.askNoteName("saveas", "save yours as", body)
 	case "keep":
@@ -268,34 +309,55 @@ func (h *Host) nameNote(wsID int64, name string) error {
 	if err != nil {
 		return refuse(err.Error())
 	}
-	switch h.buf.naming {
-	case "new":
-		n, err := store.Create(wsID, clean)
-		if err != nil {
-			return refuse(err.Error())
-		}
-		h.buf.note, h.buf.dirty = n, false
-		h.invalidateQuerySearch()
-		h.editor.SetValue("")
-		h.setStatus("created " + n.Name)
-	case "saveas":
-		n, _, err := store.Load(wsID, clean)
-		if err != nil {
-			return refuse(err.Error())
-		}
-		if n.Existed() {
-			return refuse(clean + " already exists — choose another name")
-		}
-		if err := store.Save(n, h.buf.body); err != nil {
-			return refuse(err.Error())
-		}
-		h.buf.note, h.buf.dirty = n, false
-		h.setStatus("saved " + n.Name)
+	naming, saveBody := h.buf.naming, h.buf.body
+	gen, epoch := h.buf.gen, h.idEpoch
+	type result struct {
+		n   *NoteHandle
+		err error
 	}
-	h.buf.body = ""
-	h.refreshWhere()
-	h.refreshNotes(wsID)
-	h.focusEditor()
+	do(h, func(context.Context) result {
+		switch naming {
+		case "new":
+			n, err := store.Create(wsID, clean)
+			return result{n, err}
+		case "saveas":
+			n, _, err := store.Load(wsID, clean)
+			if err != nil {
+				return result{nil, err}
+			}
+			if n.Existed() {
+				return result{nil, errors.New(clean + " already exists — choose another name")}
+			}
+			return result{n, store.Save(n, saveBody)}
+		}
+		return result{}
+	}, func(r result) {
+		if epoch != h.idEpoch || gen != h.buf.gen {
+			return
+		}
+		if r.err != nil {
+			refuse(r.err.Error())
+			return
+		}
+		if r.n == nil {
+			return
+		}
+		h.buf.gen++
+		switch naming {
+		case "new":
+			h.buf.note, h.buf.dirty = r.n, false
+			h.invalidateQuerySearch()
+			h.editor.SetValue("")
+			h.setStatus("created " + r.n.Name)
+		case "saveas":
+			h.buf.note, h.buf.dirty = r.n, h.editor.Value() != saveBody
+			h.setStatus("saved " + r.n.Name)
+		}
+		h.buf.body = ""
+		h.refreshWhere()
+		h.refreshNotes(wsID)
+		h.focusEditor()
+	})
 	return nil
 }
 

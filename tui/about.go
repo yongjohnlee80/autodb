@@ -110,7 +110,7 @@ func (h *Host) aboutText() string {
 // a directory this session never reads (the identity-keyed notes design).
 func (h *Host) notesLine() string {
 	if h.notes != nil {
-		return h.notes.Root()
+		return h.notes.Where()
 	}
 	if h.about.NotesDir == "" {
 		return "(none configured)"
