@@ -713,7 +713,11 @@ func runServe(configPath string) error {
 	}
 	rpcOpts = append(rpcOpts, rpc.WithReconnectGrace(cfg.Remote.Grace()),
 		rpc.WithDeviceKeyMaxAge(cfg.Remote.DeviceKeyAge()),
-		rpc.WithRemoteClose(ctl.Registry().Close))
+		rpc.WithRemoteClose(ctl.Registry().Close),
+		rpc.WithRemoteControl(ctl))
+	if lim != nil {
+		rpcOpts = append(rpcOpts, rpc.WithRemoteUnblock(lim.Unblock))
+	}
 	srv := rpc.New(svc, eng, cfg.Server, version, rpcOpts...)
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)

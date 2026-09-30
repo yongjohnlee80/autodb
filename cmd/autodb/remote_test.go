@@ -102,6 +102,8 @@ func newRemoteRigAllowing(t *testing.T, allowlist string) *remoteRig {
 			}
 			return 0
 		}),
+		rpc.WithRemoteControl(rigControl{rig}),
+		rpc.WithRemoteUnblock(lim.Unblock),
 		rpc.WithRemoteSignIns(func(ip string) {
 			if err := lim.Succeeded(context.Background(), ip); err != nil {
 				t.Errorf("resetting %s's count: %v", ip, err)
@@ -114,6 +116,24 @@ func newRemoteRigAllowing(t *testing.T, allowlist string) *remoteRig {
 
 	rig.cfg, rig.store, rig.svc, rig.lim, rig.fan, rig.key, rig.eng = cfg, store, svc, lim, fan, key, eng
 	return rig
+}
+
+// rigControl is the rig's Remote Control as the RPC server sees it, once
+// control() has started one.
+type rigControl struct{ r *remoteRig }
+
+func (c rigControl) Status() remotectl.Status {
+	if ctl := c.r.ctl.Load(); ctl != nil {
+		return ctl.Status()
+	}
+	return remotectl.Status{State: remotectl.StateOff}
+}
+
+func (c rigControl) Set(ctx context.Context, on bool, by int64, ip string) error {
+	if ctl := c.r.ctl.Load(); ctl != nil {
+		return ctl.Set(ctx, on, by, ip)
+	}
+	return errors.New("no remote control in this rig")
 }
 
 // control is Remote Control over the rig, with what it logs collected.

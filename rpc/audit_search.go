@@ -104,23 +104,28 @@ func (s *Server) registerAuditSearch() {
 		if aerr != nil {
 			return nil, s.wireErrFor(req, aerr)
 		}
-		rows := make([]any, 0, len(page.Rows))
-		for _, r := range page.Rows {
-			rows = append(rows, map[string]any{
-				"id": r.ID, "user_id": r.UserID, "user": r.User, "ip": r.IP,
-				"action": r.Action, "detail": r.Detail,
-				"connection_id": r.ConnID, "connection": r.Conn,
-				"tx_id": r.TxID, "attempt_id": r.AttemptID,
-				"created_at": r.CreatedAt.Format(time.RFC3339),
-			})
-		}
-		var next, since any
-		if page.Next != nil {
-			next = map[string]any{"created_at": page.Next.CreatedAt, "id": page.Next.ID}
-		}
-		if !page.ConnFilterSince.IsZero() {
-			since = page.ConnFilterSince.Unix()
-		}
-		return map[string]any{"rows": rows, "next": next, "conn_filter_since": since}, nil
+		return auditPageMap(page), nil
 	})
+}
+
+// auditPageMap is an audit page on the wire.
+func auditPageMap(page exec.AuditPage) map[string]any {
+	rows := make([]any, 0, len(page.Rows))
+	for _, r := range page.Rows {
+		rows = append(rows, map[string]any{
+			"id": r.ID, "user_id": r.UserID, "user": r.User, "ip": r.IP,
+			"action": r.Action, "detail": r.Detail,
+			"connection_id": r.ConnID, "connection": r.Conn,
+			"tx_id": r.TxID, "attempt_id": r.AttemptID,
+			"created_at": r.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	var next, since any
+	if page.Next != nil {
+		next = map[string]any{"created_at": page.Next.CreatedAt, "id": page.Next.ID}
+	}
+	if !page.ConnFilterSince.IsZero() {
+		since = page.ConnFilterSince.Unix()
+	}
+	return map[string]any{"rows": rows, "next": next, "conn_filter_since": since}
 }

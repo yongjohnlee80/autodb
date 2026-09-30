@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -67,6 +68,45 @@ func (e *Engine) SearchAudit(ctx context.Context, token string, f AuditFilter) (
 	if _, err := e.auth.RequireAdmin(ctx, token); err != nil {
 		return AuditPage{}, err
 	}
+	return e.searchAudit(ctx, f)
+}
+
+// RemoteActivityActions are the remote connection events: a device
+// enrolled, a device at a new address, a refused connection.
+var RemoteActivityActions = []string{"remote_device_enrolled", "remote_new_ip", "remote_access_denied"}
+
+// SearchRemoteActivity is the audit search over the remote connection events
+// only. An admin sees all three kinds, anyone's; anyone else sees their own
+// device enrollments and new addresses, and nothing else: the filter's user
+// is theirs whatever was asked, and a refusal (remote_access_denied) is not
+// theirs to see. f.Actions narrows within what the caller may see.
+func (e *Engine) SearchRemoteActivity(ctx context.Context, token string, f AuditFilter) (AuditPage, error) {
+	ident, err := e.auth.ValidateToken(ctx, token)
+	if err != nil {
+		return AuditPage{}, err
+	}
+	allowed := RemoteActivityActions
+	if ident.Role() != meta.RoleAdmin {
+		allowed = RemoteActivityActions[:2]
+		f.UserID = ident.UserID()
+	}
+	var actions []string
+	for _, a := range allowed {
+		if len(f.Actions) == 0 || slices.Contains(f.Actions, a) {
+			actions = append(actions, a)
+		}
+	}
+	if len(actions) == 0 {
+		return AuditPage{}, nil
+	}
+	f.Actions = actions
+	f.ConnID, f.WorkspaceID = 0, 0
+	return e.searchAudit(ctx, f)
+}
+
+// searchAudit is one page of the audit rows f keeps, for a caller already
+// authorized to see them.
+func (e *Engine) searchAudit(ctx context.Context, f AuditFilter) (AuditPage, error) {
 	var page AuditPage
 	var err error
 	if page.ConnFilterSince, _, err = e.store.ScriptAppliedAt(ctx, 3); err != nil {

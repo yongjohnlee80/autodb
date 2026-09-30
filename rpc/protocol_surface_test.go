@@ -15,7 +15,7 @@ import (
 
 // thisBumpAdded is the verb the CURRENT protocol number bought. Update it with
 // the number, in the same change: the pair is what makes a bump accountable.
-const thisBumpAdded = "remote.resume"
+const thisBumpAdded = "remote.ssh_key_list"
 
 // adminOnlyVerbs are the verbs whose answer describes the whole server, so
 // only an admin reads them: sys.inflight (what a restart would interrupt,
@@ -185,18 +185,12 @@ func TestProtocol_AClientAtTheCurrentVersionReachesTheNewVerb(t *testing.T) {
 	f := newFixture(t)
 	c := f.session(t) // hello at rpc.Protocol
 
-	// remote.attest is for remote connections, so a local client is answered
-	// by the verb's own refusal: it was dispatched, which is what "reached"
-	// means here. The handshake's refusal or "unknown method" would mean it
-	// was not. The remote surface's cells exercise the verb itself.
-	errVal, _ := c.call(thisBumpAdded, []byte("device-pub"), []byte("sig"))
-	m, _ := errVal.(map[string]any)
-	if code, _ := m["code"].(int64); code != rpc.CodeRemoteRefused {
-		t.Fatalf("%s on a current local client: %#v; want its own CodeRemoteRefused, "+
-			"which only the handler answers", thisBumpAdded, errVal)
+	errVal, result := c.call(thisBumpAdded, f.rootTok, int64(0))
+	if errVal != nil {
+		t.Fatalf("a current client was refused %s: %#v", thisBumpAdded, errVal)
 	}
-	if msg, _ := m["message"].(string); !strings.Contains(msg, "remote connections") {
-		t.Fatalf("%s answered %q, not its own refusal", thisBumpAdded, msg)
+	if _, ok := result.([]any); !ok {
+		t.Fatalf("%s result shape: %#v; want a list", thisBumpAdded, result)
 	}
 }
 

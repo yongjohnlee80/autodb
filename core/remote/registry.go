@@ -70,6 +70,11 @@ func ByConn(connID string) func(*Peer) bool {
 	return func(p *Peer) bool { return p.ConnID == connID }
 }
 
+// ByDevice matches the connections that proved one device.
+func ByDevice(deviceID int64) func(*Peer) bool {
+	return func(p *Peer) bool { return p.Device() == deviceID }
+}
+
 // ByUser matches the connections of one user.
 func ByUser(userID int64) func(*Peer) bool {
 	return func(p *Peer) bool { return p.UserID == userID }

@@ -16,6 +16,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/remote"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 )
 
@@ -64,6 +65,11 @@ const (
 	// connection took it). Not counted, and the connection stays open: sign
 	// in with the passphrase on it.
 	CodeResumeUnavailable int64 = -32065
+	// CodeNotFound: no such SSH key or device, or not the caller's to see.
+	CodeNotFound int64 = -32066
+	// CodeRemoteUnavailable: this server runs without remote access (no
+	// Remote Control, or no limiter), so its administration is not served.
+	CodeRemoteUnavailable int64 = -32067
 	// CodeProtocolMismatch refuses an incompatible client (re-provision).
 	CodeProtocolMismatch int64 = -32020
 	// CodeAuth carries credential/session failures (bad login, stale token,
@@ -467,6 +473,7 @@ func identMap(id auth.Identity) map[string]any {
 func (s *Server) register() {
 	s.handle("sys.hello", s.helloHandler)
 	s.registerRemoteSignIn()
+	s.registerRemoteAdmin()
 	s.registerPressure()
 	s.registerM6()
 
@@ -811,7 +818,14 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErrFor(req, s.auth.SetUserDisabled(ctx, token, userID, disabled, peerIP(req)))
+		if err := s.auth.SetUserDisabled(ctx, token, userID, disabled, peerIP(req)); err != nil {
+			return nil, s.wireErrFor(req, err)
+		}
+		if disabled {
+			// A disabled user's remote connections end with their sessions.
+			s.endRemote(remote.ByUser(userID))
+		}
+		return nil, nil
 	})
 	s.handle("auth.user_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
@@ -825,7 +839,11 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErrFor(req, s.auth.RemoveUser(ctx, token, userID, peerIP(req)))
+		if err := s.auth.RemoveUser(ctx, token, userID, peerIP(req)); err != nil {
+			return nil, s.wireErrFor(req, err)
+		}
+		s.endRemote(remote.ByUser(userID))
+		return nil, nil
 	})
 	s.handle("auth.passphrase_change", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
