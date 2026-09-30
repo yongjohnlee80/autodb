@@ -56,6 +56,9 @@ func (h *Host) state(theme string) map[string]any {
 	st["App.pressureAge"] = ""
 	st["App.cardTitle"] = ""
 	st["App.cardText"] = ""
+	for k, v := range remoteMenuState(h) {
+		st[k] = v
+	}
 	for k, v := range noteState(h) {
 		st[k] = v
 	}

@@ -130,10 +130,13 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.saveConnection": strings_("App.saveConnection", 5, func(v []string) error {
 			return h.saveConnection(v[0], v[1], v[2], v[3], v[4])
 		}),
-		"App.attachConnection": workspaceAndName(h.attachConnection),
-		"App.nameNote":         workspaceAndName(h.nameNote),
-		"App.unsaved":          oneString("App.unsaved", "save, discard or stay", h.unsavedAnswered),
-		"App.conflict":         oneString("App.conflict", "overwrite, saveas or keep", h.conflictAnswered),
+		"App.attachConnection":       workspaceAndName(h.attachConnection),
+		"App.nameNote":               workspaceAndName(h.nameNote),
+		"App.remoteChoose":           oneNumber("App.remoteChoose", "row", h.remoteChosen),
+		"App.remoteConnect":          threeStrings("App.remoteConnect", h.remoteConnectAnswered),
+		"App.remoteConnectCancelled": none(h.remoteConnectCancelled),
+		"App.unsaved":                oneString("App.unsaved", "save, discard or stay", h.unsavedAnswered),
+		"App.conflict":               oneString("App.conflict", "overwrite, saveas or keep", h.conflictAnswered),
 	}
 }
 

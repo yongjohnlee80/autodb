@@ -3,7 +3,7 @@
 //
 // The harmless No answer takes initial focus: Enter activates it, while the
 // action requires its mnemonic, moving focus, or a click. Esc also leaves
-// things as they are.
+// things as they are, and answers no.
 
 Dialog {
     closeOnQ: true
@@ -16,4 +16,6 @@ Dialog {
         Button { text: App.confirmNo;  DialogButtonBox.buttonRole: DialogButtonBox.RejectRole; onClicked: App.confirmed("no") }
         Button { text: App.confirmYes; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: App.confirmed("yes") }
     }
+    // Esc answers no: a question something is waiting on is always answered.
+    onRejected: App.confirmed("no")
 }

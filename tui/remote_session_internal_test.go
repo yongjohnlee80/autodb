@@ -155,3 +155,23 @@ func TestForgetRemoteWipesTheKeyAndTheToken(t *testing.T) {
 		t.Fatalf("Connect after ForgetRemote: %v; want ErrRemoteNeedsUnlock", err)
 	}
 }
+
+// Quitting (Close) a remote session wipes its device key and forgets its
+// token, as Remote › Disconnect does.
+func TestClosingARemoteSessionWipesTheKey(t *testing.T) {
+	srv := remotetest.Start(t)
+	s, _ := remoteSession(t, srv)
+	if _, err := s.ConnectRemote(rctx(t), remotetest.AlicePass); err != nil {
+		t.Fatal(err)
+	}
+	key := s.remote.key
+	s.Close()
+	if s.Token() != "" || s.remote.key != nil {
+		t.Fatal("Close left the token or the key")
+	}
+	for _, b := range key {
+		if b != 0 {
+			t.Fatal("the device key was not wiped")
+		}
+	}
+}

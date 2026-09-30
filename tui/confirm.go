@@ -22,7 +22,13 @@ func confirmState() map[string]any {
 
 // confirm asks, and runs then if the answer is yes.
 func (h *Host) confirm(title, text, yes, no string, then func()) {
-	h.confirmThen = then
+	h.confirmOr(title, text, yes, no, then, nil)
+}
+
+// confirmOr asks, and runs then on yes, otherwise on no or when the card is
+// dismissed.
+func (h *Host) confirmOr(title, text, yes, no string, then, otherwise func()) {
+	h.confirmThen, h.confirmElse = then, otherwise
 	if err := h.p.SetMany(map[string]any{
 		"App.confirmTitle": title, "App.confirmText": text,
 		"App.confirmYes": yes, "App.confirmNo": no,
@@ -35,14 +41,17 @@ func (h *Host) confirm(title, text, yes, no string, then func()) {
 
 // confirmed is App.confirmed(answer): "yes" or "no".
 func (h *Host) confirmed(answer string) error {
-	then := h.confirmThen
-	h.confirmThen = nil
+	then, otherwise := h.confirmThen, h.confirmElse
+	h.confirmThen, h.confirmElse = nil, nil
 	switch answer {
 	case "yes":
 		if then != nil {
 			h.p.Post(then)
 		}
 	case "no":
+		if otherwise != nil {
+			h.p.Post(otherwise)
+		}
 	default:
 		return fmt.Errorf("App.confirmed: %q is not yes or no", answer)
 	}
