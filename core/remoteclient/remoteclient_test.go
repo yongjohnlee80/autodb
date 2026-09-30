@@ -212,12 +212,12 @@ func TestProfiles(t *testing.T) {
 	}
 
 	bad := map[string]string{
-		"unknown key":   "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\npassword = \"x\"\n",
-		"duplicate id":  "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\n[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\n",
-		"path id":       "[[remote]]\nid = \"../x\"\nhost = \"h\"\nuser = \"u\"\n",
-		"bad pin":       "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\nhost_key_fp = \"MD5:x\"\n",
-		"no user":       "[[remote]]\nid = \"a\"\nhost = \"h\"\n",
-		"bad port":      "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\nport = 70000\n",
+		"unknown key":  "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\npassword = \"x\"\n",
+		"duplicate id": "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\n[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\n",
+		"path id":      "[[remote]]\nid = \"../x\"\nhost = \"h\"\nuser = \"u\"\n",
+		"bad pin":      "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\nhost_key_fp = \"MD5:x\"\n",
+		"no user":      "[[remote]]\nid = \"a\"\nhost = \"h\"\n",
+		"bad port":     "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\nport = 70000\n",
 	}
 	for name, text := range bad {
 		p := filepath.Join(t.TempDir(), "r.toml")
