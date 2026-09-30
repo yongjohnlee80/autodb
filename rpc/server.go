@@ -53,13 +53,13 @@ import (
 // interrupted, for an update to take effect).
 // Protocol 8 added sys.inflight -- what a restart would interrupt, which the
 // restart confirmation has to name before it asks.
-// Protocol 11 added remote.resume and remote.rotate_device, 10 remote.attest (4 added exec.run_script, 3 history.list and sys.shutdown). BUMP THIS whenever the
+// Protocol 12 added the remote.ssh_key_*, device_*, blocks_*, control_* and activity_search verbs, 11 remote.resume and remote.rotate_device, 10 remote.attest (4 added exec.run_script, 3 history.list and sys.shutdown). BUMP THIS whenever the
 // verb surface changes: the handshake is what tells a NEWER frontend that
 // it is talking to an OLDER server (the shared server outlives frontends
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 11
+const Protocol int64 = 12
 
 // Session keys the gate and the hello handler share.
 //
@@ -147,6 +147,11 @@ type Server struct {
 	// (WithRemoteClose): a resume that took a session over ends the
 	// connection it took it from.
 	remoteClose func(match func(*remote.Peer) bool) int
+	// remoteControl and remoteUnblock serve the administration of remote
+	// access (WithRemoteControl, WithRemoteUnblock); nil answers
+	// CodeRemoteUnavailable.
+	remoteControl RemoteController
+	remoteUnblock func(ctx context.Context, byUserID int64, prefix, ip string) error
 	// logger is the transport logger, for what an operator must see.
 	logger logger.Logger
 
@@ -281,6 +286,8 @@ type options struct {
 	grace           time.Duration
 	deviceKeyMaxAge time.Duration
 	remoteClose     func(match func(*remote.Peer) bool) int
+	remoteControl   RemoteController
+	remoteUnblock   func(ctx context.Context, byUserID int64, prefix, ip string) error
 }
 
 // WithRemoteDenials sets what the server tells of a remote connection's
@@ -394,6 +401,8 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 		grace:           o.grace,
 		deviceKeyMaxAge: o.deviceKeyMaxAge,
 		remoteClose:     o.remoteClose,
+		remoteControl:   o.remoteControl,
+		remoteUnblock:   o.remoteUnblock,
 		logger:          o.logger,
 		verbs:           make(map[string]struct{}),
 	}
