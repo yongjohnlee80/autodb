@@ -203,8 +203,20 @@ func (h *Host) checkAuth() {
 	if !h.hadAuth {
 		return
 	}
+	if h.leavingRemote() {
+		return // revoking this computer's own device: it goes back to local
+	}
 	h.hadAuth = false
 	h.retireIdentity()
+	if h.session.Remote() {
+		// A remote connection signs in once: this one cannot sign in again,
+		// so a fresh connection asks (startupDone), with the device key in
+		// memory.
+		h.setAuth("disconnected")
+		h.refreshIdentity()
+		h.connect()
+		return
+	}
 	h.setStatus("signed out by the server — sign in again")
 	h.setAuth("login")
 	h.refreshIdentity()

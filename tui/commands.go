@@ -135,8 +135,27 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.remoteChoose":           oneNumber("App.remoteChoose", "row", h.remoteChosen),
 		"App.remoteConnect":          threeStrings("App.remoteConnect", h.remoteConnectAnswered),
 		"App.remoteConnectCancelled": none(h.remoteConnectCancelled),
-		"App.unsaved":                oneString("App.unsaved", "save, discard or stay", h.unsavedAnswered),
-		"App.conflict":               oneString("App.conflict", "overwrite, saveas or keep", h.conflictAnswered),
+		"App.manageSection":          oneNumber("App.manageSection", "a section row", h.manageSectionChosen),
+		"App.manageClosed":           none(h.manageClosed),
+		"App.manageRefresh":          none(h.manageRefresh),
+		"App.serverAdd":              none(h.serverAdd),
+		"App.serverEdit":             oneNumber("App.serverEdit", "a server row", h.serverEdit),
+		"App.serverRemove":           oneNumber("App.serverRemove", "a server row", h.serverRemove),
+		"App.serverForget":           oneNumber("App.serverForget", "a server row", h.serverForget),
+		"App.serverFormClosed":       none(h.serverFormClosed),
+		"App.saveServer": strings_("App.saveServer", 6, func(v []string) error {
+			return h.saveServer(v[0], v[1], v[2], v[3], v[4], v[5])
+		}),
+		"App.keyAdd":        none(h.keyAdd),
+		"App.keyLabel":      oneNumber("App.keyLabel", "a key row", h.keyLabel),
+		"App.keyRevoke":     oneNumber("App.keyRevoke", "a key row", h.keyRevoke),
+		"App.deviceRevoke":  oneNumber("App.deviceRevoke", "a key row", h.deviceRevoke),
+		"App.keyFormClosed": none(h.keyFormClosed),
+		"App.saveKey": strings_("App.saveKey", 3, func(v []string) error {
+			return h.saveKey(v[0], v[1], v[2])
+		}),
+		"App.unsaved":  oneString("App.unsaved", "save, discard or stay", h.unsavedAnswered),
+		"App.conflict": oneString("App.conflict", "overwrite, saveas or keep", h.conflictAnswered),
 	}
 }
 

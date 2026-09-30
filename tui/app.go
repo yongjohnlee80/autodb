@@ -171,6 +171,26 @@ type Host struct {
 	remoteProfiles *tuidecl.ListModel
 	profiles       []remoteclient.Profile
 	remotePaths    struct{ profiles, keys string }
+	// The Manage dialog (remote_manage.go): its sections and the one shown,
+	// the Servers table over servers, the server form's profile ("" for a
+	// new one), My devices, the key form's pinned identity and key (0 to
+	// add), and the connection a revocation of this computer's own device
+	// is giving up.
+	sections           []manageSection
+	section            string
+	manageSectionModel *tuidecl.ListModel
+	serverRows         *tuidecl.ListModel
+	servers            []remoteclient.Profile
+	serverAuthChoices  *tuidecl.ListModel
+	serverFormID       string
+	serverFormSeq      uint64
+	mine               *manager[SSHKeyRow]
+	keyFormBound       *Bound
+	keyFormID          int64
+	leavingGen         uint64
+	// selfRevokeAnswered is a test seam: run off the loop once a revocation
+	// of this computer's own device is answered, before the loop sees it.
+	selfRevokeAnswered func()
 	// hadAuth is that this program has been signed in, which is what makes a
 	// token going empty a sign-out rather than the start. authSeq numbers the
 	// sign-in attempts; authAttempt is the running one's, 0 for none (auth.go).
@@ -266,6 +286,10 @@ func newHost(session *Session, notesFor notes.NotesFactory, quit func(), opt Opt
 	h.noteOpen = newNoteOpenState()
 	h.remoteProfiles = tuidecl.NewListModel("key", "name")
 	h.remotePaths.profiles, h.remotePaths.keys = opt.RemoteProfiles, opt.RemoteKeyDir
+	h.manageSectionModel = tuidecl.NewListModel("key", "label")
+	h.serverRows = tuidecl.NewListModel("key", "name", "address", "user", "sshKey", "pin", "device")
+	h.serverAuthChoices = serverAuthModel()
+	h.mine = newMyKeysManager(h)
 	h.prefs = newKeysetPref()
 	h.themePref = newThemePref(themeOf(layout))
 	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")

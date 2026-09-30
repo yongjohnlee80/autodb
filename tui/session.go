@@ -134,6 +134,13 @@ func (h *Host) watch(gen uint64) {
 			return
 		}
 		h.setAuth("disconnected")
+		if h.leavingRemote() {
+			// Ended by the revocation of this computer's own device, which
+			// goes back to local once answered: redialing would present the
+			// revoked device.
+			h.setStatus("disconnected from the remote server")
+			return
+		}
 		h.setStatus("disconnected: " + cause + " — reconnecting…")
 		h.connect()
 	})

@@ -121,6 +121,56 @@ func TestRevokingAKeyOrADeviceEndsOnlyItsConnections(t *testing.T) {
 	_ = t1
 }
 
+// A remote connection revoking its own device, or its own SSH key, is
+// answered before it ends: the TUI learns the revocation happened, and
+// discards the device key it holds rather than reconnecting with it. Its
+// next request ends it, uncounted; another connection is untouched.
+func TestRevokingOnesOwnDeviceOrKeyIsAnsweredBeforeTheConnectionEnds(t *testing.T) {
+	r := newRemoteRig(t)
+	addr := r.serving(t)
+	second := r.addKey(t, 1)
+	third := r.addKey(t, 1)
+	c1, t1 := r.signInAs(t, addr, r.key, newDevice(t), "root", "root-passphrase")
+	c2, t2 := r.signInAs(t, addr, second, newDevice(t), "root", "root-passphrase")
+	c3, t3 := r.signInAs(t, addr, third, newDevice(t), "root", "root-passphrase")
+	deniedBefore := auditRows(t, r.store, "remote_access_denied")
+
+	if _, err := c1.call("remote.device_revoke", t1, r.sessionOf(t, t1).DeviceID); err != nil {
+		t.Fatalf("revoking this connection's own device: %v; want it answered", err)
+	}
+	if _, err := c1.call("auth.whoami", t1); err == nil {
+		t.Fatal("a revoked device's connection still answered")
+	}
+	if !c1.ended(t) {
+		t.Fatal("the revoked device's connection stayed open after its next request")
+	}
+
+	keys, err := c2.call("remote.ssh_key_list", t2, int64(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var own int64
+	for _, k := range keys.([]any) {
+		m := k.(map[string]any)
+		if m["fingerprint"] == ssh.FingerprintSHA256(second.PublicKey()) {
+			own, _ = m["id"].(int64)
+		}
+	}
+	if _, err := c2.call("remote.ssh_key_revoke", t2, own); err != nil {
+		t.Fatalf("revoking this connection's own key: %v; want it answered", err)
+	}
+	_, _ = c2.call("auth.whoami", t2)
+	if !c2.ended(t) {
+		t.Fatal("the revoked key's connection stayed open after its next request")
+	}
+	if !alive(c3, t3) {
+		t.Fatal("another key's connection was ended")
+	}
+	if n := auditRows(t, r.store, "remote_access_denied"); n != deniedBefore {
+		t.Fatalf("remote_access_denied rows %d, want %d: ending a revoked connection is not a denial", n, deniedBefore)
+	}
+}
+
 // Disabling a user ends their remote connections; another user's stay.
 func TestDisablingAUserEndsTheirRemoteConnections(t *testing.T) {
 	r := newRemoteRig(t)

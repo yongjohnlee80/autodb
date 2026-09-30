@@ -672,3 +672,39 @@ func (h *Host) OpenNoteName() string {
 	})
 	return <-got
 }
+
+// HoldSelfRevokeAnswer holds a revocation of this computer's own device once
+// it is answered: answered receives a channel the test closes to let the
+// answer reach the loop.
+func (h *Host) HoldSelfRevokeAnswer(answered chan<- chan struct{}) {
+	done := make(chan struct{})
+	h.p.Post(func() {
+		h.selfRevokeAnswered = func() {
+			release := make(chan struct{})
+			answered <- release
+			<-release
+		}
+		close(done)
+	})
+	<-done
+}
+
+// CallOnSession makes one call on the session's connection, as any of the
+// host's would, off the loop.
+func (h *Host) CallOnSession(method string, params ...any) error {
+	_, err := h.session.Bind().call(context.Background(), method, params...)
+	return err
+}
+
+// ManageSections are the Manage dialog's sections as last opened.
+func (h *Host) ManageSections() []string {
+	out := make(chan []string, 1)
+	h.p.Post(func() {
+		var ids []string
+		for _, s := range h.sections {
+			ids = append(ids, s.id)
+		}
+		out <- ids
+	})
+	return <-out
+}

@@ -98,7 +98,7 @@ func (h *Host) focusPane(id string) {
 // the active connection, the explorer's rows, the last result.
 func (h *Host) forgetWorkspace() {
 	h.pressureClosed()
-	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile", "userForm", "users", "addresses", "history", "historyFilter", "audit", "auditFilter", "caCert", "keyslotConfirm", "keyslot", "widening", "search", "noteOpen"} {
+	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile", "userForm", "users", "addresses", "history", "historyFilter", "audit", "auditFilter", "caCert", "keyslotConfirm", "keyslot", "widening", "search", "noteOpen", "remoteManage", "remoteServerForm", "sshKeyForm"} {
 		if err := h.p.Call(id, "close"); err != nil {
 			h.keep(err)
 		}
@@ -117,6 +117,11 @@ func (h *Host) forgetWorkspace() {
 	h.spaceOptions.Reset(nil)
 	h.spaceSelectedID, h.spaceIndex, h.spaceFormID, h.spaceAttachFor = 0, -1, 0, 0
 	h.profileBound = nil
+	h.mine.bound, h.keyFormBound = nil, nil
+	h.mine.all, h.mine.rows = nil, nil
+	h.mine.model.Reset(nil)
+	h.section = ""
+	h.serverFormSeq++
 	h.users.bound, h.userFormBound = nil, nil
 	h.users.all, h.users.rows = nil, nil
 	h.users.model.Reset(nil)

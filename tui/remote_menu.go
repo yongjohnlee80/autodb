@@ -79,7 +79,7 @@ func (h *Host) openRemoteConnect() {
 			return
 		}
 		if len(profiles) == 0 {
-			h.setStatus("no remote servers yet — add one to " + path)
+			h.setStatus("no remote servers yet — add one under Remote › Manage…")
 			return
 		}
 		h.profiles = profiles
