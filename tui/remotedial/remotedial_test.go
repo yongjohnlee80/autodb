@@ -5,139 +5,40 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/pem"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
-	"github.com/yongjohnlee80/autodb/core/auth"
-	"github.com/yongjohnlee80/autodb/core/config"
-	coreexec "github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/meta"
-	"github.com/yongjohnlee80/autodb/core/remote"
 	"github.com/yongjohnlee80/autodb/core/remoteclient"
-	"github.com/yongjohnlee80/autodb/core/remotectl"
-	"github.com/yongjohnlee80/autodb/rpc"
+	"github.com/yongjohnlee80/autodb/internal/remotetest"
 )
 
-const alicePass = "alice-passphrase-long"
-
-// server is a daemon with Remote Control on, and alice, a reader, whose SSH
-// key (in keyFile) is registered.
 type server struct {
-	store   *meta.Store
-	svc     *auth.Service
-	addr    string
-	hostFP  string
-	keyFile string
-	key     ssh.Signer
+	*remotetest.Server
+	store  *meta.Store
+	hostFP string
+	key    ssh.Signer
 }
+
+const alicePass = remotetest.AlicePass
 
 func newServer(t *testing.T) *server {
 	t.Helper()
-	ctx := t.Context()
-	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rootTok, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", auth.LocalPeer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	alice, err := svc.CreateUser(ctx, rootTok, "alice", alicePass, meta.RoleReader, auth.LocalPeer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	block, err := ssh.MarshalPrivateKey(priv, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyFile := filepath.Join(t.TempDir(), "id_ed25519")
-	if err := os.WriteFile(keyFile, pem.EncodeToMemory(block), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	signer, _ := ssh.NewSignerFromKey(priv)
-	if err := os.WriteFile(keyFile+".pub", ssh.MarshalAuthorizedKey(signer.PublicKey()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.AddSSHKey(ctx, rootTok, alice, string(ssh.MarshalAuthorizedKey(signer.PublicKey())), "laptop", "", auth.LocalPeer); err != nil {
-		t.Fatal(err)
-	}
-
-	eng := coreexec.New(store, svc)
-	t.Cleanup(func() { _ = eng.Close() })
-	cfg := config.Default()
-	cfg.Remote.Bind = "127.0.0.1:0"
-	cfg.Remote.HostKey = filepath.Join(t.TempDir(), "keys", "remote_host_ed25519")
-	cfg.Remote.DenialSpill = filepath.Join(t.TempDir(), "spill", "remote-denials.pending")
-	lim, err := remotectl.NewLimiter(cfg, svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(lim.Close)
-	local, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fan := remote.NewFanIn(local)
-	ctl := remotectl.New(remotectl.Config{Cfg: cfg, Store: store, Auth: svc, Limiter: lim, Fan: fan, Version: "t"})
-	srv := rpc.New(svc, eng, config.Server{}, "t", rpc.WithListener(fan),
-		rpc.WithRemoteDenials(func(ip, reason string, userID int64) {
-			remotectl.Deny(lim, func(string) {}, ip, reason, "", userID)
-		}),
-		rpc.WithRemoteSignIns(func(ip string) { _ = lim.Succeeded(context.Background(), ip) }),
-		rpc.WithRemoteClose(ctl.Registry().Close))
-	runCtx, cancel := context.WithCancel(ctx)
-	errc := make(chan error, 1)
-	go func() { errc <- srv.Run(runCtx) }()
-	t.Cleanup(func() { cancel(); <-errc })
-	if err := store.SetMeta(ctx, remote.ControlKey, "on"); err != nil {
-		t.Fatal(err)
-	}
-	if err := ctl.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(ctl.Close)
-	deadline := time.Now().Add(3 * time.Second)
-	for ctl.Status().State != remotectl.StateListening {
-		if time.Now().After(deadline) {
-			t.Fatalf("remote control %+v", ctl.Status())
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	st := ctl.Status()
-	return &server{store: store, svc: svc, addr: st.Addr, hostFP: st.HostKeyFP, keyFile: keyFile, key: signer}
+	s := remotetest.Start(t)
+	return &server{Server: s, store: s.Store, hostFP: s.HostFP, key: s.Key}
 }
 
 // dialer is alice's profile against s, with a fresh key directory.
 func (s *server) dialer(t *testing.T) *Dialer {
 	t.Helper()
-	host, port, _ := net.SplitHostPort(s.addr)
-	n, err := strconv.Atoi(port)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := remoteclient.Profile{ID: "test", Host: host, Port: n, User: "alice", KeyFile: s.keyFile}
-	if err := p.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	keys, err := remoteclient.FilesFor(filepath.Join(t.TempDir(), "remote"), "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	p, keys := s.Profile(t)
 	return &Dialer{Profile: p, Keys: keys, ClientVersion: "test",
 		ConfirmHostKey: func(fp string) bool { return fp == s.hostFP }}
 }
@@ -423,7 +324,7 @@ func TestAnInterruptedRotationRecoversFromTheSideFile(t *testing.T) {
 func TestTheAgentSignsForTheProfilesKeyOnly(t *testing.T) {
 	s := newServer(t)
 	ring := agent.NewKeyring()
-	pemBytes, _ := os.ReadFile(s.keyFile)
+	pemBytes, _ := os.ReadFile(s.KeyFile)
 	raw, err := ssh.ParseRawPrivateKey(pemBytes)
 	if err != nil {
 		t.Fatal(err)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/autodb/rpc"
+	"github.com/yongjohnlee80/autodb/tui/remotedial"
 	"github.com/yongjohnlee80/golib/logger"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
@@ -50,6 +51,9 @@ type Session struct {
 	// NEW token, with the same id. Work issued before that must not be applied
 	// after it.
 	idEpoch uint64
+	// remote is set for a session whose transport is a remote server
+	// (NewRemoteSession); nil for the local daemon.
+	remote *remoteState
 }
 
 // spawnProbeWindow bounds how long Connect keeps dialing after the first
@@ -295,6 +299,9 @@ func (b *Bound) revokeMintedAfterSwitch(ctx context.Context, name string) error 
 // stale disconnect watchers, and CodeAuth clears from the old connection
 // are all invalidated before the old client is even closed.
 func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error) {
+	if s.remote != nil {
+		return s.connectRemote(ctx)
+	}
 	s.mu.Lock()
 	old := s.client
 	s.client = nil
@@ -409,8 +416,16 @@ func (s *Session) Disconnect() {
 	old := s.client
 	s.client = nil
 	s.gen++
+	var conn *remotedial.Conn
+	if s.remote != nil {
+		// The device key in memory and the token are kept: a reconnect
+		// resumes without the passphrase.
+		conn, s.remote.conn = s.remote.conn, nil
+	}
 	s.mu.Unlock()
-	if old != nil {
+	if conn != nil {
+		conn.Close()
+	} else if old != nil {
 		_ = old.Close()
 	}
 }
@@ -522,6 +537,12 @@ func (b *Bound) Bootstrap(ctx context.Context, name, pass string) error {
 }
 
 func (b *Bound) Login(ctx context.Context, name, pass string) error {
+	if b.s.remote != nil {
+		if err := b.ensure(); err != nil {
+			return err
+		}
+		return b.s.remoteSignIn(ctx, b.gen, pass)
+	}
 	res, err := b.call(ctx, "auth.login", name, pass)
 	if err != nil {
 		return err

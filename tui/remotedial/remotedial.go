@@ -89,7 +89,12 @@ type Conn struct {
 	// fromNext means the key came from the Next file (an interrupted
 	// rotation), to be promoted once it has proved itself.
 	fromNext bool
+	// hello is the server's greeting.
+	hello map[string]any
 }
+
+// Hello is the server's greeting: its instance, version and so on.
+func (c *Conn) Hello() map[string]any { return c.hello }
 
 // Client is the connection's RPC client.
 func (c *Conn) Client() *golibrpc.Client { return c.cli }
@@ -270,9 +275,10 @@ func (c *Conn) openDeviceKey(u Unlock, useNext bool) error {
 }
 
 func (c *Conn) greet(ctx context.Context) error {
-	_, err := c.cli.Call(ctx, "sys.hello", map[string]any{
+	res, err := c.cli.Call(ctx, "sys.hello", map[string]any{
 		"protocol": rpc.Protocol, "name": "autodb-tui", "version": c.d.ClientVersion,
 	})
+	c.hello, _ = res.(map[string]any)
 	var re *golibrpc.Error
 	if errors.As(err, &re) && re.Code == rpc.CodeProtocolMismatch {
 		return fmt.Errorf("remotedial: %s — this TUI and the server are different builds", re.Message)
