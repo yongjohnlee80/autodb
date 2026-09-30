@@ -153,6 +153,9 @@ type Server struct {
 	// CodeRemoteUnavailable.
 	remoteControl RemoteController
 	remoteUnblock func(ctx context.Context, byUserID int64, prefix, ip string) error
+	// userInTransaction reports whether a user holds an open transaction
+	// (the engine's UserInTransaction); nil when there is no engine.
+	userInTransaction func(userID int64) bool
 	// logger is the transport logger, for what an operator must see.
 	logger logger.Logger
 
@@ -409,6 +412,9 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 	}
 	if s.grace <= 0 {
 		s.grace = config.DefaultRemoteReconnectGrace
+	}
+	if eng != nil {
+		s.userInTransaction = eng.UserInTransaction
 	}
 	if s.deviceKeyMaxAge <= 0 {
 		s.deviceKeyMaxAge = config.DefaultRemoteDeviceKeyMaxAge

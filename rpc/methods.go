@@ -1076,7 +1076,17 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErrFor(req, s.auth.ResetPassphrase(ctx, token, userID, newPass, peerIP(req)))
+		if err := s.auth.ResetPassphrase(ctx, token, userID, newPass, peerIP(req)); err != nil {
+			return nil, s.wireErrFor(req, err)
+		}
+		// The reset revoked every session of the user. Their remote
+		// connections end too, unless they hold an open transaction: then
+		// the connection stays, its token already refused, and its next
+		// request fails rather than the transaction being cut short here.
+		if s.userInTransaction == nil || !s.userInTransaction(userID) {
+			s.endRemote(remote.ByUser(userID))
+		}
+		return nil, nil
 	})
 
 	// --- auth: grants & allowlist (admin, token-first) ---
