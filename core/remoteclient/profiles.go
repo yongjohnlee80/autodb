@@ -26,7 +26,9 @@ type Profile struct {
 	HostKeyFP string `toml:"host_key_fp"`
 	// User is the autodb user signed in as on the server.
 	User string `toml:"user"`
-	// KeyFile is the SSH key to offer; empty with UseAgent.
+	// KeyFile is the SSH key to offer (default ~/.ssh/id_ed25519). With
+	// UseAgent the agent signs for it, and only its public half
+	// (KeyFile.pub) is read: the one key offered is still this one.
 	KeyFile  string `toml:"key_file"`
 	UseAgent bool   `toml:"use_agent"`
 }
@@ -68,10 +70,7 @@ func (p *Profile) Validate() error {
 	if strings.TrimSpace(p.User) == "" {
 		return fmt.Errorf("%w: %s: no autodb user", ErrProfileInvalid, p.ID)
 	}
-	if p.UseAgent && p.KeyFile != "" {
-		return fmt.Errorf("%w: %s: a key file and the agent: choose one", ErrProfileInvalid, p.ID)
-	}
-	if !p.UseAgent && p.KeyFile == "" {
+	if p.KeyFile == "" {
 		p.KeyFile = DefaultKeyFile
 	}
 	if p.HostKeyFP != "" && !strings.HasPrefix(p.HostKeyFP, "SHA256:") {

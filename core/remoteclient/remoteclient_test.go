@@ -207,7 +207,7 @@ func TestProfiles(t *testing.T) {
 	if out[0].Port != DefaultPort || out[0].KeyFile != DefaultKeyFile || out[0].Address() != "db.example.com:7422" {
 		t.Fatalf("defaults not filled: %+v", out[0])
 	}
-	if out[1].KeyFile != "" || !out[1].UseAgent || out[1].HostKeyFP != "SHA256:abc" {
+	if out[1].KeyFile != DefaultKeyFile || !out[1].UseAgent || out[1].HostKeyFP != "SHA256:abc" {
 		t.Fatalf("second profile: %+v", out[1])
 	}
 
@@ -215,7 +215,6 @@ func TestProfiles(t *testing.T) {
 		"unknown key":   "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\npassword = \"x\"\n",
 		"duplicate id":  "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\n[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\n",
 		"path id":       "[[remote]]\nid = \"../x\"\nhost = \"h\"\nuser = \"u\"\n",
-		"key and agent": "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\nkey_file = \"k\"\nuse_agent = true\n",
 		"bad pin":       "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\nhost_key_fp = \"MD5:x\"\n",
 		"no user":       "[[remote]]\nid = \"a\"\nhost = \"h\"\n",
 		"bad port":      "[[remote]]\nid = \"a\"\nhost = \"h\"\nuser = \"u\"\nport = 70000\n",
