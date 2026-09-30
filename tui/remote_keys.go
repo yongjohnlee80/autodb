@@ -316,6 +316,46 @@ func (h *Host) leavingRemote() bool {
 	return h.leavingGen != 0 && h.leavingGen == h.session.Gen()
 }
 
+// tellNewDevices is the one-time notice of a remote sign-in: each of the
+// user's devices enrolled since this one last signed in, in turn, with the
+// choice to revoke it. Revoking it revokes its SSH key with it: a device
+// revoked alone leaves its key free to enroll again, and a device that was
+// not the user's means that key was taken. It is never this computer's key,
+// which has this device.
+func (h *Host) tellNewDevices() {
+	told := h.session.TakeNewDevices()
+	if len(told) == 0 {
+		return
+	}
+	b := h.session.Bind()
+	var next func(i int)
+	next = func(i int) {
+		if i >= len(told) || b.Gen() != h.session.Gen() || b.IdentityEpoch() != h.session.IdentityEpoch() {
+			return
+		}
+		d := told[i]
+		h.confirmOr("a new device signed in to your account",
+			"New device enrolled from "+d.EnrolledIP+" on "+shortDate(d.EnrolledAt)+" — not you? Revoke it.\n\n"+
+				"Its device fingerprint: "+d.Fingerprint+"\n\n"+
+				"Revoking it also revokes the SSH key it connected with, so the key cannot enroll another device. "+
+				"If it was not you, change your autodb passphrase too: it was used.",
+			"&Revoke it", "&It was me",
+			func() {
+				do(h, func(ctx context.Context) error { return b.RevokeSSHKey(ctx, d.SSHKeyID) }, func(err error) {
+					if err != nil {
+						h.setStatus("revoking the device enrolled from " + d.EnrolledIP + ": " + WireErrorMessage(err))
+					} else {
+						h.setStatus("revoked the device enrolled from " + d.EnrolledIP + " on " +
+							shortDate(d.EnrolledAt) + ", and its SSH key")
+					}
+					next(i + 1)
+				})
+			},
+			func() { next(i + 1) })
+	}
+	next(0)
+}
+
 // userSSHKeys is App.userSSHKeys(i): System › Users › SSH keys, the chosen
 // user's keys in the Manage dialog.
 func (h *Host) userSSHKeys(i int) error {

@@ -137,6 +137,7 @@ func (h *Host) afterSignIn() {
 	h.setStatus(fmt.Sprintf("signed in as %s (%s)", u.Name, u.Role))
 	h.reloadExplorer()
 	h.applyStoredPrefs()
+	h.tellNewDevices()
 }
 
 // notesBackendFor is the signed-in subject's notes: the server's for a

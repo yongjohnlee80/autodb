@@ -248,7 +248,12 @@ func (s *Server) remoteLogin(ctx context.Context, req *golibrpc.Request, peer *r
 	if err := s.signedIn(req, peer, res.SessionID, res.DeviceID, release, ip); err != nil {
 		return nil, err
 	}
-	return map[string]any{"token": res.Token, "user": identMap(res.Identity), "enrolled": res.Enrolled}, nil
+	newDevices := make([]any, 0, len(res.NewDevices))
+	for _, d := range res.NewDevices {
+		newDevices = append(newDevices, deviceMap(d))
+	}
+	return map[string]any{"token": res.Token, "user": identMap(res.Identity), "enrolled": res.Enrolled,
+		"new_devices": newDevices}, nil
 }
 
 // remoteRefusal counts a remote connection's refused proof or sign-in and
