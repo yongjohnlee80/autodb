@@ -25,7 +25,8 @@ func (s *Server) registerRemoteSignIn() {
 	// the passphrase is sent. sig is the device key's signature over
 	// remote.AttestMessage for this connection, built here from the
 	// connection, never from the client. The reply says whether the device
-	// is enrolled, and when its key was made; a device that is not is
+	// is enrolled, its id (what a rotation signs), when its key was made and
+	// whether it is due for rotation; a device that is not enrolled is
 	// enrolled by the sign-in that follows.
 	s.handle("remote.attest", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		peer, isRemote := remotePeer(req.Session)
@@ -66,7 +67,8 @@ func (s *Server) registerRemoteSignIn() {
 			return nil, s.remoteRefusal(req, peer, auth.DenialProtocolViolation)
 		}
 		due := at.DeviceID != 0 && time.Since(time.Unix(at.KeyCreatedAt, 0)) > s.deviceKeyMaxAge
-		return map[string]any{"enrolled": at.DeviceID != 0, "key_created_at": at.KeyCreatedAt, "rotate_due": due}, nil
+		return map[string]any{"enrolled": at.DeviceID != 0, "device_id": at.DeviceID,
+			"key_created_at": at.KeyCreatedAt, "rotate_due": due}, nil
 	})
 
 	// remote.resume(token) takes up this device's session on a new connection
