@@ -181,10 +181,27 @@ func TestARefusalIsRecordedAfterTheCallerCancels(t *testing.T) {
 }
 
 // Cancelling mid-statement still records the attempt's terminal.
+//
+// The cancel waits for the attempt to be recorded as running, so it lands
+// mid-statement however slow the host. A fixed delay did not: on a loaded
+// runner it could fire before the attempt was recorded, the statement never
+// started, and there was no row to find.
 func TestCancellingMidStatementStillRecordsTheTerminal(t *testing.T) {
 	f := newFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(100*time.Millisecond, cancel)
+	defer cancel()
+	go func() {
+		defer cancel()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			n, err := f.store.History.OnCtx(context.Background()).
+				With(meta.HistStatus, string(StatusRunning)).Count()
+			if err == nil && n > 0 {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
 	_, _ = f.eng.Execute(ctx, f.rootTok, f.connID,
 		"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c", testIP)
 	rows, err := f.store.History.OnCtx(context.Background()).Select()
