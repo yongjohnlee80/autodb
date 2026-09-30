@@ -103,6 +103,10 @@ func (c *Conn) Client() *golibrpc.Client { return c.cli }
 // one the user just confirmed, for the caller to pin in the profile.
 func (c *Conn) HostKeyFP() string { return c.hostFP }
 
+// SSHKeyFP is the fingerprint of the SSH key the connection authenticated
+// with: its device is this machine (one key, one device).
+func (c *Conn) SSHKeyFP() string { return c.sshFP }
+
 // DeviceKey is the unsealed device key, kept in memory while connected so a
 // reconnect can resume without the passphrase. Close wipes it.
 func (c *Conn) DeviceKey() ed25519.PrivateKey { return c.device }

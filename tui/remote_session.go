@@ -308,6 +308,18 @@ func (s *Session) RemoteDialer() *remotedial.Dialer {
 	return s.remote.d
 }
 
+// RemoteSSHKeyFP is the fingerprint of the SSH key the remote connection in
+// use authenticated with, "" for a local session or none connected: the key
+// whose device is this machine.
+func (s *Session) RemoteSSHKeyFP() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.remote == nil || s.remote.conn == nil {
+		return ""
+	}
+	return s.remote.conn.SSHKeyFP()
+}
+
 // RemoteProfile is the profile a remote session connects, for the pin.
 func (s *Session) RemoteProfile() (remoteclient.Profile, bool) {
 	s.mu.Lock()

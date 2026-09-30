@@ -68,6 +68,8 @@ const (
 	cmdConnToggle       CommandID = "session.connection_toggle"
 	cmdRemoteConnect    CommandID = "remote.connect"
 	cmdRemoteDisconnect CommandID = "remote.disconnect"
+	cmdRemoteManage     CommandID = "remote.manage"
+	cmdMySSHKeys        CommandID = "remote.my_keys"
 	cmdRestart          CommandID = "server.restart"
 	cmdAbout            CommandID = "app.about"
 	cmdProfile          CommandID = "app.profile"
@@ -245,6 +247,16 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 		},
 		{
+			// The SSH keys on one's own profile on the connected server: what
+			// Remote Control admits there.
+			ID:      cmdMySSHKeys,
+			Visible: signedIn,
+			Run:     func(h *Host) { h.openManage(sectionMine) },
+			Menu: []MenuProjection{
+				{Parent: nodeHome, Label: "My SSH keys…", Hotkey: 'S', Order: 45},
+			},
+		},
+		{
 			ID:      cmdMyTokens,
 			Visible: signedIn,
 			Run:     func(h *Host) { h.openTokens() },
@@ -357,6 +369,16 @@ func catalogCommands() []CommandOf[*Host] {
 			Run: func(h *Host) { h.remoteDisconnect() },
 			Menu: []MenuProjection{
 				{Parent: nodeRemote, Label: "Disconnect", Hotkey: 'D', Order: 20},
+			},
+		},
+		{
+			// Always offered: Servers is this computer's, whatever the
+			// session.
+			ID:      cmdRemoteManage,
+			Visible: func(h *Host) bool { return h.ownsConnection() },
+			Run:     func(h *Host) { h.openManage(sectionServers) },
+			Menu: []MenuProjection{
+				{Parent: nodeRemote, Label: "Manage…", Hotkey: 'M', Order: 30},
 			},
 		},
 		{

@@ -40,6 +40,18 @@ func (s *Server) endRemote(match func(*remote.Peer) bool) {
 	}
 }
 
+// endRemoteAnswering is endRemote for a request that may be ending its own
+// connection: that one ends after its reply, as a sign-out does, so the
+// client learns the revocation happened (and discards the device key it
+// holds rather than reconnecting with it). The others end now.
+func (s *Server) endRemoteAnswering(req *golibrpc.Request, match func(*remote.Peer) bool) {
+	own, _ := remotePeer(req.Session)
+	s.endRemote(func(p *remote.Peer) bool { return p != own && match(p) })
+	if own != nil && match(own) {
+		own.EndAfterReply(remoteHangupBackstop)
+	}
+}
+
 // adminErr maps the remote administration refusals onto the wire.
 func (s *Server) adminErr(req *golibrpc.Request, err error) error {
 	switch {
@@ -145,7 +157,8 @@ func (s *Server) registerRemoteAdmin() {
 		return nil, s.adminErr(req, s.auth.LabelSSHKey(ctx, token, keyID, label, peerIP(req)))
 	})
 	// remote.ssh_key_revoke(token, key_id) revokes the key, its device and
-	// their sessions, then ends the key's live connections.
+	// their sessions, then ends the key's live connections: the caller's own
+	// after its reply.
 	s.handle("remote.ssh_key_revoke", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		token, keyID, err := tokenAndID(req, "key_id")
 		if err != nil {
@@ -154,7 +167,7 @@ func (s *Server) registerRemoteAdmin() {
 		if err := s.auth.RevokeSSHKey(ctx, token, keyID, peerIP(req)); err != nil {
 			return nil, s.adminErr(req, err)
 		}
-		s.endRemote(remote.BySSHKey(keyID))
+		s.endRemoteAnswering(req, remote.BySSHKey(keyID))
 		return nil, nil
 	})
 	// remote.device_list(token, user_id, with_revoked).
@@ -185,7 +198,8 @@ func (s *Server) registerRemoteAdmin() {
 		return out, nil
 	})
 	// remote.device_revoke(token, device_id) revokes the device and its
-	// sessions, then ends its live connections.
+	// sessions, then ends its live connections: the caller's own after its
+	// reply.
 	s.handle("remote.device_revoke", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		token, deviceID, err := tokenAndID(req, "device_id")
 		if err != nil {
@@ -194,7 +208,7 @@ func (s *Server) registerRemoteAdmin() {
 		if err := s.auth.RevokeDevice(ctx, token, deviceID, peerIP(req)); err != nil {
 			return nil, s.adminErr(req, err)
 		}
-		s.endRemote(remote.ByDevice(deviceID))
+		s.endRemoteAnswering(req, remote.ByDevice(deviceID))
 		return nil, nil
 	})
 	s.handle("remote.blocks_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
