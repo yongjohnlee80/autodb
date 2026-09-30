@@ -122,8 +122,8 @@ func (h *Host) afterSignIn() {
 	h.setAuth("signed-in")
 	defer h.refreshIdentity()
 	h.probeFrontDoorTLS()
-	if h.notesFor != nil {
-		notes, err := h.notesFor(u.Name)
+	if h.session.Remote() || h.notesFor != nil {
+		backend, err := h.notesBackendFor(u.Name)
 		if err != nil {
 			// Instead of the signed-in line, not before it: signed in with no
 			// notes is the one case the user must see.
@@ -132,11 +132,24 @@ func (h *Host) afterSignIn() {
 			h.applyStoredPrefs()
 			return
 		}
-		h.notes = notes
+		h.notes = backend
 	}
 	h.setStatus(fmt.Sprintf("signed in as %s (%s)", u.Name, u.Role))
 	h.reloadExplorer()
 	h.applyStoredPrefs()
+}
+
+// notesBackendFor is the signed-in subject's notes: the server's for a
+// remote session, never this machine's; the local store otherwise.
+func (h *Host) notesBackendFor(subject string) (notesBackend, error) {
+	if h.session.Remote() {
+		return newRemoteNotes(h.session, subject, h.idEpoch), nil
+	}
+	store, err := h.notesFor(subject)
+	if err != nil {
+		return nil, err
+	}
+	return newLocalNotes(store, h.idEpoch), nil
 }
 
 // retireIdentity ends the current identity's authority: its note store stops

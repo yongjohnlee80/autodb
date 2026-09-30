@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"github.com/yongjohnlee80/autodb/core/notes"
 	"sort"
 	"strings"
 
@@ -31,8 +30,8 @@ func newNoteOpenState() *noteOpenState {
 
 // Local notes are keyed by workspace ID, including folders left by server-side
 // workspace deletion. Those folders remain openable and are named detached.
-func listNoteChoices(store *notes.Store, names map[int64]string) ([]noteChoice, error) {
-	ids, err := store.ListWorkspaceDirs()
+func listNoteChoices(store notesBackend, names map[int64]string) ([]noteChoice, error) {
+	ids, err := store.Workspaces()
 	if err != nil {
 		return nil, err
 	}

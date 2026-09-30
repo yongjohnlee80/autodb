@@ -355,7 +355,7 @@ func (h *Host) HoldNoteListing(started chan<- struct{}, resume <-chan struct{}, 
 	ready := make(chan struct{})
 	h.p.Post(func() {
 		h.noteOpenListed = func() { applied <- struct{}{} }
-		h.listNotes = func(store *notes.Store, names map[int64]string) ([]noteChoice, error) {
+		h.listNotes = func(store notesBackend, names map[int64]string) ([]noteChoice, error) {
 			started <- struct{}{}
 			<-resume
 			return listNoteChoices(store, names)
@@ -625,6 +625,50 @@ func (h *Host) AuditIDs() []int64 {
 			out = append(out, r.ID)
 		}
 		got <- out
+	})
+	return <-got
+}
+
+// holdSaves is a notes backend whose saves wait for release.
+type holdSaves struct {
+	notesBackend
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (b holdSaves) Save(n *NoteHandle, body string) error {
+	b.started <- struct{}{}
+	<-b.release
+	return b.notesBackend.Save(n, body)
+}
+
+// HoldNoteSaves makes the signed-in identity's saves wait for release.
+func (h *Host) HoldNoteSaves(started chan<- struct{}, release <-chan struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.notes = holdSaves{notesBackend: h.notes, started: started, release: release}
+		close(ready)
+	})
+	<-ready
+}
+
+// RetireIdentityForTest ends the signed-in identity, as losing the sign-in
+// does.
+func (h *Host) RetireIdentityForTest() {
+	ready := make(chan struct{})
+	h.p.Post(func() { h.retireIdentity(); close(ready) })
+	<-ready
+}
+
+// OpenNoteName is the open note's name, "" for none.
+func (h *Host) OpenNoteName() string {
+	got := make(chan string, 1)
+	h.p.Post(func() {
+		if h.buf.note == nil {
+			got <- ""
+			return
+		}
+		got <- h.buf.note.Name
 	})
 	return <-got
 }
