@@ -10,6 +10,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/core/notes"
 	"github.com/yongjohnlee80/autodb/core/pressure"
+	"github.com/yongjohnlee80/autodb/core/remoteclient"
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui/widget"
@@ -163,6 +164,13 @@ type Host struct {
 	attaching       attachFor
 	attachWs        *tuidecl.ListModel
 	confirmThen     func()
+	// confirmElse is what a no to the confirmation card runs, when anything.
+	confirmElse func()
+	// remoteProfiles are the Connect dialog's rows, profiles the profiles
+	// they show, and remotePaths where remotes.toml and the device keys are.
+	remoteProfiles *tuidecl.ListModel
+	profiles       []remoteclient.Profile
+	remotePaths    struct{ profiles, keys string }
 	// hadAuth is that this program has been signed in, which is what makes a
 	// token going empty a sign-out rather than the start. authSeq numbers the
 	// sign-in attempts; authAttempt is the running one's, 0 for none (auth.go).
@@ -211,6 +219,10 @@ type Options struct {
 	App []tuicore.AppOption
 	// About is the build and location detail About shows.
 	About AboutInfo
+	// RemoteProfiles and RemoteKeyDir are where remotes.toml and the device
+	// keys are; empty means $XDG_CONFIG_HOME/autodb/remotes.toml and
+	// $XDG_DATA_HOME/autodb/remote.
+	RemoteProfiles, RemoteKeyDir string
 }
 
 // New mounts qml/main.qml over session. Nothing runs until Run.
@@ -252,6 +264,8 @@ func newHost(session *Session, notesFor notes.NotesFactory, quit func(), opt Opt
 	h.pressure = newPressureView()
 	h.workspaces = tuidecl.NewListModel("id", "name")
 	h.noteOpen = newNoteOpenState()
+	h.remoteProfiles = tuidecl.NewListModel("key", "name")
+	h.remotePaths.profiles, h.remotePaths.keys = opt.RemoteProfiles, opt.RemoteKeyDir
 	h.prefs = newKeysetPref()
 	h.themePref = newThemePref(themeOf(layout))
 	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")

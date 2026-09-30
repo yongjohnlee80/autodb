@@ -33,44 +33,47 @@ const (
 	nodeEditor  MenuNodeID = "options.editor"
 	nodeTheme   MenuNodeID = "options.theme"
 	nodeSystem  MenuNodeID = "system"
+	nodeRemote  MenuNodeID = "remote"
 )
 
 // Command ids.
 const (
-	cmdRunQuery      CommandID = "query.run"
-	cmdRunSelection  CommandID = "query.run_selection"
-	cmdToggleJSON    CommandID = "results.toggle_json"
-	cmdZoomToggle    CommandID = "view.zoom_toggle"
-	cmdZoomEditor    CommandID = "view.zoom_editor"
-	cmdZoomResults   CommandID = "view.zoom_results"
-	cmdZoomExplorer  CommandID = "view.zoom_explorer"
-	cmdZoomOut       CommandID = "view.zoom_out"
-	cmdFocusExplorer CommandID = "focus.explorer"
-	cmdFocusEditor   CommandID = "focus.editor"
-	cmdFocusResults  CommandID = "focus.results"
-	cmdNewNote       CommandID = "note.new"
-	cmdSaveNote      CommandID = "note.save"
-	cmdConnPicker    CommandID = "conn.select"
-	cmdConnManager   CommandID = "conn.manage"
-	cmdWorkspaces    CommandID = "workspace.manage"
-	cmdUsers         CommandID = "user.manage"
-	cmdMyIPs         CommandID = "ip.mine"
-	cmdMyTokens      CommandID = "token.mine"
-	cmdHistory       CommandID = "history.open"
-	cmdAudit         CommandID = "audit.open"
-	cmdCACert        CommandID = "frontdoor.cacert"
-	cmdRefresh       CommandID = "explorer.refresh"
-	cmdAllowlist     CommandID = "ip.allowlist"
-	cmdKeyslot       CommandID = "keyslot.manage"
-	cmdDismissTLS    CommandID = "warning.dismiss_cleartext"
-	cmdLogin         CommandID = "session.login"
-	cmdConnToggle    CommandID = "session.connection_toggle"
-	cmdRestart       CommandID = "server.restart"
-	cmdAbout         CommandID = "app.about"
-	cmdProfile       CommandID = "app.profile"
-	cmdPressure      CommandID = "app.pressure"
-	cmdHelp          CommandID = "app.help"
-	cmdQuit          CommandID = "app.quit"
+	cmdRunQuery         CommandID = "query.run"
+	cmdRunSelection     CommandID = "query.run_selection"
+	cmdToggleJSON       CommandID = "results.toggle_json"
+	cmdZoomToggle       CommandID = "view.zoom_toggle"
+	cmdZoomEditor       CommandID = "view.zoom_editor"
+	cmdZoomResults      CommandID = "view.zoom_results"
+	cmdZoomExplorer     CommandID = "view.zoom_explorer"
+	cmdZoomOut          CommandID = "view.zoom_out"
+	cmdFocusExplorer    CommandID = "focus.explorer"
+	cmdFocusEditor      CommandID = "focus.editor"
+	cmdFocusResults     CommandID = "focus.results"
+	cmdNewNote          CommandID = "note.new"
+	cmdSaveNote         CommandID = "note.save"
+	cmdConnPicker       CommandID = "conn.select"
+	cmdConnManager      CommandID = "conn.manage"
+	cmdWorkspaces       CommandID = "workspace.manage"
+	cmdUsers            CommandID = "user.manage"
+	cmdMyIPs            CommandID = "ip.mine"
+	cmdMyTokens         CommandID = "token.mine"
+	cmdHistory          CommandID = "history.open"
+	cmdAudit            CommandID = "audit.open"
+	cmdCACert           CommandID = "frontdoor.cacert"
+	cmdRefresh          CommandID = "explorer.refresh"
+	cmdAllowlist        CommandID = "ip.allowlist"
+	cmdKeyslot          CommandID = "keyslot.manage"
+	cmdDismissTLS       CommandID = "warning.dismiss_cleartext"
+	cmdLogin            CommandID = "session.login"
+	cmdConnToggle       CommandID = "session.connection_toggle"
+	cmdRemoteConnect    CommandID = "remote.connect"
+	cmdRemoteDisconnect CommandID = "remote.disconnect"
+	cmdRestart          CommandID = "server.restart"
+	cmdAbout            CommandID = "app.about"
+	cmdProfile          CommandID = "app.profile"
+	cmdPressure         CommandID = "app.pressure"
+	cmdHelp             CommandID = "app.help"
+	cmdQuit             CommandID = "app.quit"
 
 	// cmdThemePrefix + a theme's name is Options › Theme › <it>.
 	cmdThemePrefix = "options.theme."
@@ -86,6 +89,8 @@ func menuNodes() []MenuNode {
 		{ID: nodeEdit, Label: "Edit", Hotkey: 'E', Order: 30},
 		{ID: nodeRun, Label: "Run", Hotkey: 'R', Order: 40},
 		{ID: nodeView, Label: "View", Hotkey: 'V', Order: 50},
+		// M, not R: R is Run.
+		{ID: nodeRemote, Label: "Remote", Hotkey: 'M', Order: 55},
 		{ID: nodeZoom, Parent: nodeView, Label: "Zoom", Hotkey: 'Z', Order: 10},
 		{ID: nodeOptions, Label: "Options", Hotkey: 'O', Order: 60},
 		{ID: nodeEditor, Parent: nodeOptions, Label: "Editor", Hotkey: 'E', Order: 10},
@@ -314,12 +319,44 @@ func catalogCommands() []CommandOf[*Host] {
 			// Session lifecycle belongs to a frontend that OWNS its session.
 			// The web frontend shares one connection per user across tabs, so a
 			// disconnect from one tab would drop the connection the others use.
-			ID:      cmdLogin,
-			Visible: func(h *Host) bool { return h.ownsConnection() },
+			ID: cmdLogin,
+			// Hidden on a remote session: its sign-in is the profile's user,
+			// so a switch could mean nothing there.
+			Visible: func(h *Host) bool { return h.ownsConnection() && !h.session.Remote() },
 			Run:     func(h *Host) { h.promptLogin() },
 			Leader:  leader('L', "login / switch user", 220),
 			Menu: []MenuProjection{
 				{Parent: nodeSystem, Label: "Login / Switch user…", Hotkey: 'L', Order: 10},
+			},
+		},
+		{
+			// The Remote menu is the terminal's: the web frontend is served
+			// from the host, on loopback, and reaches no other server.
+			ID:      cmdRemoteConnect,
+			Visible: func(h *Host) bool { return h.ownsConnection() },
+			Enabled: func(h *Host) (bool, string) {
+				if h.remoteConnected() {
+					return false, "Connected to " + h.remoteProfileName() + " — Disconnect first"
+				}
+				return true, ""
+			},
+			Run: func(h *Host) { h.openRemoteConnect() },
+			Menu: []MenuProjection{
+				{Parent: nodeRemote, Label: "Connect…", Hotkey: 'C', Order: 10},
+			},
+		},
+		{
+			ID:      cmdRemoteDisconnect,
+			Visible: func(h *Host) bool { return h.ownsConnection() },
+			Enabled: func(h *Host) (bool, string) {
+				if !h.session.Remote() {
+					return false, "Not connected to a remote server"
+				}
+				return true, ""
+			},
+			Run: func(h *Host) { h.remoteDisconnect() },
+			Menu: []MenuProjection{
+				{Parent: nodeRemote, Label: "Disconnect", Hotkey: 'D', Order: 20},
 			},
 		},
 		{

@@ -52,8 +52,10 @@ type Session struct {
 	// after it.
 	idEpoch uint64
 	// remote is set for a session whose transport is a remote server
-	// (NewRemoteSession); nil for the local daemon.
+	// (NewRemoteSession, SwitchToRemote); nil for the local daemon. local is
+	// the local transport kept while switched to a remote one.
 	remote *remoteState
+	local  *localTransport
 }
 
 // spawnProbeWindow bounds how long Connect keeps dialing after the first
@@ -299,7 +301,7 @@ func (b *Bound) revokeMintedAfterSwitch(ctx context.Context, name string) error 
 // stale disconnect watchers, and CodeAuth clears from the old connection
 // are all invalidated before the old client is even closed.
 func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error) {
-	if s.remote != nil {
+	if s.remoteSnapshot() != nil {
 		return s.connectRemote(ctx)
 	}
 	s.mu.Lock()
@@ -444,8 +446,15 @@ func protocolOf(msg string) int64 {
 	return n
 }
 
-// Close shuts the underlying client down.
-func (s *Session) Close() { s.Disconnect() }
+// Close shuts the underlying client down. A remote session also forgets its
+// token and wipes its device key: quitting ends it.
+func (s *Session) Close() {
+	if s.remoteSnapshot() != nil {
+		s.ForgetRemote()
+		return
+	}
+	s.Disconnect()
+}
 
 // call issues a tokenless method (hello aside, only auth.needs_bootstrap).
 func (b *Bound) call(ctx context.Context, method string, params ...any) (any, error) {
@@ -537,13 +546,13 @@ func (b *Bound) Bootstrap(ctx context.Context, name, pass string) error {
 }
 
 func (b *Bound) Login(ctx context.Context, name, pass string) error {
-	if b.s.remote != nil {
+	if rs := b.s.remoteSnapshot(); rs != nil {
 		if err := b.ensure(); err != nil {
 			return err
 		}
 		// A remote profile signs in as its own user: another name typed is
 		// refused rather than quietly replaced.
-		if user := b.s.remote.d.Profile.User; name != "" && name != user {
+		if user := rs.d.Profile.User; name != "" && name != user {
 			return fmt.Errorf("this remote profile signs in as %s; to sign in as %s, add a profile for them", user, name)
 		}
 		return b.s.remoteSignIn(ctx, b.gen, pass)

@@ -231,6 +231,7 @@ Window {
     ConnCard { id: card }
     ConfirmQuit { id: quit }
     Login { id: login }
+    RemoteConnect { id: remoteConnect }
     Bootstrap { id: bootstrap }
     NoteName { id: noteName }
     NoteOpen { id: noteOpen }
