@@ -1,5 +1,5 @@
-// An SSH key on one's own profile: added (the public key and the autodb
-// passphrase) or labelled.
+// An SSH key on a profile: added (the public key, and the autodb passphrase
+// on one's own profile) or labelled.
 Dialog {
     closeOnQ: true
     maxWidthPercent: 80
@@ -18,8 +18,8 @@ Dialog {
         TextField { id: publicKey; visible: App.keyFormAdding; text: App.keyFormPublic }
         Text { text: "label (which computer or key it is)" }
         TextField { id: label; text: App.keyFormLabel }
-        Text { visible: App.keyFormAdding; text: "your autodb passphrase (a wrong one signs you out)" }
-        TextField { id: passphrase; visible: App.keyFormAdding; echoMode: TextInput.Password }
+        Text { visible: App.keyFormPassphrase; text: "your autodb passphrase (a wrong one signs you out)" }
+        TextField { id: passphrase; visible: App.keyFormPassphrase; echoMode: TextInput.Password }
     }
     onAccepted: { App.saveKey(publicKey.text, label.text, passphrase.text); passphrase.clear() }
 }

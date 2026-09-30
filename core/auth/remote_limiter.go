@@ -89,7 +89,9 @@ type RemoteLimiter struct {
 	mu      sync.Mutex
 	pending []Denial // not yet in the store, oldest first; mirrors the spill file
 	paused  bool
-	probing bool
+	// pauseWhy is why admission is paused, for the admin's screen.
+	pauseWhy string
+	probing  bool
 	// spillDirty is set when an append to the spill file failed, and may have
 	// left a torn line: the next write replaces the whole file from pending
 	// rather than appending behind it.
@@ -157,6 +159,7 @@ func (s *Service) NewRemoteLimiter(cfg LimiterConfig) (*RemoteLimiter, error) {
 	l := &RemoteLimiter{svc: s, cfg: cfg, pending: pending, closed: make(chan struct{})}
 	if len(pending) > 0 {
 		l.paused = true
+		l.pauseWhy = "refusals from before the restart are still being recorded"
 		l.startProbe()
 	}
 	return l, nil
@@ -227,6 +230,7 @@ func (l *RemoteLimiter) Deny(ip string, reason DenialReason, offeredKeyFP string
 		// The memory queue still holds it and admission pauses below: no
 		// further guess can arrive while it is in doubt.
 		l.paused = true
+		l.pauseWhy = "the refusal could not be written to the spill file: " + spillErr.Error()
 	}
 	paused := l.paused
 	l.mu.Unlock()
@@ -247,6 +251,7 @@ func (l *RemoteLimiter) Deny(ip string, reason DenialReason, offeredKeyFP string
 	if err != nil {
 		l.mu.Lock()
 		l.paused = true
+		l.pauseWhy = "the refusal could not be recorded: " + err.Error()
 		l.mu.Unlock()
 		l.startProbe()
 		return spillErr
@@ -310,6 +315,19 @@ func (l *RemoteLimiter) Paused() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.paused
+}
+
+// PauseReason is why remote admission is paused, "" while it is not.
+func (l *RemoteLimiter) PauseReason() string {
+	if l == nil {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.paused {
+		return ""
+	}
+	return l.pauseWhy
 }
 
 // apply writes one denial durably: its claim, its audit row and its counter
@@ -425,6 +443,7 @@ func (l *RemoteLimiter) replay() bool {
 			}
 			l.spillDirty = false
 			l.paused = false
+			l.pauseWhy = ""
 			l.probing = false
 			l.mu.Unlock()
 			return true
@@ -437,6 +456,9 @@ func (l *RemoteLimiter) replay() bool {
 		l.applyMu.Unlock()
 		cancel()
 		if err != nil {
+			l.mu.Lock()
+			l.pauseWhy = "the refusal could not be recorded: " + err.Error()
+			l.mu.Unlock()
 			return false
 		}
 		l.mu.Lock()

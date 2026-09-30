@@ -339,6 +339,6 @@ func controlMap(st remotectl.Status) map[string]any {
 	}
 	return map[string]any{
 		"on": st.On, "state": st.State, "addr": st.Addr, "host_key_fp": st.HostKeyFP,
-		"error": st.Err, "next_try": next, "live": int64(st.Live),
+		"error": st.Err, "next_try": next, "live": int64(st.Live), "paused": st.Paused,
 	}
 }

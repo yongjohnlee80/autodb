@@ -1652,6 +1652,18 @@ type AuditPage struct {
 
 // SearchAudit is one page of audit.search, for an admin.
 func (b *Bound) SearchAudit(ctx context.Context, q AuditQuery) (AuditPage, error) {
+	return b.searchAuditVia(ctx, "audit.search", q)
+}
+
+// SearchRemoteActivity is one page of remote.activity_search: an admin's is
+// every enrollment, new address and refusal; anyone else's their own
+// enrollments and new addresses.
+func (b *Bound) SearchRemoteActivity(ctx context.Context, q AuditQuery) (AuditPage, error) {
+	return b.searchAuditVia(ctx, "remote.activity_search", q)
+}
+
+// searchAuditVia is one page of an audit search by method.
+func (b *Bound) searchAuditVia(ctx context.Context, method string, q AuditQuery) (AuditPage, error) {
 	filter := map[string]any{}
 	for k, v := range map[string]int64{"connection_id": q.ConnID, "workspace_id": q.WorkspaceID,
 		"user_id": q.UserID, "from": q.From, "to": q.To, "limit": q.Limit} {
@@ -1669,7 +1681,7 @@ func (b *Bound) SearchAudit(ctx context.Context, q AuditQuery) (AuditPage, error
 	if q.Before != nil {
 		filter["before"] = map[string]any{"created_at": q.Before.CreatedAt, "id": q.Before.ID}
 	}
-	res, err := b.authed(ctx, "audit.search", filter)
+	res, err := b.authed(ctx, method, filter)
 	if err != nil {
 		return AuditPage{}, err
 	}

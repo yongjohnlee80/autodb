@@ -117,3 +117,75 @@ func (b *Bound) RevokeDevice(ctx context.Context, deviceID int64) error {
 	_, err := b.authed(ctx, "remote.device_revoke", deviceID)
 	return err
 }
+
+// RemoteControl is the server's Remote Control, as remote.control_get and
+// remote.control_set answer it.
+type RemoteControl struct {
+	On        bool
+	State     string // off, listening or retrying
+	Addr      string
+	HostKeyFP string
+	Err       string // why it is not listening, when retrying
+	NextTry   int64
+	Live      int64
+	Paused    string // why new remote connections are refused, "" when they are not
+}
+
+func remoteControlFromWire(res any) RemoteControl {
+	m, _ := res.(map[string]any)
+	return RemoteControl{On: mB(m, "on"), State: mS(m, "state"), Addr: mS(m, "addr"),
+		HostKeyFP: mS(m, "host_key_fp"), Err: mS(m, "error"), NextTry: mI(m, "next_try"),
+		Live: mI(m, "live"), Paused: mS(m, "paused")}
+}
+
+// RemoteControl reads the server's Remote Control, for an admin.
+func (b *Bound) RemoteControl(ctx context.Context) (RemoteControl, error) {
+	res, err := b.authed(ctx, "remote.control_get")
+	if err != nil {
+		return RemoteControl{}, err
+	}
+	return remoteControlFromWire(res), nil
+}
+
+// SetRemoteControl turns the server's Remote Control on or off, for an
+// admin. Off ends every remote connection, the caller's own when it is one.
+func (b *Bound) SetRemoteControl(ctx context.Context, on bool) (RemoteControl, error) {
+	res, err := b.authed(ctx, "remote.control_set", on)
+	if err != nil {
+		return RemoteControl{}, err
+	}
+	return remoteControlFromWire(res), nil
+}
+
+// BlockRow is one address prefix with refusals counted against it.
+type BlockRow struct {
+	Prefix        string
+	Failures      int64
+	LastFailureAt int64
+	BlockedUntil  int64
+	Blocked       bool
+	Reason        string
+}
+
+// Blocks lists the prefixes with refusals counted against them, for an
+// admin.
+func (b *Bound) Blocks(ctx context.Context) ([]BlockRow, error) {
+	res, err := b.authed(ctx, "remote.blocks_list")
+	if err != nil {
+		return nil, err
+	}
+	var out []BlockRow
+	for _, row := range asList(res) {
+		m, _ := row.(map[string]any)
+		out = append(out, BlockRow{Prefix: mS(m, "prefix"), Failures: mI(m, "failures"),
+			LastFailureAt: mI(m, "last_failure_at"), BlockedUntil: mI(m, "blocked_until"),
+			Blocked: mB(m, "blocked"), Reason: mS(m, "reason")})
+	}
+	return out, nil
+}
+
+// Unblock lifts a prefix's block and clears its count, for an admin.
+func (b *Bound) Unblock(ctx context.Context, prefix string) error {
+	_, err := b.authed(ctx, "remote.blocks_unblock", prefix)
+	return err
+}

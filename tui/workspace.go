@@ -117,9 +117,16 @@ func (h *Host) forgetWorkspace() {
 	h.spaceOptions.Reset(nil)
 	h.spaceSelectedID, h.spaceIndex, h.spaceFormID, h.spaceAttachFor = 0, -1, 0, 0
 	h.profileBound = nil
-	h.mine.bound, h.keyFormBound = nil, nil
-	h.mine.all, h.mine.rows = nil, nil
-	h.mine.model.Reset(nil)
+	h.keys.bound, h.keyFormBound = nil, nil
+	h.keys.all, h.keys.rows = nil, nil
+	h.keys.model.Reset(nil)
+	h.blocks.bound, h.blocks.all, h.blocks.rows = nil, nil, nil
+	h.blocks.model.Reset(nil)
+	h.activity.bound, h.activity.all, h.activity.rows = nil, nil, nil
+	h.activity.model.Reset(nil)
+	h.controlBound, h.controlLoaded = nil, false
+	h.set("App.controlText", "")
+	h.userKeysFor.id, h.userKeysFor.name = 0, ""
 	h.section = ""
 	h.serverFormSeq++
 	h.users.bound, h.userFormBound = nil, nil

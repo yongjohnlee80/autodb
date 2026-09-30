@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/rpc"
 )
@@ -207,8 +209,25 @@ func TestRemoteControlOverRPC(t *testing.T) {
 	}
 	st, err := call("remote.control_get", adminTok)
 	m, _ := st.(map[string]any)
-	if err != nil || m["on"] != true || m["state"] != "listening" || m["host_key_fp"] == "" || m["live"] != int64(1) {
-		t.Fatalf("status %#v, %v; want on, listening, a fingerprint, one live", st, err)
+	if err != nil || m["on"] != true || m["state"] != "listening" || m["host_key_fp"] == "" || m["live"] != int64(1) ||
+		m["paused"] != "" {
+		t.Fatalf("status %#v, %v; want on, listening, a fingerprint, one live, admission not paused", st, err)
+	}
+	// A refusal that cannot be spilled pauses admission; the status says so,
+	// and why.
+	spillDir := filepath.Dir(r.cfg.Remote.DenialSpill)
+	if err := os.Chmod(spillDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(spillDir, 0o700) })
+	_ = r.lim.Deny("203.0.113.9", auth.DenialKeyNotRegistered, "", 0)
+	st, err = call("remote.control_get", adminTok)
+	m, _ = st.(map[string]any)
+	if why, _ := m["paused"].(string); err != nil || !strings.Contains(why, "spill file") {
+		t.Fatalf("paused status %#v, %v; want the pause and its reason", st, err)
+	}
+	if err := os.Chmod(spillDir, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := call("remote.control_set", adminTok, false); err != nil {
 		t.Fatalf("turning it off: %v", err)

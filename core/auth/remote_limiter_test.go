@@ -195,6 +195,9 @@ func TestADenialThatCannotBeRecordedPausesAdmission(t *testing.T) {
 	if !l.Paused() || admitted(t, l, "198.51.100.9") {
 		t.Fatal("a denial that could not be recorded left admission open")
 	}
+	if why := l.PauseReason(); !strings.Contains(why, "could not be recorded") {
+		t.Fatalf("the pause's reason %q; want why refusals are not recorded", why)
+	}
 	fail.Store(false)
 	deadline := time.Now().Add(3 * time.Second)
 	for l.Paused() && time.Now().Before(deadline) {
@@ -202,6 +205,9 @@ func TestADenialThatCannotBeRecordedPausesAdmission(t *testing.T) {
 	}
 	if l.Paused() {
 		t.Fatal("admission never resumed after the store recovered")
+	}
+	if why := l.PauseReason(); why != "" {
+		t.Fatalf("resumed, the pause still has a reason: %q", why)
 	}
 	if b := blockOf(t, store, "203.0.113.7/32"); b.ConsecutiveFailures != 1 {
 		t.Fatalf("after recovery the prefix counts %d, want 1", b.ConsecutiveFailures)

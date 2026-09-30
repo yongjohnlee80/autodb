@@ -399,8 +399,8 @@ func TestALostRemoteSignInAsksOnAFreshConnection(t *testing.T) {
 func TestManageOffersMyDevicesOnlySignedIn(t *testing.T) {
 	r := newRemoteRig(t)
 	r.openManage(t)
-	if got := r.h.ManageSections(); len(got) != 2 || got[0] != "servers" || got[1] != "mine" {
-		t.Fatalf("signed in, Manage offers %v; want servers and mine", got)
+	if got := r.h.ManageSections(); strings.Join(got, ",") != "servers,mine,activity,control,devices,blocks" {
+		t.Fatalf("signed in as an admin, Manage offers %v; want every section but a user's keys", got)
 	}
 	r.s.Keys(t, esc())
 	r.s.Keys(t, decltest.Alt('m'))

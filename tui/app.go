@@ -171,11 +171,14 @@ type Host struct {
 	remoteProfiles *tuidecl.ListModel
 	profiles       []remoteclient.Profile
 	remotePaths    struct{ profiles, keys string }
-	// The Manage dialog (remote_manage.go): its sections and the one shown,
-	// the Servers table over servers, the server form's profile ("" for a
-	// new one), My devices, the key form's pinned identity and key (0 to
-	// add), and the connection a revocation of this computer's own device
-	// is giving up.
+	// The Manage dialog (remote_manage.go, remote_keys.go,
+	// remote_admin_ui.go): its sections and the one shown, the Servers table
+	// over servers, the server form's profile ("" for a new one), the key
+	// table and whose keys it lists (0 the caller's, -1 everyone's, else
+	// userKeysFor's), the key form's pinned identity and key (0 to add),
+	// Remote Control's pinned identity and state, Blocked IPs, Remote
+	// activity and its kind and pages, and the connection leaveRemote is
+	// giving up.
 	sections           []manageSection
 	section            string
 	manageSectionModel *tuidecl.ListModel
@@ -184,10 +187,22 @@ type Host struct {
 	serverAuthChoices  *tuidecl.ListModel
 	serverFormID       string
 	serverFormSeq      uint64
-	mine               *manager[SSHKeyRow]
-	keyFormBound       *Bound
-	keyFormID          int64
-	leavingGen         uint64
+	keys               *manager[SSHKeyRow]
+	keysUser           int64
+	userKeysFor        struct {
+		id   int64
+		name string
+	}
+	controlBound  *Bound
+	controlState  RemoteControl
+	controlLoaded bool
+	blocks        *manager[BlockRow]
+	activity      *manager[AuditRow]
+	activityNav   activityNav
+	activityKinds *tuidecl.ListModel
+	keyFormBound  *Bound
+	keyFormID     int64
+	leavingGen    uint64
 	// selfRevokeAnswered is a test seam: run off the loop once a revocation
 	// of this computer's own device is answered, before the loop sees it.
 	selfRevokeAnswered func()
@@ -289,7 +304,10 @@ func newHost(session *Session, notesFor notes.NotesFactory, quit func(), opt Opt
 	h.manageSectionModel = tuidecl.NewListModel("key", "label")
 	h.serverRows = tuidecl.NewListModel("key", "name", "address", "user", "sshKey", "pin", "device")
 	h.serverAuthChoices = serverAuthModel()
-	h.mine = newMyKeysManager(h)
+	h.keys = newKeysManager(h)
+	h.blocks = newBlocksManager()
+	h.activity = newActivityManager()
+	h.activityKinds = tuidecl.NewListModel("key", "label")
 	h.prefs = newKeysetPref()
 	h.themePref = newThemePref(themeOf(layout))
 	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")
