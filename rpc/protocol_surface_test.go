@@ -15,7 +15,7 @@ import (
 
 // thisBumpAdded is the verb the CURRENT protocol number bought. Update it with
 // the number, in the same change: the pair is what makes a bump accountable.
-const thisBumpAdded = "remote.ssh_key_list"
+const thisBumpAdded = "notes.list"
 
 // adminOnlyVerbs are the verbs whose answer describes the whole server, so
 // only an admin reads them: sys.inflight (what a restart would interrupt,
@@ -182,10 +182,10 @@ func TestProtocol_AClientFromBeforeTheNewVerbIsRefusedAtTheHandshake(t *testing.
 // reachable for a whole protocol number, and the new one was never called by
 // anything. thisBumpAdded now names the verb in one place and this reads it.
 func TestProtocol_AClientAtTheCurrentVersionReachesTheNewVerb(t *testing.T) {
-	f := newFixture(t)
+	f := newFixture(t, rpc.WithNotesDir(t.TempDir()))
 	c := f.session(t) // hello at rpc.Protocol
 
-	errVal, result := c.call(thisBumpAdded, f.rootTok, int64(0))
+	errVal, result := c.call(thisBumpAdded, f.rootTok, int64(1))
 	if errVal != nil {
 		t.Fatalf("a current client was refused %s: %#v", thisBumpAdded, errVal)
 	}
