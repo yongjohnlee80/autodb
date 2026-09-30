@@ -70,6 +70,17 @@ const (
 	// CodeRemoteUnavailable: this server runs without remote access (no
 	// Remote Control, or no limiter), so its administration is not served.
 	CodeRemoteUnavailable int64 = -32067
+	// CodeNoteConflict: the note changed (or appeared, or went) since the
+	// version the caller wrote against; or a created name is in use.
+	CodeNoteConflict int64 = -32068
+	// CodeWorkspaceNotVisible: a new note in a workspace the caller cannot
+	// see now.
+	CodeWorkspaceNotVisible int64 = -32069
+	// CodeNotesUnavailable: this server keeps no notes.
+	CodeNotesUnavailable int64 = -32070
+	// CodeNoteRemovalUncertain: the note was removed but its directory could
+	// not be synced; do not retry, it may already be gone.
+	CodeNoteRemovalUncertain int64 = -32071
 	// CodeProtocolMismatch refuses an incompatible client (re-provision).
 	CodeProtocolMismatch int64 = -32020
 	// CodeAuth carries credential/session failures (bad login, stale token,
@@ -474,6 +485,7 @@ func (s *Server) register() {
 	s.handle("sys.hello", s.helloHandler)
 	s.registerRemoteSignIn()
 	s.registerRemoteAdmin()
+	s.registerNotes()
 	s.registerPressure()
 	s.registerM6()
 

@@ -41,6 +41,8 @@ type remoteRig struct {
 	// ctl is the Remote Control the rig's control() started, which the RPC
 	// server ends connections through.
 	ctl atomic.Pointer[remotectl.Control]
+	// notesDir is where the server keeps notes.
+	notesDir string
 }
 
 // newRemoteRig is a store with root, root's SSH key registered, and an RPC
@@ -91,8 +93,9 @@ func newRemoteRigAllowing(t *testing.T, allowlist string) *remoteRig {
 		t.Fatal(err)
 	}
 	fan := remote.NewFanIn(local)
-	rig := &remoteRig{}
-	srv := rpc.New(svc, eng, config.Server{}, "t", rpc.WithListener(fan), rpc.WithNotesDir("/srv/notes"),
+	notesDir := filepath.Join(t.TempDir(), "notes")
+	rig := &remoteRig{notesDir: notesDir}
+	srv := rpc.New(svc, eng, config.Server{}, "t", rpc.WithListener(fan), rpc.WithNotesDir(notesDir),
 		rpc.WithRemoteDenials(func(ip, reason string, userID int64) {
 			remotectl.Deny(lim, func(string) {}, ip, reason, "", userID)
 		}),

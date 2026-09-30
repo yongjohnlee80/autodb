@@ -5,6 +5,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"net"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -254,5 +257,29 @@ func TestAnAdminUnblocksAnAddress(t *testing.T) {
 	r.connect(t, addr, r.key, "") // gets through now
 	if n := auditRows(t, r.store, "remote_ip_unblocked"); n != 1 {
 		t.Fatalf("remote_ip_unblocked rows %d, want 1", n)
+	}
+}
+
+// A remote session's notes are the server's: written over the remote
+// connection, they land under the server's notes directory in the remote
+// user's own root, and read back the same way.
+func TestARemoteSessionUsesTheServersNotes(t *testing.T) {
+	r := newRemoteRig(t)
+	addr := r.serving(t)
+	ws, err := r.eng.CreateWorkspace(t.Context(), mustRootToken(t, r), "ops", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, tok := r.signInAs(t, addr, r.key, newDevice(t), "root", "root-passphrase")
+	if _, err := c.call("notes.write", tok, ws, "remote", "select 42;", ""); err != nil {
+		t.Fatalf("a remote note write: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(r.notesDir, "u-root", "ws-"+strconv.FormatInt(ws, 10), "remote.sql"))
+	if err != nil || string(body) != "select 42;" {
+		t.Fatalf("the server's copy: %q, %v", body, err)
+	}
+	res, err := c.call("notes.read", tok, ws, "remote")
+	if err != nil || res.(map[string]any)["body"] != "select 42;" {
+		t.Fatalf("a remote note read: %#v, %v", res, err)
 	}
 }
