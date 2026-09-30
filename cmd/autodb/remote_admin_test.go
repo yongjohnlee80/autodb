@@ -283,3 +283,25 @@ func TestARemoteSessionUsesTheServersNotes(t *testing.T) {
 		t.Fatalf("a remote note read: %#v, %v", res, err)
 	}
 }
+
+// An admin resetting a user's passphrase revokes every session of theirs,
+// and their remote connections end with them: none of them holds an open
+// transaction. (The branch that leaves a connection holding one in place has
+// its cell in rpc; an open transaction across calls needs PostgreSQL.)
+func TestAPassphraseResetEndsTheUsersRemoteConnections(t *testing.T) {
+	r := newRemoteRig(t)
+	addr := r.serving(t)
+	call, adminTok := r.localAdmin(t)
+	aliceID, aliceKey := r.newUserWithKey(t, "alice", meta.RoleReader)
+	a, _ := r.signInAs(t, addr, aliceKey, newDevice(t), "alice", "alice-passphrase")
+	root, rootTok := r.signInAs(t, addr, r.key, newDevice(t), "root", "root-passphrase")
+	if _, err := call("auth.passphrase_reset", adminTok, aliceID, "alice-second-passphrase"); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if !a.ended(t) {
+		t.Fatal("a reset user's remote connection stayed open")
+	}
+	if !alive(root, rootTok) {
+		t.Fatal("another user's remote connection was ended")
+	}
+}

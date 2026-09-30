@@ -189,3 +189,24 @@ func (e *Engine) AbortIdleShutdown(owner uint64) bool {
 // the schema scripts it applied and the backup it took first — what a frontend
 // that restarted a stale backend says it did.
 func (e *Engine) StartReport() meta.StartReport { return e.store.StartReport() }
+
+// UserInTransaction reports whether any session of userID holds an open
+// transaction now: a READING, as the idle counts are, for a caller deciding
+// whether ending that user's connections would cut a transaction short.
+func (e *Engine) UserInTransaction(userID int64) bool {
+	r := e.sessions
+	r.mu.Lock()
+	sessions := make([]*session, 0, len(r.byID))
+	for _, s := range r.byID {
+		if s.userID == userID {
+			sessions = append(sessions, s)
+		}
+	}
+	r.mu.Unlock()
+	for _, s := range sessions {
+		if s.inTransaction() {
+			return true
+		}
+	}
+	return false
+}
