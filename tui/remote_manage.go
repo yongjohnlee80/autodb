@@ -1,15 +1,12 @@
 package tui
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 
 	"github.com/yongjohnlee80/autodb/core/remoteclient"
@@ -25,16 +22,27 @@ import (
 //   - My devices is the signed-in user's SSH keys on the connected server —
 //     the local daemon or the remote one, whichever the session is on — and
 //     the device each is bound to. Home › My SSH keys… opens it.
+//   - Remote activity is the connected server's enrollments, new addresses
+//     and refusals: an admin's all of them, anyone else's their own
+//     enrollments and new addresses.
+//   - Remote Control, Devices (every user's keys and devices) and Blocked IPs
+//     are an admin's, on the connected server.
+//   - SSH keys of a user is opened from System › Users, for an admin.
 //
 // A profile the session is connected to is not changed under it: Disconnect
-// first. Revoking the key or device this computer is connected with ends
-// this session, so it goes back to the local daemon instead of reconnecting
-// with a device the server now refuses (which would count against this
-// network).
+// first. Whatever ends this computer's own remote connection — revoking the
+// key or device it is connected with, turning Remote Control off from a
+// remote session — goes back to the local daemon instead of reconnecting
+// (remote_keys.go, leaveRemote).
 
 const (
-	sectionServers = "servers"
-	sectionMine    = "mine"
+	sectionServers  = "servers"
+	sectionMine     = "mine"
+	sectionActivity = "activity"
+	sectionControl  = "control"
+	sectionDevices  = "devices"
+	sectionBlocks   = "blocks"
+	sectionUserKeys = "userkeys"
 )
 
 type manageSection struct{ id, label string }
@@ -45,10 +53,20 @@ func manageState(h *Host) map[string]any {
 		"App.manageSectionIndex": -1,
 		"App.manageStatus":       "",
 		"App.manageOnServers":    false,
-		"App.manageOnMine":       false,
-		"App.manageMineTitle":    "",
+		"App.manageOnKeys":       false,
+		"App.manageKeysEdit":     false,
+		"App.manageKeysTitle":    "",
+		"App.manageOnControl":    false,
+		"App.manageOnBlocks":     false,
+		"App.manageOnActivity":   false,
 		"App.serverRows":         h.serverRows,
-		"App.mineRows":           h.mine.model,
+		"App.keyRows":            h.keys.model,
+		"App.blockRows":          h.blocks.model,
+		"App.activityRows":       h.activity.model,
+		"App.activityKinds":      h.activityKinds,
+		"App.activityKindIndex":  -1,
+		"App.controlText":        "",
+		"App.controlToggleLabel": "&Turn on",
 		"App.serverFormTitle":    "",
 		"App.serverFormError":    "",
 		"App.serverFormName":     "",
@@ -62,6 +80,7 @@ func manageState(h *Host) map[string]any {
 		"App.keyFormTitle":       "",
 		"App.keyFormError":       "",
 		"App.keyFormAdding":      false,
+		"App.keyFormPassphrase":  false,
 		"App.keyFormLabel":       "",
 		"App.keyFormPublic":      "",
 	}
@@ -76,30 +95,6 @@ func serverAuthModel() *tuidecl.ListModel {
 		{"key": "agent", "id": "agent", "label": "ssh-agent (the key file's .pub names the key)"},
 	})
 	return m
-}
-
-// newMyKeysManager is My devices: the caller's SSH keys on the connected
-// server, each with its device.
-func newMyKeysManager(h *Host) *manager[SSHKeyRow] {
-	return newManager("App.manageStatus",
-		func(ctx context.Context, b *Bound) ([]SSHKeyRow, error) { return b.SSHKeys(ctx, 0) },
-		func(k SSHKeyRow) tuidecl.Row {
-			device, lastIP, lastSeen := "none yet", "", ""
-			if k.Device != nil {
-				device = "enrolled " + shortDate(k.Device.EnrolledAt)
-				lastIP, lastSeen = k.Device.LastIP, shortDate(k.Device.LastSeenAt)
-			}
-			if h.connectedWith(k.Fingerprint) {
-				device = "this computer"
-			}
-			label := k.Label
-			if label == "" {
-				label = "(no label)"
-			}
-			return tuidecl.Row{"key": strconv.FormatInt(k.ID, 10), "label": label,
-				"fingerprint": shortFP(k.Fingerprint), "type": k.Type, "device": device,
-				"lastIP": lastIP, "lastSeen": lastSeen}
-		}, "key", "label", "fingerprint", "type", "device", "lastIP", "lastSeen")
 }
 
 // shortDate is a unix time as a date and minute, "" for none.
@@ -118,15 +113,8 @@ func shortFP(fp string) string {
 	return fp
 }
 
-// connectedWith reports whether the remote connection in use authenticated
-// with the SSH key of fingerprint fp: that key's device is this computer.
-func (h *Host) connectedWith(fp string) bool {
-	own := h.session.RemoteSSHKeyFP()
-	return own != "" && own == fp
-}
-
-// connectedServer is where My devices' keys are: the remote profile, or the
-// local daemon.
+// connectedServer is the server the session is on: the remote profile, or
+// the local daemon.
 func (h *Host) connectedServer() string {
 	if h.session.Remote() {
 		return h.remoteProfileName()
@@ -140,14 +128,34 @@ func (h *Host) manageSections() []manageSection {
 	if h.ownsConnection() {
 		out = append(out, manageSection{sectionServers, "Servers — the remote servers this computer knows"})
 	}
-	if h.session.Token() != "" {
-		out = append(out, manageSection{sectionMine, "My devices — your SSH keys on " + h.connectedServer()})
+	if h.session.Token() == "" {
+		return out
+	}
+	where := h.connectedServer()
+	out = append(out, manageSection{sectionMine, "My devices — your SSH keys on " + where})
+	admin := h.session.IsAdmin()
+	if admin {
+		out = append(out, manageSection{sectionActivity, "Remote activity — enrollments, new addresses and refusals on " + where})
+	} else {
+		out = append(out, manageSection{sectionActivity, "My remote activity — your enrollments and new addresses on " + where})
+	}
+	if !admin {
+		return out
+	}
+	out = append(out,
+		manageSection{sectionControl, "Remote Control — " + where + "'s remote listener"},
+		manageSection{sectionDevices, "Devices — every user's SSH keys and devices on " + where},
+		manageSection{sectionBlocks, "Blocked IPs — addresses refused on " + where},
+	)
+	if h.userKeysFor.id != 0 {
+		out = append(out, manageSection{sectionUserKeys, "SSH keys of " + h.userKeysFor.name + " on " + where})
 	}
 	return out
 }
 
-// openManage is remote.manage (and Home › My SSH keys…, at sectionMine):
-// the dialog, at section when it is offered, else at the first.
+// openManage is remote.manage (Home › My SSH keys… at sectionMine, System ›
+// Users › SSH keys at sectionUserKeys): the dialog, at section when it is
+// offered, else at the first.
 func (h *Host) openManage(section string) {
 	h.sections = h.manageSections()
 	if len(h.sections) == 0 {
@@ -177,25 +185,39 @@ func (h *Host) manageSectionChosen(i int) error {
 	return nil
 }
 
+// isKeys reports whether section is one of the SSH key tables.
+func isKeys(section string) bool {
+	return section == sectionMine || section == sectionDevices || section == sectionUserKeys
+}
+
 // showSection shows section i, loading it.
 func (h *Host) showSection(i int) {
 	h.section = h.sections[i].id
 	if err := h.p.SetMany(map[string]any{
-		"App.manageOnServers": h.section == sectionServers,
-		"App.manageOnMine":    h.section == sectionMine,
-		"App.manageStatus":    "",
+		"App.manageOnServers":  h.section == sectionServers,
+		"App.manageOnKeys":     isKeys(h.section),
+		"App.manageKeysEdit":   h.section == sectionMine || h.section == sectionUserKeys,
+		"App.manageOnControl":  h.section == sectionControl,
+		"App.manageOnBlocks":   h.section == sectionBlocks,
+		"App.manageOnActivity": h.section == sectionActivity,
+		"App.manageStatus":     "",
 	}); err != nil {
 		h.keep(err)
 		return
 	}
-	switch h.section {
-	case sectionServers:
+	switch {
+	case h.section == sectionServers:
 		h.loadServers("")
-	case sectionMine:
-		h.set("App.manageMineTitle", "your SSH keys on "+h.connectedServer()+", and the device each is bound to")
-		h.mine.all, h.mine.rows = nil, nil
-		h.mine.model.Reset(nil)
-		openManager(h, h.mine)
+	case isKeys(h.section):
+		h.openKeys()
+	case h.section == sectionControl:
+		h.loadControl("")
+	case h.section == sectionBlocks:
+		h.blocks.all, h.blocks.rows = nil, nil
+		h.blocks.model.Reset(nil)
+		openManager(h, h.blocks)
+	case h.section == sectionActivity:
+		h.openActivity()
 	}
 }
 
@@ -206,7 +228,8 @@ func (h *Host) on(section string) bool { return h.section == section }
 // manageClosed is App.manageClosed.
 func (h *Host) manageClosed() error {
 	h.section = ""
-	h.mine.bound = nil
+	h.keys.bound, h.blocks.bound, h.activity.bound, h.controlBound = nil, nil, nil, nil
+	h.userKeysFor.id, h.userKeysFor.name = 0, ""
 	h.serverFormSeq++
 	h.keyFormBound = nil
 	return nil
@@ -214,13 +237,17 @@ func (h *Host) manageClosed() error {
 
 // manageRefresh is App.manageRefresh: the section again.
 func (h *Host) manageRefresh() error {
-	switch h.section {
-	case sectionServers:
+	switch {
+	case h.section == sectionServers:
 		h.loadServers("")
-	case sectionMine:
-		if h.mine.bound != nil {
-			reloadManager(h, h.mine, "")
-		}
+	case isKeys(h.section) && h.keys.bound != nil:
+		reloadManager(h, h.keys, "")
+	case h.section == sectionControl:
+		h.loadControl("")
+	case h.section == sectionBlocks && h.blocks.bound != nil:
+		reloadManager(h, h.blocks, "")
+	case h.section == sectionActivity && h.activity.bound != nil:
+		h.activityReload()
 	}
 	return nil
 }
@@ -588,222 +615,4 @@ func (h *Host) serverForget(i int) error {
 			h.writeServers(path, profiles, &p, "forgot the host key of "+profileLabel(p))
 		})
 	return nil
-}
-
-// ---- My devices --------------------------------------------------------------
-
-// myKeyAt is My devices row i.
-func (h *Host) myKeyAt(i int) (SSHKeyRow, bool) {
-	k, ok := h.mine.at(i)
-	if !ok {
-		h.set("App.manageStatus", "choose a key first")
-	}
-	return k, ok
-}
-
-// mineCurrent reports whether My devices' pinned identity is still the
-// session's.
-func (h *Host) mineCurrent(b *Bound) bool {
-	return b != nil && b == h.mine.bound && b.Gen() == h.session.Gen() &&
-		b.IdentityEpoch() == h.session.IdentityEpoch()
-}
-
-// keyAdd is App.keyAdd: the form to register a public key on one's own
-// profile, with the passphrase.
-func (h *Host) keyAdd() error {
-	if !h.on(sectionMine) || h.mine.bound == nil {
-		return nil
-	}
-	h.showKeyForm(0, "add an SSH key to your profile on "+h.connectedServer(), true, "")
-	return nil
-}
-
-// keyLabel is App.keyLabel(i).
-func (h *Host) keyLabel(i int) error {
-	if !h.on(sectionMine) {
-		return nil
-	}
-	if k, ok := h.myKeyAt(i); ok {
-		h.showKeyForm(k.ID, "label the key "+shortFP(k.Fingerprint), false, k.Label)
-	}
-	return nil
-}
-
-func (h *Host) showKeyForm(keyID int64, title string, adding bool, label string) {
-	h.keyFormBound, h.keyFormID = h.mine.bound, keyID
-	h.refill(map[string]any{"App.keyFormTitle": title, "App.keyFormError": "",
-		"App.keyFormLabel": label, "App.keyFormPublic": ""})
-	h.set("App.keyFormAdding", adding)
-	h.open("sshKeyForm")
-}
-
-// keyFormClosed is App.keyFormClosed: the form cancelled.
-func (h *Host) keyFormClosed() error {
-	h.keyFormBound = nil
-	return nil
-}
-
-// refuseKeyForm opens the key form again with what was typed (never the
-// passphrase), saying why.
-func (h *Host) refuseKeyForm(why, public, label string) {
-	if err := h.p.SetMany(map[string]any{"App.keyFormError": why,
-		"App.keyFormPublic": public, "App.keyFormLabel": label}); err != nil {
-		h.keep(err)
-	}
-	h.p.Post(func() { h.open("sshKeyForm") })
-}
-
-// saveKey is App.saveKey(public, label, passphrase): the key form answered.
-func (h *Host) saveKey(public, label, passphrase string) error {
-	b := h.keyFormBound
-	if !h.mineCurrent(b) {
-		return nil
-	}
-	adding := h.keyFormID == 0
-	if adding {
-		public = strings.TrimSpace(public)
-		if public == "" {
-			h.refuseKeyForm("paste the public key: one line of your .pub file", public, label)
-			return nil
-		}
-		if passphrase == "" {
-			h.refuseKeyForm("your autodb passphrase is required to add a key", public, label)
-			return nil
-		}
-	}
-	keyID := h.keyFormID
-	do(h, func(ctx context.Context) error {
-		if adding {
-			_, err := b.AddSSHKey(ctx, 0, public, label, passphrase)
-			return err
-		}
-		return b.LabelSSHKey(ctx, keyID, label)
-	}, func(err error) {
-		if !h.mineCurrent(b) {
-			return // signed out (a wrong passphrase does that), or moved on
-		}
-		if err != nil {
-			h.refuseKeyForm(WireErrorMessage(err), public, label)
-			return
-		}
-		h.keyFormBound = nil
-		done := "labelled"
-		if adding {
-			done = "added the key — the first connect with it enrolls that computer as its device"
-		}
-		reloadManager(h, h.mine, done)
-	})
-	return nil
-}
-
-// keyRevoke is App.keyRevoke(i): revoke an SSH key, its device with it.
-func (h *Host) keyRevoke(i int) error {
-	if !h.on(sectionMine) {
-		return nil
-	}
-	k, ok := h.myKeyAt(i)
-	if !ok {
-		return nil
-	}
-	self := h.connectedWith(k.Fingerprint)
-	text := "The key can no longer connect, and its device is revoked with it. This cannot be undone: " +
-		"to use the key again, register it again."
-	if self {
-		text += "\n\nThis computer is connected with this key: this session ends, and you are back on the local daemon."
-	}
-	h.confirm("revoke the SSH key "+shortFP(k.Fingerprint)+"?", text, "&Revoke", "&Keep", func() {
-		h.revokeMine("revoke the key", self, func(ctx context.Context, b *Bound) error {
-			return b.RevokeSSHKey(ctx, k.ID)
-		})
-	})
-	return nil
-}
-
-// deviceRevoke is App.deviceRevoke(i): revoke the device a key is bound to.
-func (h *Host) deviceRevoke(i int) error {
-	if !h.on(sectionMine) {
-		return nil
-	}
-	k, ok := h.myKeyAt(i)
-	if !ok {
-		return nil
-	}
-	if k.Device == nil {
-		h.set("App.manageStatus", "that key has no device yet")
-		return nil
-	}
-	self := h.connectedWith(k.Fingerprint)
-	text := "The computer enrolled with this key can no longer connect. The key stays registered, so the " +
-		"next computer to connect with it enrolls as its device."
-	if self {
-		text += "\n\nIt is this computer: this session ends, you are back on the local daemon, and this " +
-			"computer's device key for the server is deleted."
-	}
-	dev := k.Device.ID
-	h.confirm("revoke the device of "+shortFP(k.Fingerprint)+"?", text, "&Revoke", "&Keep", func() {
-		h.revokeMine("revoke the device", self, func(ctx context.Context, b *Bound) error {
-			return b.RevokeDevice(ctx, dev)
-		})
-	})
-	return nil
-}
-
-// revokeMine runs a revocation from My devices. One that ends this
-// computer's own connection (self) holds the connection's watcher off first:
-// reconnecting would present a device the server has just refused. Answered,
-// the device key is deleted and the session goes back to the local daemon;
-// with no answer (the connection ended first) nothing is known, so the key
-// is kept.
-func (h *Host) revokeMine(what string, self bool, fn func(context.Context, *Bound) error) {
-	if !self {
-		managerCall(h, h.mine, what, fn)
-		return
-	}
-	b := h.mine.bound
-	profile, remote := h.session.RemoteProfile()
-	if !remote || !h.mineCurrent(b) {
-		h.set("App.manageStatus", what+": the connection changed — nothing was done here")
-		return
-	}
-	h.leavingGen = h.session.Gen()
-	held := h.selfRevokeAnswered
-	do(h, func(ctx context.Context) error {
-		err := fn(ctx, b)
-		if held != nil {
-			held()
-		}
-		return err
-	}, func(err error) {
-		if b.Gen() != h.session.Gen() {
-			return // switched away meanwhile
-		}
-		var re *golibrpc.Error
-		if err != nil && errors.As(err, &re) {
-			// Refused, and answered: the connection is as it was, unless the
-			// refusal was of the sign-in itself.
-			h.leavingGen = 0
-			h.set("App.manageStatus", what+": "+WireErrorMessage(err))
-			if !h.session.Connected() {
-				h.connect()
-				return
-			}
-			h.checkAuth()
-			return
-		}
-		status := "revoked this computer's device on " + profileLabel(profile) + " — back on the local daemon"
-		if err != nil {
-			status = "the connection to " + profileLabel(profile) + " ended before it answered (" + err.Error() +
-				") — back on the local daemon; if the revocation went through, remove the server under Remote › Manage"
-		} else if derr := h.discardDeviceKey(profile); derr != nil {
-			status += ", but its device key could not be deleted: " + derr.Error()
-		}
-		h.backToLocal(status)
-	})
-}
-
-// leavingRemote reports whether the connection in use is being given up by
-// a revocation of this computer's own device: its watcher and a lost sign-in
-// must not reconnect it.
-func (h *Host) leavingRemote() bool {
-	return h.leavingGen != 0 && h.leavingGen == h.session.Gen()
 }

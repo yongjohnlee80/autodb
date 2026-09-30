@@ -45,6 +45,9 @@ type Status struct {
 	Err       string    // why it is not listening, when retrying
 	NextTry   time.Time // when it tries again, when retrying
 	Live      int       // live remote connections
+	// Paused is why new remote connections are refused although the
+	// listener serves (refusals cannot be recorded), "" while they are not.
+	Paused string
 }
 
 // Config is what Remote Control runs with.
@@ -139,6 +142,7 @@ func (c *Control) Status() Status {
 	defer c.mu.Unlock()
 	s := c.status
 	s.Live = c.reg.Len()
+	s.Paused = c.cfg.Limiter.PauseReason()
 	return s
 }
 

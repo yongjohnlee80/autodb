@@ -45,7 +45,16 @@ type Server struct {
 	// alice can see (it holds a connection she is granted).
 	NotesDir  string
 	Workspace int64
+	// Local is the server's local RPC address, where an operator on the
+	// server host reaches it (root, "root-passphrase"); Control its Remote
+	// Control, and Limiter what counts its refusals.
+	Local   string
+	Control *remotectl.Control
+	Limiter *auth.RemoteLimiter
 }
+
+// RootPass is root's autodb passphrase.
+const RootPass = "root-passphrase"
 
 // Start runs one, for the life of t.
 func Start(t *testing.T) *Server {
@@ -60,7 +69,7 @@ func Start(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootTok, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", auth.LocalPeer)
+	rootTok, _, err := svc.Bootstrap(ctx, "root", RootPass, auth.LocalPeer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +132,7 @@ func Start(t *testing.T) *Server {
 			remotectl.Deny(lim, func(string) {}, ip, reason, "", userID)
 		}),
 		rpc.WithRemoteSignIns(func(ip string) { _ = lim.Succeeded(context.Background(), ip) }),
-		rpc.WithRemoteClose(ctl.Registry().Close))
+		rpc.WithRemoteClose(ctl.Registry().Close), rpc.WithRemoteControl(ctl), rpc.WithRemoteUnblock(lim.Unblock))
 	runCtx, cancel := context.WithCancel(ctx)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Run(runCtx) }()
@@ -144,7 +153,7 @@ func Start(t *testing.T) *Server {
 	}
 	st := ctl.Status()
 	return &Server{Store: store, Svc: svc, Addr: st.Addr, HostFP: st.HostKeyFP, KeyFile: keyFile, Key: signer,
-		NotesDir: notesDir, Workspace: ws}
+		NotesDir: notesDir, Workspace: ws, Local: local.Addr().String(), Control: ctl, Limiter: lim}
 }
 
 // Profile is alice's profile against s, and a fresh key directory.

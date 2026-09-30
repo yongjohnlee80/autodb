@@ -28,6 +28,7 @@ Dialog {
         Button { text: "&Toggle"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userToggle(table.currentIndex) }
         Button { text: "Grant &connection"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userGrant(table.currentIndex) }
         Button { text: "&IPs"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userIPs(table.currentIndex) }
+        Button { text: "SS&H keys"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userSSHKeys(table.currentIndex) }
         Button { text: "Remo&ve"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userRemove(table.currentIndex) }
         Button { text: "Close(&q)"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }

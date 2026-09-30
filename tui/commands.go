@@ -151,6 +151,12 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.keyRevoke":     oneNumber("App.keyRevoke", "a key row", h.keyRevoke),
 		"App.deviceRevoke":  oneNumber("App.deviceRevoke", "a key row", h.deviceRevoke),
 		"App.keyFormClosed": none(h.keyFormClosed),
+		"App.userSSHKeys":   oneNumber("App.userSSHKeys", "a user row", h.userSSHKeys),
+		"App.controlToggle": none(h.controlToggle),
+		"App.blockUnblock":  oneNumber("App.blockUnblock", "an address row", h.blockUnblock),
+		"App.activityKind":  oneNumber("App.activityKind", "a kind row", h.activityKindChosen),
+		"App.activityNext":  none(h.activityNext),
+		"App.activityPrev":  none(h.activityPrev),
 		"App.saveKey": strings_("App.saveKey", 3, func(v []string) error {
 			return h.saveKey(v[0], v[1], v[2])
 		}),

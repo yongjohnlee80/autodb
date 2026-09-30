@@ -708,3 +708,32 @@ func (h *Host) ManageSections() []string {
 	})
 	return <-out
 }
+
+// ChooseManageSection chooses the Manage dialog's section i, as its section
+// list does.
+func (h *Host) ChooseManageSection(i int) {
+	done := make(chan struct{})
+	h.p.Post(func() {
+		h.set("App.manageSectionIndex", i)
+		_ = h.manageSectionChosen(i)
+		close(done)
+	})
+	<-done
+}
+
+// ControlText is what the Remote Control section says of st.
+var ControlText = controlText
+
+// ActivityKinds are the Remote activity section's kind choices, as last
+// opened.
+func (h *Host) ActivityKinds() []string {
+	out := make(chan []string, 1)
+	h.p.Post(func() {
+		var labels []string
+		for _, k := range h.activityNav.kinds {
+			labels = append(labels, k.label)
+		}
+		out <- labels
+	})
+	return <-out
+}
