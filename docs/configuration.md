@@ -10,9 +10,10 @@ curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/config.ex
 ```
 
 `--config <path>` overrides the location for `--serve`, `--ui` and `--web-ui`.
-Unknown keys are **rejected rather than ignored**, and values are validated at
-load — a bad port, bind, CIDR, or a PostgreSQL meta store without a DSN fails
-before the server listens, naming the offending key.
+An unknown key **loads with a warning naming it** and has no effect: a key
+another release knew must not stop the daemon or an update. Values are
+validated at load — a bad port, bind, CIDR, or a PostgreSQL meta store without
+a DSN fails before the server listens, naming the offending key.
 
 ## Who can reach the daemon
 
@@ -39,6 +40,13 @@ in the daemon's group), but the daemon re-applies 0600 every time it binds, so
 that must be redone after every restart — a footgun, not a configuration. And
 `--web-ui` over an SSH port-forward reaches the same token manager from a
 browser with no change to the daemon at all.
+
+**From another computer**, the preferred route is no route through the host at
+all: an admin turns on **Remote Control** in the TUI, and developers run the
+TUI on their own computers, connecting over autodb's own SSH listener (port
+7422) with an SSH key registered on their autodb profile. No OS account on the
+host is needed, and the local surface above is unchanged. See
+[Remote access](remote-access.md).
 
 `autodb --print-endpoint` shows where a given config actually listens.
 

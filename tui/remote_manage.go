@@ -91,7 +91,7 @@ func manageState(h *Host) map[string]any {
 func serverAuthModel() *tuidecl.ListModel {
 	m := tuidecl.NewListModel("key", "id", "label")
 	m.Reset([]tuidecl.Row{
-		{"key": "file", "id": "file", "label": "the key file (asks for its passphrase if it has one)"},
+		{"key": "file", "id": "file", "label": "the key file (one without a passphrase; use ssh-agent for one with)"},
 		{"key": "agent", "id": "agent", "label": "ssh-agent (the key file's .pub names the key)"},
 	})
 	return m

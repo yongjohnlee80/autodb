@@ -301,8 +301,9 @@ func (c *Conn) attest(ctx context.Context) error {
 		var re *golibrpc.Error
 		if errors.As(err, &re) && re.Code == rpc.CodeRemoteDenied {
 			return fmt.Errorf("%w: this machine's device key is not the one this SSH key "+
-				"enrolled, or it was revoked. If an admin revoked this device, remove its key "+
-				"in Remote > Manage > Servers and connect again to enroll afresh", ErrRefused)
+				"enrolled, or it was revoked. If this device was revoked, remove the server in "+
+				"Remote > Manage > Servers and add it again: the next connect enrolls this "+
+				"machine afresh", ErrRefused)
 		}
 		return fmt.Errorf("remotedial: device proof: %w", err)
 	}

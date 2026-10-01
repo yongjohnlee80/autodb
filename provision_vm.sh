@@ -564,6 +564,37 @@ handoff_cmd() { printf '%s' "$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off $
 # whatever the operator passed to --config-remote.
 ui_cmd() { printf '%s' "${_ui_sudo}$PREFIX/autodb --ui --config $(shq "$_ui_cfg")"; }
 
+# REMOTE_PORT is where the daemon's remote listener binds by default
+# ([remote] bind = "0.0.0.0:7422"). This playbook does not set it, so the
+# default is the port the cloud firewall has to let in.
+REMOTE_PORT=7422
+
+# remote_access_notes is what letting developers use the TUI from their own
+# computers takes, after a provisioned run. Remote Control is OFF until an
+# admin turns it on in the TUI, and the cloud firewall must let its port in.
+#
+# PRINTED, NEVER APPLIED. The firewall is the cloud's, not the VM's, and which
+# addresses to let in is the operator's decision: opening a port the operator
+# has not decided to open is exactly what a playbook must not do quietly.
+remote_access_notes() {
+  say "REMOTE ACCESS -- developers using the TUI from their own computers."
+  say "It is OFF until an admin turns it on. To let developers in:"
+  say ""
+  say "  1. Cloud firewall: allow inbound TCP $REMOTE_PORT to this host, from your"
+  say "     developers' addresses if you can (DigitalOcean: Networking > Firewalls"
+  say "     > Inbound Rules > New rule: Custom, TCP, port $REMOTE_PORT)."
+  say "  2. In the TUI, as an admin: Remote > Manage... > Remote Control > Turn on."
+  say "     It shows this server's host key fingerprint: send it to each developer"
+  say "     with the address, so their first connect can be checked against it."
+  say "  3. System > Users > SSH keys: register each developer's .pub (or they add"
+  say "     their own under Home > My SSH keys...)."
+  say ""
+  say "A developer then adds this server under Remote > Manage... > Servers on"
+  say "their own computer and connects. Nobody needs a shell account on this host"
+  say "for that: once every developer connects remotely, remove their OS accounts"
+  say "and keep shell access to operators."
+}
+
 # DEFINE-ONLY MODE: stop here with every helper defined and nothing done.
 #
 # The same seam install_frontdoor.sh carries, for the same reason: the command
@@ -1160,13 +1191,16 @@ if [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-no}" = "yes" ] && [ "${START
   say "          be minted for it, until you do. Set its profile to 'session'"
   say "          too: SQL clients send BEGIN and SET, which v1compat refuses."
   say "  SPC u   Users and grants: each developer needs an account and a"
-  say "          grant on the connection they should reach."
+  say "          grant on the connection they should reach, and their SSH"
+  say "          key (SS(H) keys) to connect remotely -- see REMOTE ACCESS."
   say "  SPC T   Each developer mints their OWN token, bound to one"
   say "          connection. The card it shows carries the DSN and JDBC URL."
   say ""
   if [ "$RPC_EFFECTIVE" = "port" ]; then
-    say "The RPC endpoint is on port $RPC_PORT (loopback), so a developer runs"
-    say "the TUI over an ssh tunnel and mints their own token without root."
+    say "The RPC endpoint is on port $RPC_PORT (loopback): an operator on this"
+    say "host runs the TUI with the client config above, without root. Developers"
+    say "reach the same daemon from their own computers through Remote Control"
+    say "(REMOTE ACCESS, below), and mint their own tokens there."
   else
     say "The RPC endpoint is a unix SOCKET (--rpc-socket), openable only by"
     say "$RUN_USER_REMOTE and root -- so the TUI above must be run as root, and"
@@ -1210,6 +1244,8 @@ else
   say "because enabled without TLS is refused at config load. The installer's"
   say "closing notes list anything still outstanding."
 fi
+say ""
+remote_access_notes
 # CLEAN UP AFTER OURSELVES. The working directory holds a git clone and a
 # built binary -- 43 MB measured on the droplet -- and reporting the path
 # rather than removing it meant every run left another copy behind. --keep-tmp
