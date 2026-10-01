@@ -182,10 +182,17 @@ func TestARefusalIsRecordedAfterTheCallerCancels(t *testing.T) {
 
 // Cancelling mid-statement still records the attempt's terminal.
 //
-// The cancel waits for the attempt to be recorded as running, so it lands
-// mid-statement however slow the host. A fixed delay did not: on a loaded
-// runner it could fire before the attempt was recorded, the statement never
-// started, and there was no row to find.
+// The cancel waits for the attempt to be recorded as running, and a moment
+// more, so it lands mid-statement however slow the host. A fixed delay alone
+// did not: on a loaded runner it could fire before the attempt was recorded,
+// the statement never started, and there was no row to find.
+//
+// THE STATEMENT IS LONG BUT FINITE. A cancel that lands between the
+// statement's preparation and its first step is lost: SQLite clears a pending
+// interrupt when a statement starts with none active. With an endless
+// statement that hung the package until its test timeout. Bounded,
+// a lost cancel only lets the statement finish, and its terminal is recorded
+// all the same — which is what this cell asserts.
 func TestCancellingMidStatementStillRecordsTheTerminal(t *testing.T) {
 	f := newFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -197,13 +204,14 @@ func TestCancellingMidStatementStillRecordsTheTerminal(t *testing.T) {
 			n, err := f.store.History.OnCtx(context.Background()).
 				With(meta.HistStatus, string(StatusRunning)).Count()
 			if err == nil && n > 0 {
+				time.Sleep(20 * time.Millisecond) // past the statement's first step
 				return
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()
 	_, _ = f.eng.Execute(ctx, f.rootTok, f.connID,
-		"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c", testIP)
+		"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 1000000) SELECT count(*) FROM c", testIP)
 	rows, err := f.store.History.OnCtx(context.Background()).Select()
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("history rows %d (%v), want 1", len(rows), err)
