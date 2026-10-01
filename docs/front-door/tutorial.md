@@ -132,13 +132,17 @@ Sign in as the administrator, then:
 
 ## 6. Hand out tokens
 
-Each person mints their own token, so nobody else ever sees it. They sign in
-to the host with their own OS account and open the TUI with the client config,
-which holds only the server's address:
+Each person mints their own token, so nobody else ever sees it. They do it in
+the TUI on **their own computer**, connected to this server through Remote
+Control: turn it on and register their SSH keys as
+[Remote access](../remote-access.md) describes, and each of them runs
 
 ```sh
-ssh -t alice@autodb.example.com autodb --ui --config /etc/autodb/client.toml
+autodb --ui --remote <the server's profile id>
 ```
+
+(An operator on the host can still open the TUI there, with the client config:
+`ssh -t root@autodb.example.com autodb --ui --config /etc/autodb/client.toml`.)
 
 Then `SPC T` → `c` (**Create**): a name (`work-laptop`), an expiry in days
 (90 by default, 365 at most), optional IP ranges, and the connection. autodb

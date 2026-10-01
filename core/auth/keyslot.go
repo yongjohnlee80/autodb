@@ -165,11 +165,11 @@ func newKeyfile(path string) ([]byte, error) {
 // readKeyfile reads a keyfile and REFUSES one that anybody but its owner can
 // read.
 //
-// The mode is checked rather than documented, because the front door already puts
-// a GROUP-READABLE enrollment socket (0660) on this box and the group is
-// exactly the developers. A permission that is documented but unchecked is a
-// permission that drifts, and here the drift is "every developer can unwrap
-// the master key".
+// The mode is checked rather than documented, because the box can carry other
+// accounts: operators always, and developers' shell accounts until each of them
+// connects remotely instead. A permission that is documented but unchecked is a
+// permission that drifts, and here the drift is "any account on the box can
+// unwrap the master key".
 func readKeyfile(path string) ([]byte, error) {
 	fi, err := os.Stat(path)
 	switch {
