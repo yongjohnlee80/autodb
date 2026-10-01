@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -33,6 +34,25 @@ func (r *remoteRig) sealKeyFile(t *testing.T, pass string) {
 	}
 }
 
+// waitPastTheKeyDerivation is WaitFor with room for opening an encrypted
+// key: the OpenSSH format's bcrypt derivation is deliberately slow (about
+// 1.4s under -race here, more on a loaded CI runner), past the screen's
+// usual wait.
+func waitPastTheKeyDerivation(t *testing.T, r *remoteRig, what string, cond func(string) bool) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		screen := r.s.String()
+		if cond(screen) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never appeared:\n%s", what, screen)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // A key file with a passphrase: Connect asks for it, naming the file, and
 // then connects as usual.
 func TestConnectAsksForTheSSHKeysPassphrase(t *testing.T) {
@@ -44,7 +64,9 @@ func TestConnectAsksForTheSSHKeysPassphrase(t *testing.T) {
 		return strings.Contains(sc, "┌ the SSH key's passphrase ") && strings.Contains(sc, r.srv.KeyFile)
 	})
 	r.s.Keys(t, append(decltest.Type("key-passphrase"), enter())...)
-	r.s.WaitForText(t, "confirm the server's host key")
+	waitPastTheKeyDerivation(t, r, "the host key question, the key opened", func(sc string) bool {
+		return strings.Contains(sc, "confirm the server's host key")
+	})
 	r.s.Keys(t, key('t'))
 	r.s.WaitFor(t, "signed in on the server", func(string) bool {
 		return r.h.Auth() == "signed-in" && strings.Contains(r.h.SourceText("App.status"), "as alice")
