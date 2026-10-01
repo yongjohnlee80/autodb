@@ -20,9 +20,11 @@ public keys registered on their autodb profile: there are no invites.
    your SSH key file. This is kept in `remotes.toml` (`~/.config/autodb/` on
    Linux, `~/Library/Application Support/autodb/` on macOS), which holds no
    secret.
-   - A key file **with a passphrase** must be served by `ssh-agent`: choose
-     *ssh-agent* as the signing, and keep the key file's path (its `.pub` names
-     the key). The TUI does not ask for an SSH key's passphrase itself.
+   - A key file **with a passphrase**: Connect asks for it (after your autodb
+     passphrase), once per Connect; a dropped connection reconnects without
+     asking again. It is kept nowhere. Or choose *ssh-agent* as the signing,
+     with the key loaded in your agent, and keep the key file's path (its
+     `.pub` names the key).
 3. **Connect**: **Remote › Connect…**, choose the server, and enter your
    **autodb** passphrase (not your SSH key's).
    - The **first** connect from a computer asks for it twice. A wrong entry
@@ -55,7 +57,7 @@ start = "remote:prod-db"   # or "ask", or "local" (the default)
 |---|---|---|
 | *the server's host key is not the one pinned for this profile* | the server's host key changed, or this is not your server | ask your admin. Only if they confirm the change: **Servers › Forget host key**, and have an admin revoke your old device (its key was sealed to the old host key). |
 | *this machine's device key is not the one this SSH key enrolled, or it was revoked* | the key's device is another computer, or the device was revoked | another computer: use a key of its own on this one (each key has one device). Revoked: **Servers › Remove**, then **Add** it again; the next connect enrolls this computer afresh. |
-| *the ssh key … has a passphrase* | the key file is encrypted | choose *ssh-agent* for the server's signing, with the key loaded in your agent |
+| *that passphrase does not open the ssh key* | the SSH key file's own passphrase was mistyped | Connect again; nothing reached the server |
 | the connection is refused or times out | Remote Control is off, the firewall does not let your address in, or your network is blocked after three refusals | ask your admin; a block can be lifted under **Blocked IPs** |
 
 **New devices are announced.** At your next sign-in on any other computer, autodb

@@ -210,6 +210,9 @@ type Host struct {
 	awaitingStart bool
 	startChoices  *tuidecl.ListModel
 	startProfiles []remoteclient.Profile
+	// keyPassphrase is where the open SSH-key passphrase question's answer
+	// goes (askKeyPassphrase), nil when none is open.
+	keyPassphrase chan keyPassphraseAnswer
 	// selfRevokeAnswered is a test seam: run off the loop once a revocation
 	// of this computer's own device is answered, before the loop sees it.
 	selfRevokeAnswered func()

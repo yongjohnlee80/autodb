@@ -137,6 +137,8 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.remoteConnectCancelled": none(h.remoteConnectCancelled),
 		"App.startChosen":            oneNumber("App.startChosen", "a start row", h.startChosen),
 		"App.startDeclined":          none(h.startDeclined),
+		"App.keyPassphraseAnswered":  oneString("App.keyPassphraseAnswered", "a passphrase", h.keyPassphraseAnswered),
+		"App.keyPassphraseCancelled": none(h.keyPassphraseCancelled),
 		"App.manageSection":          oneNumber("App.manageSection", "a section row", h.manageSectionChosen),
 		"App.manageClosed":           none(h.manageClosed),
 		"App.manageRefresh":          none(h.manageRefresh),
