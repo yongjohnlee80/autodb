@@ -66,7 +66,10 @@ func (h *Host) remoteProfileName() string {
 
 // openRemoteConnect is remote.connect: after the unsaved-note guard, the
 // Connect dialog over the profiles in remotes.toml.
-func (h *Host) openRemoteConnect() {
+func (h *Host) openRemoteConnect() { h.openRemoteConnectAt("") }
+
+// openRemoteConnectAt is the Connect dialog at profile id ("" the first).
+func (h *Host) openRemoteConnectAt(id string) {
 	h.guardUnsaved(func() {
 		path, err := h.profilesPath()
 		if err != nil {
@@ -92,10 +95,19 @@ func (h *Host) openRemoteConnect() {
 			rows = append(rows, tuidecl.Row{"key": p.ID, "name": fmt.Sprintf("%s — %s as %s", label, p.Address(), p.User)})
 		}
 		h.remoteProfiles.Reset(rows)
+		at := 0
+		for i, p := range profiles {
+			if p.ID == id {
+				at = i
+			}
+		}
+		if id != "" && profiles[at].ID != id {
+			h.setStatus("no remote server " + id + " in " + path)
+		}
 		h.set("App.remoteProfile", -1)
-		h.set("App.remoteProfile", 0)
+		h.set("App.remoteProfile", at)
 		h.set("App.remoteConnectError", "")
-		h.remoteChosen(0)
+		h.remoteChosen(at)
 		h.open("remoteConnect")
 	})
 }
@@ -200,6 +212,7 @@ func (h *Host) remoteConnectAnswered(id, passphrase, again string) error {
 			}
 		}
 		h.connectedOnce = true
+		h.awaitingStart = false
 		h.watch(h.session.Gen())
 		h.afterSignIn()
 		h.setStatus(fmt.Sprintf("connected to %s as %s (%s)", profile.Address(), h.session.User().Name, h.session.User().Role))
@@ -211,7 +224,24 @@ func (h *Host) remoteConnectAnswered(id, passphrase, again string) error {
 // without connecting. A session that left for the remote and did not get
 // there goes back to the local daemon.
 func (h *Host) remoteConnectCancelled() error {
-	if h.session.Remote() && h.session.Token() == "" && !h.connecting {
+	if h.connecting {
+		return nil
+	}
+	if h.awaitingStart {
+		// The program started for this connect: nothing else is dialed in
+		// its place.
+		h.awaitingStart = false
+		if h.session.Remote() {
+			h.hadAuth = false
+			h.retireIdentity()
+			h.session.SwitchToLocal()
+		}
+		h.setAuth("disconnected")
+		h.setStatus(notStartedHint)
+		h.refreshIdentity()
+		return nil
+	}
+	if h.session.Remote() && h.session.Token() == "" {
 		h.backToLocal("not connected to the remote server — back to the local daemon")
 	}
 	return nil

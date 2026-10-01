@@ -380,6 +380,13 @@ outcome_retention_interval = "1h"
 # in the explorer instead). Point this at a directory you already sync or
 # keep in version control if you want your query scratchpads to travel.
 # notes_dir = "/home/you/Documents/autodb-notes"
+#
+# Where `autodb --ui` starts. "local" (the default) dials this computer's
+# daemon, starting it if needed. "remote:<profile>" connects to that profile
+# of remotes.toml instead (Remote › Manage… › Servers adds one), asking for
+# your passphrase, and starts no local daemon. "ask" asks which at start.
+# `autodb --ui --remote <profile>` overrides this.
+# start = "local"
 
 [web]
 # The --web-ui gateway (ADR-0064). These keys are ignored by --serve and --ui.

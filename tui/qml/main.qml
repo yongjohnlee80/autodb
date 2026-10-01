@@ -232,6 +232,7 @@ Window {
     ConfirmQuit { id: quit }
     Login { id: login }
     RemoteConnect { id: remoteConnect }
+    StartChoice { id: startChoice }
     RemoteManage { id: remoteManage }
     RemoteServerForm { id: remoteServerForm }
     SSHKeyForm { id: sshKeyForm }

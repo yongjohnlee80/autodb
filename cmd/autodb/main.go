@@ -27,6 +27,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/notes"
 	"github.com/yongjohnlee80/autodb/core/outcome"
 	"github.com/yongjohnlee80/autodb/core/remote"
+	"github.com/yongjohnlee80/autodb/core/remoteclient"
 	"github.com/yongjohnlee80/autodb/core/remotectl"
 	"github.com/yongjohnlee80/autodb/frontdoor"
 	"github.com/yongjohnlee80/autodb/rpc"
@@ -82,6 +83,8 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	serve := flag.Bool("serve", false, "run the RPC server")
 	ui := flag.Bool("ui", false, "run the standalone TUI")
+	remoteProfile := flag.String("remote", "",
+		"--ui: start on this remote server (its profile id in remotes.toml) instead of the local daemon")
 	webUI := flag.Bool("web-ui", false, "serve the TUI to a browser (requires a running --serve daemon)")
 	port := flag.Int("port", defaultWebPort, "port for --web-ui, bound on 127.0.0.1 only")
 	configPath := flag.String("config", "", "config file path (default: the user config dir)")
@@ -201,7 +204,7 @@ func main() {
 			reportAndExit(err)
 		}
 	case *ui:
-		if err := runUI(*configPath); err != nil {
+		if err := runUI(*configPath, *remoteProfile); err != nil {
 			reportAndExit(err)
 		}
 	case *webUI:
@@ -318,6 +321,15 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRu
 	})
 	if portSet && !webUI {
 		return errors.New("--port applies to --web-ui only")
+	}
+	remoteSet := false
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		if f.Name == "remote" {
+			remoteSet = true
+		}
+	})
+	if remoteSet && !ui {
+		return errors.New("--remote applies to --ui only")
 	}
 	// The migration flags belong to their mode, for the same reason --port
 	// belongs to --web-ui: a flag that is silently ignored outside its mode
@@ -1166,8 +1178,12 @@ func spawnFor(cfg config.Config, configPath string) func() (string, error) {
 	return func() (string, error) { return spawnServe(configPath) }
 }
 
-func runUI(configPath string) error {
+func runUI(configPath, remoteProfile string) error {
 	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	start, err := uiStart(cfg, remoteProfile, "")
 	if err != nil {
 		return err
 	}
@@ -1223,6 +1239,7 @@ func runUI(configPath string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	host, err := tuiapp.New(session, notesFor, cancel, tuiapp.Options{
+		Start: start,
 		About: tuiapp.AboutInfo{
 			Version: version, Commit: commit, BuildDate: buildDate,
 			Repo: repoURL, Author: author,
@@ -1237,6 +1254,44 @@ func runUI(configPath string) error {
 		return fmt.Errorf("terminal: %w", err)
 	}
 	return host.Run(ctx)
+}
+
+// uiStart is where --ui starts: --remote, else [tui] start. A remote start
+// must name a profile in remotes.toml (profilesPath, "" for the default):
+// one that is not there is refused before the terminal opens, with the ones
+// that are.
+func uiStart(cfg config.Config, remoteProfile, profilesPath string) (tuiapp.Start, error) {
+	id, ask, err := cfg.TUI.StartAt()
+	if err != nil {
+		return tuiapp.Start{}, err
+	}
+	if remoteProfile != "" {
+		id, ask = strings.TrimSpace(remoteProfile), false
+	}
+	if id == "" {
+		return tuiapp.Start{Ask: ask}, nil
+	}
+	if profilesPath == "" {
+		if profilesPath, err = remoteclient.ProfilesPath(); err != nil {
+			return tuiapp.Start{}, err
+		}
+	}
+	profiles, err := remoteclient.LoadProfiles(profilesPath)
+	if err != nil {
+		return tuiapp.Start{}, err
+	}
+	var ids []string
+	for _, p := range profiles {
+		if p.ID == id {
+			return tuiapp.Start{Remote: id}, nil
+		}
+		ids = append(ids, p.ID)
+	}
+	if len(ids) == 0 {
+		return tuiapp.Start{}, fmt.Errorf("no remote server %q: %s has no profiles yet "+
+			"(start with `autodb --ui` and add one under Remote › Manage…)", id, profilesPath)
+	}
+	return tuiapp.Start{}, fmt.Errorf("no remote server %q in %s (its profiles: %s)", id, profilesPath, strings.Join(ids, ", "))
 }
 
 // runWebUI serves the TUI to a browser. It reaches the daemon ONLY

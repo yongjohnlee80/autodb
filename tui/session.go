@@ -34,7 +34,7 @@ func (h *Host) start() {
 		do(h, func(context.Context) startup { return startup{gen: gen} }, h.startupDone)
 		return
 	}
-	h.connect()
+	h.startAt()
 }
 
 // connect dials, and asks whether the server needs its first user.
