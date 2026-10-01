@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
@@ -33,6 +34,7 @@ func remoteMenuState(h *Host) map[string]any {
 		"App.remoteFirst":        false,
 		"App.remoteWarning":      "",
 		"App.remoteConnectError": "",
+		"App.keyPassphrasePath":  "",
 	}
 }
 
@@ -177,7 +179,7 @@ func (h *Host) remoteConnectAnswered(id, passphrase, again string) error {
 		return refuse(err.Error())
 	}
 	d := &remotedial.Dialer{Profile: profile, Keys: keys, ClientVersion: h.about.Version,
-		ConfirmHostKey: h.askHostKey}
+		ConfirmHostKey: h.askHostKey, KeyPassphrase: h.askKeyPassphrase(profile.KeyFile)}
 
 	// The switch: the current identity ends before the next begins.
 	h.hadAuth = false
@@ -265,6 +267,55 @@ func (h *Host) askHostKey(fingerprint string) bool {
 	case <-h.ctx.Done():
 		return false
 	}
+}
+
+// errKeyPassphraseNotGiven: the SSH key's passphrase question was closed
+// unanswered.
+var errKeyPassphraseNotGiven = errors.New("the ssh key's passphrase was not given")
+
+// askKeyPassphrase is the dialer's question for the SSH key file's own
+// passphrase. Like askHostKey it is called off the UI loop, and waits for the
+// answer. The answer goes to the dialer only: the key it opens is kept in
+// memory for that Connect, and the passphrase itself is kept nowhere.
+func (h *Host) askKeyPassphrase(path string) func() (string, error) {
+	return func() (string, error) {
+		answer := make(chan keyPassphraseAnswer, 1)
+		h.p.Post(func() {
+			h.keyPassphrase = answer
+			h.set("App.keyPassphrasePath", path)
+			h.open("keyPassphrase")
+		})
+		select {
+		case a := <-answer:
+			return a.pass, a.err
+		case <-h.ctx.Done():
+			return "", errKeyPassphraseNotGiven
+		}
+	}
+}
+
+type keyPassphraseAnswer struct {
+	pass string
+	err  error
+}
+
+// keyPassphraseAnswered is App.keyPassphraseAnswered(passphrase).
+func (h *Host) keyPassphraseAnswered(passphrase string) error {
+	if a := h.keyPassphrase; a != nil {
+		h.keyPassphrase = nil
+		a <- keyPassphraseAnswer{pass: passphrase}
+	}
+	return nil
+}
+
+// keyPassphraseCancelled is App.keyPassphraseCancelled: the question closed
+// unanswered.
+func (h *Host) keyPassphraseCancelled() error {
+	if a := h.keyPassphrase; a != nil {
+		h.keyPassphrase = nil
+		a <- keyPassphraseAnswer{err: errKeyPassphraseNotGiven}
+	}
+	return nil
 }
 
 // pinHostKey records fp as profile id's host key in remotes.toml.

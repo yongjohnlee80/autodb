@@ -11,12 +11,14 @@ package remotedial
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -56,13 +58,23 @@ type Dialer struct {
 	// server's host key fingerprint is the admin's; true pins it.
 	ConfirmHostKey func(fingerprint string) bool
 	// KeyPassphrase is asked for the SSH key file's own passphrase, when it
-	// has one and the agent is not used.
+	// has one and the agent is not used: once per Dialer, whose later dials
+	// (reconnects) reuse the key it unlocked.
 	KeyPassphrase func() (string, error)
 	// ClientVersion is sent in the greeting.
 	ClientVersion string
 	// DialTCP dials the server; nil is a plain TCP dial.
 	DialTCP func(ctx context.Context, addr string) (net.Conn, error)
+
+	// unlocked is the SSH key a passphrase opened, held in memory for this
+	// Dialer's life (one Connect, its reconnects included) so a dropped
+	// connection does not ask again. It is never written anywhere.
+	mu       sync.Mutex
+	unlocked ssh.Signer
 }
+
+// ErrKeyPassphraseWrong: the SSH key file's passphrase did not open it.
+var ErrKeyPassphraseWrong = errors.New("remotedial: that passphrase does not open the ssh key")
 
 // Unlock is how the device key is had: opened from its file with the autodb
 // passphrase, or, for a reconnect, the key already in memory.
@@ -425,6 +437,12 @@ func (d *Dialer) signer() (ssh.Signer, func(), error) {
 	if d.Profile.UseAgent {
 		return d.agentSigner(path)
 	}
+	d.mu.Lock()
+	unlocked := d.unlocked
+	d.mu.Unlock()
+	if unlocked != nil {
+		return unlocked, noop, nil
+	}
 	pem, err := os.ReadFile(path)
 	if err != nil {
 		return nil, noop, fmt.Errorf("remotedial: the ssh key %s: %w", path, err)
@@ -440,6 +458,14 @@ func (d *Dialer) signer() (ssh.Signer, func(), error) {
 			return nil, noop, perr
 		}
 		s, err = ssh.ParsePrivateKeyWithPassphrase(pem, []byte(pass))
+		if errors.Is(err, x509.IncorrectPasswordError) {
+			return nil, noop, fmt.Errorf("%w %s", ErrKeyPassphraseWrong, path)
+		}
+		if err == nil {
+			d.mu.Lock()
+			d.unlocked = s
+			d.mu.Unlock()
+		}
 	}
 	if err != nil {
 		return nil, noop, fmt.Errorf("remotedial: the ssh key %s: %w", path, err)

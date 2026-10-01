@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"net"
 	"os"
@@ -391,5 +392,97 @@ func TestAStrayNextKeyIsRemovedWhenKeyProvesItself(t *testing.T) {
 	}
 	if n := s.count(t, "remote_access_denied"); n != 0 {
 		t.Fatalf("remote_access_denied rows %d; Key proved first, nothing was refused", n)
+	}
+}
+
+// encryptKeyFile rewrites the profile's key file sealed with pass: the same
+// registered key, now needing its own passphrase.
+func encryptKeyFile(t *testing.T, path, pass string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, err := ssh.ParseRawPrivateKey(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(priv, "test", []byte(pass))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A key file with a passphrase is asked for it once per Dialer: a reconnect
+// reuses the key it opened rather than asking again.
+func TestAnEncryptedKeyIsAskedOnceAndReused(t *testing.T) {
+	s := newServer(t)
+	d := s.dialer(t)
+	encryptKeyFile(t, d.Profile.KeyFile, "key-passphrase")
+	asked := 0
+	d.KeyPassphrase = func() (string, error) { asked++; return "key-passphrase", nil }
+	c, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass})
+	if err != nil {
+		t.Fatalf("dial with an encrypted key: %v", err)
+	}
+	if _, err := c.SignIn(ctx(t), alicePass); err != nil {
+		t.Fatal(err)
+	}
+	key := append(ed25519.PrivateKey(nil), c.DeviceKey()...)
+	c.Close()
+	d.Profile.HostKeyFP = s.hostFP
+	c2, err := d.Dial(ctx(t), Unlock{Key: key})
+	if err != nil {
+		t.Fatalf("the reconnect: %v", err)
+	}
+	c2.Close()
+	if asked != 1 {
+		t.Fatalf("the key's passphrase was asked %d times; want once", asked)
+	}
+}
+
+// A wrong passphrase for the key file is said as such, reaches nothing on the
+// server, and is not remembered: the right one then works.
+func TestAWrongKeyPassphraseIsSaidAndNotKept(t *testing.T) {
+	s := newServer(t)
+	d := s.dialer(t)
+	encryptKeyFile(t, d.Profile.KeyFile, "key-passphrase")
+	denied := s.count(t, "remote_access_denied")
+	answer := "not-it"
+	d.KeyPassphrase = func() (string, error) { return answer, nil }
+	if _, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass}); !errors.Is(err, ErrKeyPassphraseWrong) {
+		t.Fatalf("a wrong key passphrase: %v; want ErrKeyPassphraseWrong", err)
+	}
+	if n := s.count(t, "remote_access_denied"); n != denied {
+		t.Fatalf("remote_access_denied rows %d, want %d: a wrong key passphrase reached the server", n, denied)
+	}
+	answer = "key-passphrase"
+	c, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass})
+	if err != nil {
+		t.Fatalf("the right key passphrase after a wrong one: %v", err)
+	}
+	c.Close()
+}
+
+// Declining the question dials nothing.
+func TestDecliningTheKeyPassphraseDialsNothing(t *testing.T) {
+	s := newServer(t)
+	d := s.dialer(t)
+	encryptKeyFile(t, d.Profile.KeyFile, "key-passphrase")
+	declined := errors.New("declined")
+	dialed := false
+	d.DialTCP = func(ctx context.Context, addr string) (net.Conn, error) {
+		dialed = true
+		return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	}
+	d.KeyPassphrase = func() (string, error) { return "", declined }
+	if _, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass}); !errors.Is(err, declined) {
+		t.Fatalf("a declined key passphrase: %v; want the decline", err)
+	}
+	if dialed {
+		t.Fatal("the server was dialed although the key could not be opened")
 	}
 }
