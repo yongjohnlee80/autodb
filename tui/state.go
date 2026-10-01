@@ -62,6 +62,9 @@ func (h *Host) state(theme string) map[string]any {
 	for k, v := range manageState(h) {
 		st[k] = v
 	}
+	for k, v := range startState(h) {
+		st[k] = v
+	}
 	for k, v := range noteState(h) {
 		st[k] = v
 	}

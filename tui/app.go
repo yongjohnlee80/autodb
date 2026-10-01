@@ -203,6 +203,13 @@ type Host struct {
 	keyFormBound  *Bound
 	keyFormID     int64
 	leavingGen    uint64
+	// Where the session starts (remote_start.go): the option, whether a
+	// start on a remote server or a question is still unanswered, and the
+	// question's choices.
+	startOpt      Start
+	awaitingStart bool
+	startChoices  *tuidecl.ListModel
+	startProfiles []remoteclient.Profile
 	// selfRevokeAnswered is a test seam: run off the loop once a revocation
 	// of this computer's own device is answered, before the loop sees it.
 	selfRevokeAnswered func()
@@ -258,6 +265,9 @@ type Options struct {
 	// keys are; empty means $XDG_CONFIG_HOME/autodb/remotes.toml and
 	// $XDG_DATA_HOME/autodb/remote.
 	RemoteProfiles, RemoteKeyDir string
+	// Start is where the terminal's session begins ([tui] start, --remote);
+	// the zero value is this computer's daemon. The web frontend ignores it.
+	Start Start
 }
 
 // New mounts qml/main.qml over session. Nothing runs until Run.
@@ -302,6 +312,8 @@ func newHost(session *Session, notesFor notes.NotesFactory, quit func(), opt Opt
 	h.remoteProfiles = tuidecl.NewListModel("key", "name")
 	h.remotePaths.profiles, h.remotePaths.keys = opt.RemoteProfiles, opt.RemoteKeyDir
 	h.manageSectionModel = tuidecl.NewListModel("key", "label")
+	h.startOpt = opt.Start
+	h.startChoices = tuidecl.NewListModel("key", "label")
 	h.serverRows = tuidecl.NewListModel("key", "name", "address", "user", "sshKey", "pin", "device")
 	h.serverAuthChoices = serverAuthModel()
 	h.keys = newKeysManager(h)

@@ -36,6 +36,7 @@ func TestCheckFlags(t *testing.T) {
 		"init alone":              {initRun: true, port: goodPort},
 		"migrate alone":           {migrateToPG: true, port: goodPort},
 		"ui alone":                {ui: true, port: goodPort},
+		"ui --remote":             {ui: true, port: goodPort, certFlags: []string{"--remote=prod"}},
 		"web-ui alone":            {webUI: true, port: goodPort},
 		"print-endpoint alone":    {printEndpoint: true, port: goodPort},
 		"web-ui with a port":      {webUI: true, port: 9999, portSet: true},
@@ -57,9 +58,13 @@ func TestCheckFlags(t *testing.T) {
 		// --migrate-to-postgres is FIRST in the dispatch switch, so an
 		// uncounted pairing would migrate and never serve — the same class of
 		// bug as the web-ui/print-endpoint pairing this table was built for.
-		"migrate + serve":      {migrateToPG: true, serve: true, port: goodPort},
-		"migrate + ui":         {migrateToPG: true, ui: true, port: goodPort},
-		"port without web-ui":  {ui: true, port: goodPort, portSet: true},
+		"migrate + serve":     {migrateToPG: true, serve: true, port: goodPort},
+		"migrate + ui":        {migrateToPG: true, ui: true, port: goodPort},
+		"port without web-ui": {ui: true, port: goodPort, portSet: true},
+		// --remote picks where --ui starts; anywhere else it is ignored, and
+		// an ignored flag reads as accepted.
+		"remote without ui":    {serve: true, port: goodPort, certFlags: []string{"--remote=prod"}},
+		"remote with web-ui":   {webUI: true, port: goodPort, certFlags: []string{"--remote=prod"}},
 		"web-ui port 0":        {webUI: true, port: 0, portSet: true},
 		"web-ui port too high": {webUI: true, port: 70000, portSet: true},
 		"web-ui negative port": {webUI: true, port: -1, portSet: true},
@@ -140,6 +145,7 @@ func reset(t *testing.T, portSet bool, extra ...string) {
 	fs.Bool("export-ca", false, "")
 	fs.Bool("force", false, "")
 	fs.Bool("dry-run", false, "")
+	fs.String("remote", "", "")
 	args := append([]string{}, extra...)
 	if portSet {
 		args = append(args, "--port=7010")

@@ -567,6 +567,30 @@ type TUI struct {
 	// $XDG_DATA_HOME/autodb/notes). Per-workspace folders inside it are
 	// keyed by immutable workspace id.
 	NotesDir string `toml:"notes_dir"`
+	// Start is where `autodb --ui` begins: "local" (the default, also
+	// empty) dials this computer's daemon; "remote:<profile>" connects to
+	// that profile of remotes.toml instead, asking for the passphrase; "ask"
+	// asks which at start. --remote overrides it.
+	Start string `toml:"start"`
+}
+
+// StartAt reads [tui] start: the remote profile to start on ("" for none),
+// and whether to ask. An unknown value is ErrInvalid.
+func (t TUI) StartAt() (remote string, ask bool, err error) {
+	switch s := strings.TrimSpace(t.Start); {
+	case s == "" || s == "local":
+		return "", false, nil
+	case s == "ask":
+		return "", true, nil
+	case strings.HasPrefix(s, "remote:"):
+		id := strings.TrimSpace(strings.TrimPrefix(s, "remote:"))
+		if id == "" || strings.ContainsAny(id, " \t/") {
+			return "", false, fmt.Errorf("%w: tui.start %q: remote: names a profile id from remotes.toml", ErrInvalid, t.Start)
+		}
+		return id, false, nil
+	default:
+		return "", false, fmt.Errorf("%w: tui.start %q: want \"local\", \"ask\" or \"remote:<profile>\"", ErrInvalid, t.Start)
+	}
 }
 
 // NotesRoot resolves the notes root: an explicit [tui] notes_dir, else
@@ -1320,6 +1344,9 @@ func (c Config) validate() error {
 		} else if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
 			return fmt.Errorf("%w: remote.bind %q: port out of range", ErrInvalid, c.Remote.Bind)
 		}
+	}
+	if _, _, err := c.TUI.StartAt(); err != nil {
+		return err
 	}
 	if c.Remote.MaxUnauthenticated < 0 {
 		return fmt.Errorf("%w: remote.max_unauthenticated %d must not be negative", ErrInvalid, c.Remote.MaxUnauthenticated)
