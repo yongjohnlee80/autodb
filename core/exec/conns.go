@@ -354,10 +354,18 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 	if name == "" || dsn == "" {
 		return 0, errors.New("exec: connection name and dsn must not be empty")
 	}
+	// The engine before the DSN, for the reason openTarget gives: "unknown
+	// engine" is an answer ValidateDSN also gives, and it is a different repair.
+	if !slices.Contains(engine.All(), engineName) {
+		return 0, e.refuseCreate(ctx, ident.UserID(), ip, name, engineName,
+			NewConfigFailure(ConfigStageEngine, 0, DetailUnknownEngine,
+				fmt.Errorf("exec: unknown engine %q", engineName)))
+	}
 	// Reject DSNs whose options would desynchronize the classifier from the
 	// target's grammar (multi-statement, sql_mode, interpolation).
 	if err := ValidateDSN(engineName, dsn); err != nil {
-		return 0, err
+		return 0, e.refuseCreate(ctx, ident.UserID(), ip, name, engineName,
+			NewConfigFailure(ConfigStageDSN, 0, DetailDSNRefused, err))
 	}
 	if !e.auth.Unlocked() {
 		return 0, auth.ErrLocked
@@ -372,7 +380,8 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 	// caller's mistake and should not cost a rollback.
 	targetDB, err := TargetDBName(engineName, dsn)
 	if err != nil {
-		return 0, err
+		return 0, e.refuseCreate(ctx, ident.UserID(), ip, name, engineName,
+			NewConfigFailure(ConfigStageDSN, 0, DetailDSNRefused, err))
 	}
 
 	var id int64
@@ -425,6 +434,30 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 		return 0, err
 	}
 	return id, nil
+}
+
+// refuseCreate records a connection that was refused before it was stored, and
+// returns the refusal.
+//
+// A TYPED FAILURE, NOT THE PARSER'S ERROR, because the parser's error was an
+// untyped one the RPC surface can only answer as "internal error": the caller
+// who typed the DSN learned nothing, and the cause existed only in a daemon log
+// nobody reads. As a ConfigFailure it takes the surface's existing disclosure
+// decision — the scrubbed cause on a host-local socket, the cause-free shape
+// anywhere else.
+//
+// THE AUDIT ROW CARRIES THE CLOSED-SET FACTS ONLY (stage and fixed literal),
+// for the reason AuditDetail gives. The name and engine are the caller's own
+// input, recorded as connection_created records them. conn=0 says no row exists.
+//
+// An audit write that fails is joined rather than substituted: the operator
+// still sees why their DSN was refused, and the log still sees the audit fault.
+func (e *Engine) refuseCreate(ctx context.Context, actor int64, ip, name string, engineName engine.Name, cf *ConfigFailure) error {
+	if aerr := e.auth.Audit(ctx, actor, ip, "connection_create_failed",
+		fmt.Sprintf("%s (%s): %s", name, engineName, cf.AuditDetail())); aerr != nil {
+		return errors.Join(cf, fmt.Errorf("exec: auditing a refused connection: %w", aerr))
+	}
+	return cf
 }
 
 // ListConnections returns the connections visible to the token's user —
