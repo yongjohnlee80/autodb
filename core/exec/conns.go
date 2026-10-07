@@ -444,21 +444,26 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 // who typed the DSN learned nothing, and the cause existed only in a daemon log
 // nobody reads. As a ConfigFailure it takes the surface's existing disclosure
 // decision — the scrubbed cause on a host-local socket, the cause-free shape
-// anywhere else.
+// anywhere else. Logs carry SafeLog only.
 //
 // THE AUDIT ROW CARRIES THE CLOSED-SET FACTS ONLY (stage and fixed literal),
 // for the reason AuditDetail gives. The name and engine are the caller's own
 // input, recorded as connection_created records them. conn=0 says no row exists.
 //
 // An audit write that fails is joined rather than substituted: the operator
-// still sees why their DSN was refused, and the log still sees the audit fault.
+// still sees why their DSN was refused, and ErrRefusalNotAudited lets the log
+// say the row is missing without repeating the store's error text.
 func (e *Engine) refuseCreate(ctx context.Context, actor int64, ip, name string, engineName engine.Name, cf *ConfigFailure) error {
 	if aerr := e.auth.Audit(ctx, actor, ip, "connection_create_failed",
 		fmt.Sprintf("%s (%s): %s", name, engineName, cf.AuditDetail())); aerr != nil {
-		return errors.Join(cf, fmt.Errorf("exec: auditing a refused connection: %w", aerr))
+		return errors.Join(cf, fmt.Errorf("%w: %w", ErrRefusalNotAudited, aerr))
 	}
 	return cf
 }
+
+// ErrRefusalNotAudited marks a refused connection whose connection_create_failed
+// row could not be written.
+var ErrRefusalNotAudited = errors.New("exec: the refused connection could not be audited")
 
 // ListConnections returns the connections visible to the token's user —
 // all of them for admins, granted ones otherwise. DSN ciphertext is zeroed

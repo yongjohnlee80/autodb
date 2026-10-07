@@ -39,9 +39,10 @@ const (
 	// ConfigStageEngine is a connection row naming an engine this build does
 	// not implement.
 	ConfigStageEngine ConfigStage = "engine"
-	// ConfigStageDSN is a stored DSN the engine's own parser rejects, or one
-	// carrying an option that would desynchronize the statement classifier
-	// from the target's grammar.
+	// ConfigStageDSN is a DSN the engine's own parser rejects, or one carrying
+	// an option that would desynchronize the statement classifier from the
+	// target's grammar: a stored one (DetailDSNUnusable), or one a caller is
+	// creating a connection with (DetailDSNRefused).
 	ConfigStageDSN ConfigStage = "dsn"
 	// ConfigStagePool is the driver's pool object refusing to be constructed.
 	//
@@ -115,7 +116,9 @@ func configDetails() []ConfigDetail {
 // so a renderer can recognise one without knowing any stage.
 var ErrConnectionUnusable = errors.New("exec: this connection cannot serve requests as it is configured")
 
-// ConfigFailure is one connection that cannot serve requests as configured.
+// ConfigFailure is one connection that cannot serve requests as configured —
+// a stored row, or one refused at creation before anything was stored, which
+// is what connID 0 means.
 //
 // IT DELIBERATELY DOES NOT UNWRAP TO ITS CAUSE, for the reason DialFailure
 // does not: the front door's renderers ask errors.As whether an error is a
