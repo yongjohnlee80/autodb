@@ -39,7 +39,17 @@ const OptionTheme = "theme"
 
 // Themes are the themes a client may store as OptionTheme. The TUI ships one
 // file per theme (tui/qml/themes); a test holds the two lists equal.
-var Themes = []string{"dark", "light", "mono", "retro"}
+var Themes = []string{"dark", "light", "mono", "retro", "sepia"}
+
+// OptionLanguage is the language the TUI shows its UI text in: the one the
+// account last chose. The values are the languages the product ships catalogs
+// for, the same tags golib's own catalogs use.
+const OptionLanguage = "language"
+
+// Languages are the languages a client may store as OptionLanguage: English
+// and the five the product ships translations for. The TUI ships one catalog
+// per language (tui/qml/i18n); a test holds the two lists equal.
+var Languages = []string{"en", "ko_KR", "ja_JP", "zh_CN", "es", "pt_BR"}
 
 // knownOptions is the vocabulary this build understands, and the values each
 // accepts. A key outside it is REFUSED on write — a typo would otherwise be
@@ -50,6 +60,7 @@ var Themes = []string{"dark", "light", "mono", "retro"}
 var knownOptions = map[string][]string{
 	OptionEditorKeyset: {KeysetVim, KeysetTextEdit},
 	OptionTheme:        Themes,
+	OptionLanguage:     Languages,
 }
 
 // UserOptions reads an account's preferences.
@@ -139,6 +150,13 @@ func encodeOptions(opts map[string]string) (string, error) {
 		return "", fmt.Errorf("auth: encoding preferences: %w", err)
 	}
 	return string(b), nil
+}
+
+// Contains reports whether xs holds want. Exported for the client that
+// validates a STORED option before showing it — knownOptions guards writes,
+// but a value read back from the store has passed no guard.
+func Contains(xs []string, want string) bool {
+	return contains(xs, want)
 }
 
 func contains(xs []string, want string) bool {

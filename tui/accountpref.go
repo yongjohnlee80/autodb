@@ -85,6 +85,18 @@ func newThemePref(def string) *accountPref {
 	})
 }
 
+// newLanguagePref is the language the UI text shows in: English unless the
+// account says otherwise. A stored value this build does not offer is not
+// applied — the App accepts any tag, so an unlisted one would leave the screen
+// on English text with a language the catalogs cannot resolve; English is what
+// the value falls back to. The stored option itself is untouched, so a build
+// that does offer the language reads it again.
+func newLanguagePref() *accountPref {
+	return newAccountPref(auth.OptionLanguage, "en", "language", func(h *Host, tag string) {
+		h.useLanguage(languageOf(tag))
+	})
+}
+
 // keysetValue is the document's App.keyset for a stored preference: golib's
 // Standard profile is the product's TextEdit.
 func keysetValue(pref string) string {
@@ -203,4 +215,6 @@ func (h *Host) forgetPrefs() {
 }
 
 // accountPrefs are the account's preferences, in the order they are read.
-func (h *Host) accountPrefs() []*accountPref { return []*accountPref{h.prefs, h.themePref} }
+func (h *Host) accountPrefs() []*accountPref {
+	return []*accountPref{h.prefs, h.themePref, h.languagePref}
+}

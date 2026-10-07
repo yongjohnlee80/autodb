@@ -131,6 +131,9 @@ func (h *Host) state(theme string) map[string]any {
 	for k, v := range themeState(theme) {
 		st[k] = v
 	}
+	for k, v := range languageState("en") {
+		st[k] = v
+	}
 	return st
 }
 
