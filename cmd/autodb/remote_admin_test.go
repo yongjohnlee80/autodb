@@ -195,6 +195,14 @@ func TestDisablingAUserEndsTheirRemoteConnections(t *testing.T) {
 // Remote Control over RPC: an admin reads the status and turns it off, which
 // ends the remote connections; a reader may do neither.
 func TestRemoteControlOverRPC(t *testing.T) {
+	// The spill-pause cell below makes the spill directory read-only and
+	// waits for the write to fail — which it never does for root, so the
+	// cell cannot distinguish a working pause from a root-permissioned one.
+	// The same guard the unreadable-config test already carries.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a read-only directory is writable, so this " +
+			"test cannot observe the spill-pause it asserts")
+	}
 	r := newRemoteRig(t)
 	addr := r.serving(t)
 	call, adminTok := r.localAdmin(t)

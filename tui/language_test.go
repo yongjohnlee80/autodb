@@ -1,4 +1,4 @@
-// language_test.go — the ADR-0219 gates: the three catalog checks (D7's
+// language_test.go — the localization gates: the three catalog checks (D7's
 // inventory and coverage, and golib's CheckLanguages walk), the live switch
 // with a dialog open, the mnemonic baseline after the label conversion, and
 // the stored-language fallback a build that dropped a language needs.
@@ -120,7 +120,7 @@ func TestEveryLanguageWalksTheScreen(t *testing.T) {
 // TestTheMenuMnemonicSurvivesTheMessageConversion — the dynamic menu walk:
 // every row kind (top bar, submenu, command) keeps its hotkey marker and its
 // access key in English, and the same rows in Korean mark English's letter
-// (golib's run-time rule, ADR-0219 D5a).
+// (golib's run-time rule: the English letter, in every language).
 func TestTheMenuMnemonicSurvivesTheMessageConversion(t *testing.T) {
 	escKey := tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEscape}
 
@@ -195,7 +195,7 @@ func TestSwitchingLanguageRelabelsTheOpenScreen(t *testing.T) {
 // TestAStoredLanguageTheBuildDoesNotOfferFallsBackToEnglish — the downgrade
 // case: a stored option naming a language this build dropped never reaches
 // the App; the screen comes up English and the stored value stays as it was
-// (ADR-0219 D4, Lector r0 F3).
+// (a stored value a build does not offer never reaches the App).
 func TestAStoredLanguageTheBuildDoesNotOfferFallsBackToEnglish(t *testing.T) {
 	if got := tuiapp.LanguageOfForTest("fr"); got != "en" {
 		t.Fatalf("an unoffered tag resolves to %q, want en", got)

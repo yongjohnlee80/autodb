@@ -54,7 +54,7 @@ func (h *Host) modulesFrom(files fs.FS) []tuidecl.ProgramOption {
 		tuidecl.Singleton("autodb", moduleVersion, "App"),
 		tuidecl.Themes(files, "themes", "autodb.theme", moduleVersion),
 		// The program's own catalogs, layered over golib's: i18n/autodb_en.xml,
-		// autodb_ko_KR.xml, … (ADR-0219 D3).
+		// autodb_ko_KR.xml, ….
 		tuidecl.Translations(files, "i18n", "autodb"),
 		// Qt Quick Controls' TextField and Popup, from golib.
 		tuidecl.Types(controls.Types()...),

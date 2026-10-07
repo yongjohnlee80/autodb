@@ -119,9 +119,9 @@ func foldRune(r rune) rune {
 // would force one of the two surfaces to read wrong, so each owns its own.
 type LeaderProjectionOf[H CommandHost] struct {
 	Key rune
-	// Label is the English source text; the row shown is its catalog message
-	// (ADR-0219 D5a). The leader card composes "key  label" lines itself, so
-	// the label resolves to text at projection.
+	// Label is the English source text; the row shown is its catalog message.
+	// The leader card composes "key  label" lines itself, so the label resolves
+	// to text at projection.
 	Label string
 	// LabelFor overrides Label when non-nil, for the one entry whose text is
 	// state-dependent: `x` reads "disconnect" while connected and "connect"
@@ -146,8 +146,7 @@ func (p LeaderProjectionOf[H]) text(h H) string {
 	return p.Label
 }
 
-// leaderID is the label's catalog id for the command that owns it
-// (ADR-0219 D5a).
+// leaderID is the label's catalog id for the command that owns it.
 func (p LeaderProjectionOf[H]) leaderID(cmd CommandID) string {
 	return "autodb.leader." + string(cmd)
 }
@@ -162,7 +161,7 @@ type MenuProjection struct {
 	Parent MenuNodeID
 	// Label is the English source text. The row shown is its catalog message:
 	// MsgID when set, else one derived from the command id — globally unique
-	// already, so it names the row alone (ADR-0219 D5a).
+	// already, so it names the row alone.
 	Label string
 	// MsgID names the row in the catalogs; "" derives one. Set it only where
 	// the derived id would read wrong (a label shared by two projections of
@@ -192,8 +191,7 @@ type MenuNode struct {
 
 // msgID is the node's catalog id, derived from its ID — which already spells
 // its parent path ("home.conns"), so no Parent joins in: the bar reads
-// "autodb.menu.home" for Home, "autodb.menu.home.conns" for DB conns
-// (ADR-0219 D5a).
+// "autodb.menu.home" for Home, "autodb.menu.home.conns" for DB conns.
 func (n MenuNode) msgID() string {
 	return "autodb.menu." + string(n.ID)
 }
