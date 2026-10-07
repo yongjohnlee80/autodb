@@ -147,7 +147,8 @@ end
 function M.older_daemon(server_protocol, ctx)
   local client = require("autodb.client")
   local connect = ctx.connect or client.connect
-  connect({ addr = ctx.ep.addr, mode = ctx.ep.mode, protocol = server_protocol }, function(c, cerr)
+  connect({ addr = ctx.ep.addr, mode = ctx.ep.mode, protocol = server_protocol,
+    store = ctx.ep.store, store_id = ctx.ep.store_id }, function(c, cerr)
     if not c then
       return log.notify("autodb: the older backend could not be reached to restart it: " ..
         tostring(cerr), { level = "error", component = "lifecycle" })

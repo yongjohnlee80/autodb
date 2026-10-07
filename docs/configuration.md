@@ -50,6 +50,26 @@ host is needed, and the local surface above is unchanged. See
 
 `autodb --print-endpoint` shows where a given config actually listens.
 
+**Finding the daemon that serves your store.** Two processes can resolve
+different sockets over one meta store: one launched without `$TMPDIR` (sudo,
+`env -i`, launchd or cron) resolves `/tmp/autodb.sock`, or one config sets its
+own `[server] socket`. A frontend in that position no longer starts a second
+daemon that the store's lease refuses. The serving daemon records where it
+listens beside the store (`meta.db.lease-info`, owner-only), and
+`--print-endpoint`, `--ui` and the Neovim plugin use that record when the
+configured address is silent. They accept the recorded address only if the
+daemon there reports the same store and the same instance. A second `--serve`
+on another socket says `already running at <address> (pid N)` and exits 69. A
+daemon whose socket file was swept from `$TMPDIR` listens at the same path again
+within five seconds. This applies to sqlite meta stores; a postgres store has no
+file to record beside, and a `client_only` config always dials what it is given.
+
+`--print-endpoint` prints one line, `<network>TAB<address>`, then, when this
+config may start a daemon over a local sqlite store, a second line saying which
+store the daemon there must serve: `store TAB <id>`, or `store TAB pending`
+before the store exists. A frontend compares that id with the daemon's own
+`sys.hello` before it sends anything else.
+
 Verified on a shared host (Linux, two OS uids, one daemon): with the default
 socket, the other uid's connect fails with `permission denied` while the owner
 connects; after `chmod 660`, a member of the daemon's group connects and a

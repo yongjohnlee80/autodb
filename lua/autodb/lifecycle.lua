@@ -215,9 +215,21 @@ function M.forget_build_warnings() _warned = {} end
 ---rules here would be a second resolver that drifts from the Go one the
 ---moment either changes, so the binary reports its own answer
 ---([[shared-resolver-single-source-of-truth]]).
+---
+---The answer may not be the configured address: when that is silent and
+---the store's daemon listens elsewhere (a different `$TMPDIR`, a socket
+---swept from under it), the binary finds it through the store's lease and
+---answers that address.
+---
+---Line 2 is the store check the connection must make, and `store` says
+---which: "check" (store_id is the store the daemon's hello must name),
+---"pending" (a local store not created yet — no daemon can be serving it,
+---so whatever answers is someone else's), or "none" (no line 2: the
+---binary's explicit no-check mode, or an older binary). Anything else on
+---line 2, or a third line, is an error, never "none".
 ---@param bin string        -- path to the autodb executable
 ---@param config_path string?
----@return { mode: string, addr: string }|nil, string? err
+---@return { mode: string, addr: string, store: string, store_id: string? }|nil, string? err
 function M.resolve_endpoint(bin, config_path)
   if vim.fn.executable(bin) ~= 1 then
     return nil, string.format("autodb: %s is not executable", tostring(bin))
@@ -232,13 +244,29 @@ function M.resolve_endpoint(bin, config_path)
     return nil, string.format("autodb: --print-endpoint failed: %s",
       table.concat(out or {}, " "))
   end
-  local line = (out or {})[1] or ""
+  out = out or {}
+  local line = out[1] or ""
   local network, addr = line:match("^(%S+)\t(.+)$")
   if not network or not addr then
     return nil, string.format("autodb: cannot parse endpoint %q", line)
   end
+  if out[3] then
+    return nil, "autodb: --print-endpoint printed more than two lines"
+  end
   -- Neovim calls a unix socket "pipe"; the wire name is "unix".
-  return { mode = network == "unix" and "pipe" or "tcp", addr = addr }
+  local ep = { mode = network == "unix" and "pipe" or "tcp", addr = addr, store = "none" }
+  if out[2] then
+    local v = out[2]:match("^store\t(%S+)$")
+    if not v then
+      return nil, string.format("autodb: cannot parse the store line %q", out[2])
+    end
+    if v == "pending" then
+      ep.store = "pending"
+    else
+      ep.store, ep.store_id = "check", v
+    end
+  end
+  return ep
 end
 
 ---is_listening reports whether something answers at the endpoint.
@@ -264,7 +292,8 @@ end
 ---Racing launchers are safe without coordination here, because the
 ---server itself resolves the race: two spawns both try to bind, one
 ---wins, and the loser probes the winner, prints "already running" and
----exits 0. That guard lives in Go, next to the bind that needs it.
+---exits 69 (it did not serve). on_exit therefore never reads the status
+---as success or failure; it asks whether something answers.
 ---@param opts { bin: string, config_path: string?, endpoint: table? }
 ---@param cb fun(ok: boolean, err: string|nil)
 function M.spawn(opts, cb)
@@ -286,7 +315,7 @@ function M.spawn(opts, cb)
   local stderr = {}
   local settled = false
   local timer
-  local function finish(ok, err)
+  local function finish(ok, err, found)
     if settled then return end
     settled = true
     if timer then
@@ -294,7 +323,7 @@ function M.spawn(opts, cb)
       timer:close()
       timer = nil
     end
-    cb(ok, err)
+    cb(ok, err, found)
   end
   local job = vim.fn.jobstart(cmd, {
     detach = true,          -- it outlives this editor by design
@@ -309,7 +338,13 @@ function M.spawn(opts, cb)
     -- have lost the bind, observed the winner, and exited successfully.
     on_exit = vim.schedule_wrap(function(_, code)
       if settled then return end
-      if M.is_listening(ep) then return finish(true, nil) end
+      if M.is_listening(ep) then return finish(true, nil, ep) end
+      -- The serve exited — 69 when this store's daemon already answers
+      -- somewhere else. Ask the binary once more where that is.
+      local now = M.resolve_endpoint(opts.bin, opts.config_path)
+      if now and now.addr ~= ep.addr and now.store ~= "pending" and M.is_listening(now) then
+        return finish(true, nil, now)
+      end
       finish(false, M.describe_manual(string.format(
         "%s exited with status %d before anything answered on %s",
         opts.bin, code, ep.addr), stderr))
@@ -328,7 +363,7 @@ function M.spawn(opts, cb)
     if settled then return end
     waited = waited + PROBE_INTERVAL_MS
     if M.is_listening(ep) then
-      return finish(true, nil)
+      return finish(true, nil, ep)
     end
     if waited >= SPAWN_TIMEOUT_MS then
       return finish(false, M.describe_manual(string.format(
@@ -338,17 +373,42 @@ function M.spawn(opts, cb)
   end))
 end
 
----ensure returns a live endpoint, starting a daemon if needed.
----@param opts { bin: string, config_path: string? }
+---ensure is the ONE path from "no session" to an address that answers.
+---
+---Two bounded re-resolves cover the address changing under it. Before
+---spawning: the address may be a holder found through the store's lease
+---that has since exited, and with no holder the answer is the configured
+---address, which is where the spawn binds. After spawning: the store the
+---spawn just created now has an identity for the connection to check, and
+---the answer confirms the address. A pending store is never handed on.
+---@param opts { bin: string, config_path: string?, auto_spawn: boolean? }
 ---@param cb fun(endpoint: table|nil, err: string|nil)
 function M.ensure(opts, cb)
   local ep, rerr = M.resolve_endpoint(opts.bin, opts.config_path)
   if not ep then return cb(nil, rerr) end
-  if M.is_listening(ep) then return cb(ep, nil) end
+  -- A pending store has no daemon of its own: whatever answers is someone
+  -- else's, so it is not taken as this store's.
+  if ep.store ~= "pending" and M.is_listening(ep) then return cb(ep, nil) end
+  local again = M.resolve_endpoint(opts.bin, opts.config_path)
+  if again and again.addr ~= ep.addr then
+    if again.store ~= "pending" and M.is_listening(again) then return cb(again, nil) end
+    ep = again
+  end
+  if not opts.auto_spawn then
+    return cb(nil, M.describe_manual(
+      "nothing is listening on " .. ep.addr .. " and auto_spawn is off"))
+  end
   M.spawn({ bin = opts.bin, config_path = opts.config_path, endpoint = ep },
-    function(ok, serr)
+    function(ok, serr, found)
       if not ok then return cb(nil, serr) end
-      cb(ep, nil)
+      -- FAIL CLOSED: an endpoint is never handed on without the store check
+      -- the binary says it needs.
+      local after, aerr = M.resolve_endpoint(opts.bin, opts.config_path)
+      if not after then return cb(nil, aerr) end
+      if after.store == "pending" then
+        return cb(nil, "autodb: the daemon started, but its store has no identity yet; try again")
+      end
+      cb(after, nil)
     end)
 end
 
