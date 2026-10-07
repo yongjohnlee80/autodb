@@ -457,86 +457,47 @@ func runServe(configPath string) error {
 	}
 	addr := ep.Address
 
-	ln, err := listen(ep)
+	sock, err := bindSocket(ep, func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) })
 	if err != nil {
 		if !isAddrInUse(err) {
 			return fmt.Errorf("bind %s: %w", addr, err)
 		}
 		probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		occupant, perr := rpc.ProbeOn(probeCtx, ep.Network, addr)
+		occupant, perr := rpc.ProbeHello(probeCtx, ep.Network, addr)
+		if perr == nil && occupant.Protocol != rpc.Protocol {
+			perr = fmt.Errorf("%w: protocol %d, want %d", rpc.ErrNotAutodb, occupant.Protocol, rpc.Protocol)
+		}
 		if perr == nil {
 			// NOT return nil. This process was asked to serve and did not
 			// serve; saying so with a zero status told systemd the job was
 			// done, and the unit went inactive reporting success while the
 			// front door was down. The message still names the occupant and
 			// its version, because that is what an operator needs next.
+			//
+			// And which store it serves: an occupant serving ANOTHER store is
+			// not "already running" for this config, and saying so sent the
+			// operator looking for a daemon that does not exist. An occupant
+			// that names no store predates the check and is reported as before.
+			if want, _, _ := meta.StoreID(cfg.Meta); want != "" && occupant.StoreID != "" && occupant.StoreID != want {
+				return fmt.Errorf("%w: %s is held by an autodb serving %s, not this config's store; "+
+					"point one of them at another [server] socket", errAlreadyServing, addr, occupant.StorePath)
+			}
 			return fmt.Errorf("%w on %s (version %s); this process is not serving",
-				errAlreadyServing, addr, occupant)
+				errAlreadyServing, addr, occupant.Version)
 		}
 		return fmt.Errorf("bind %s: address in use, occupant is not a compatible autodb: %v", addr, perr)
 	}
-	if ep.IsLocal() {
-		// The socket file IS the access control, so it is owner-only.
-		// Without this the umask decides who may talk to a service that
-		// holds every database credential.
-		if cerr := os.Chmod(addr, 0o600); cerr != nil {
-			ln.Close()
-			return fmt.Errorf("chmod %s: %w", addr, cerr)
-		}
-		// Leaving the file behind would make the next launch look
-		// occupied when nothing is listening — but removing it
-		// UNCONDITIONALLY is worse, and was a live bug.
-		//
-		// A daemon that exits AFTER a successor has bound the same path
-		// deletes the SUCCESSOR'S socket file. The result is a listener that
-		// `ss` reports as healthy on an orphaned inode while `ls` shows
-		// nothing, and every client fails to dial with no error anywhere
-		// explaining why. Reproduced by `pkill -f "autodb --serve"` followed
-		// immediately by a start.
-		//
-		// The meta-store lease protects the STORE from two writers by holding
-		// an flock on its inode; nothing protected the socket PATH. So this
-		// removes the file only while it is still the one we created, compared
-		// by identity (os.SameFile is dev+ino on unix) rather than by name —
-		// the name is precisely what a successor reuses.
-		//
-		// A window remains between the check and the unlink: unix offers no
-		// "remove if inode matches". It is orders of magnitude narrower than
-		// the unconditional form and does not grow with how long the daemon
-		// ran, which is what made the original reachable by an ordinary
-		// restart.
-		//
-		// The identity itself needs a pin to mean anything — inode numbers are
-		// recycled, and on ext4 immediately. See socketIdentity.
-		// Go's *net.UnixListener unlinks the path BY NAME on Close unless told
-		// otherwise, so without this the removal that actually happens in an
-		// ordinary shutdown is the stdlib's name-based one and the identity
-		// check below only ever takes its early return. The reviewer measured
-		// exactly that: with unlink-on-close left at its default the file is
-		// already gone by the time the defer runs.
-		//
-		// Turning it off routes EVERY removal through the identity check,
-		// including the ordering neither of us could construct — a successor
-		// binding before our own Close, reachable when a dial to a live but
-		// saturated listener fails.
-		if ul, ok := ln.(*net.UnixListener); ok {
-			ul.SetUnlinkOnClose(false)
-		}
-		id, cerr := pinSocket(addr)
-		if cerr != nil {
-			ln.Close()
-			return fmt.Errorf("stat %s: %w", addr, cerr)
-		}
-		defer removeIfStillOurs(addr, id)
-	}
+	// The socket's ONE cleanup: removes the file this daemon owns at the
+	// moment it runs, after the re-bind watcher has stopped (socket.go).
+	defer sock.Cleanup()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	store, err := meta.Open(ctx, cfg.Meta)
 	if err != nil {
-		ln.Close()
+		_ = sock.Close()
 		return fmt.Errorf("meta store: %w", err)
 	}
 	defer store.Close()
@@ -548,14 +509,23 @@ func runServe(configPath string) error {
 	// reservation, both believing they enforced a limit neither held.
 	lease, err := meta.AcquireLease(ctx, store, cfg.Meta, meta.LeaseHolder{Role: "serve", Version: version})
 	if err != nil {
-		ln.Close()
 		if errors.Is(err, meta.ErrLeaseHeld) {
+			// Release OUR bind before looking for the holder: a newcomer that
+			// bound a swept path would otherwise probe itself. Cleanup is
+			// once-only, so the deferred call is then a no-op.
+			sock.Cleanup()
 			// A refusal to serve, not a crash: the operator has another
 			// autodb running against this store and needs to be told which
-			// thing to stop, not handed a stack trace.
-			return fmt.Errorf("refusing to serve: %w\n"+
-				"       another autodb is already serving this meta store; stop it, or point this one at a different [meta] store", err)
+			// thing to stop, and where it answers, not handed a stack trace.
+			if loc, lerr := rpc.Locate(ctx, ep, cfg.Meta); lerr == nil {
+				return fmt.Errorf("%w at %s %s (pid %d, version %s); this process is not serving",
+					errAlreadyServing, loc.Network, loc.Addr, loc.Hello.PID, loc.Hello.Version)
+			} else {
+				return fmt.Errorf("refusing to serve: %w\n       %v\n"+
+					"       another autodb is already serving this meta store; stop it, or point this one at a different [meta] store", err, lerr)
+			}
 		}
+		_ = sock.Close()
 		return fmt.Errorf("instance lease: %w", err)
 	}
 	// Registered AFTER store.Close so defer's LIFO order releases the lease
@@ -569,7 +539,7 @@ func runServe(configPath string) error {
 		auth.WithConfigAllowlist(cfg.Security.IPAllowlist),
 		auth.WithServiceKeyfile(cfg.Security.ServiceKeyfile))
 	if err != nil {
-		ln.Close()
+		_ = sock.Close()
 		return fmt.Errorf("auth: %w", err)
 	}
 
@@ -617,7 +587,7 @@ func runServe(configPath string) error {
 	// diagnostics, panics, and reply failures exist at all.
 	notesRoot, nerr := cfg.NotesRoot()
 	if nerr != nil {
-		ln.Close()
+		_ = sock.Close()
 		return fmt.Errorf("notes root: %w", nerr)
 	}
 	oplog := logger.New(logger.WithWriter(os.Stderr), logger.WithContext("autodb"))
@@ -639,7 +609,7 @@ func runServe(configPath string) error {
 	}
 	fd, fdServe, ferr := startFrontDoor(serveCtx, cfg, eng, oplog, fdAudit)
 	if ferr != nil {
-		ln.Close()
+		_ = sock.Close()
 		return ferr
 	}
 	if fd != nil && cfg.FrontDoor.CleartextDebug() {
@@ -690,7 +660,7 @@ func runServe(configPath string) error {
 	// ONE RPC server behind every surface: the local listener, and the remote
 	// listener while Remote Control is on, fanned into one. Which surface a
 	// connection is on is decided by the listener that accepted it.
-	fan := remote.NewFanIn(ln)
+	fan := remote.NewFanIn(sock)
 	remoteLog := func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) }
 	lim, lerr := remotectl.NewLimiter(cfg, svc)
 	if lerr != nil {
@@ -734,7 +704,15 @@ func runServe(configPath string) error {
 	if lim != nil {
 		rpcOpts = append(rpcOpts, rpc.WithRemoteUnblock(lim.Unblock))
 	}
+	// Which store this daemon serves, for sys.hello: a frontend compares it
+	// before sending anything. Empty for a store with no file identity.
+	storeID, storePath, _ := meta.StoreID(cfg.Meta)
+	rpcOpts = append(rpcOpts, rpc.WithStoreIdentity(storeID, storePath))
 	srv := rpc.New(svc, eng, cfg.Server, version, rpcOpts...)
+	// The lease record now says where this daemon answers, for a frontend
+	// that resolved a different socket over the same store. Best effort:
+	// without it this daemon is only unfindable through the record.
+	_ = lease.Announce(ep.Network, ep.Address, srv.Instance(), rpc.Protocol)
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the
@@ -1182,6 +1160,23 @@ func spawnFor(cfg config.Config, configPath string) func() (string, error) {
 	return func() (string, error) { return spawnServe(configPath) }
 }
 
+// locatorFor is how a TUI session finds this store's daemon (rpc.Locate), or
+// nil to dial the configured address as it always did.
+//
+// Nil for a config that may not spawn: its endpoint names a daemon it does not
+// own, and its [meta] is not that daemon's store. Nil for a store with no file
+// identity too — Locate would answer meta.ErrNoLeaseRecord, which the
+// session's loop must not read as "not found", or it would never dial at all.
+func locatorFor(cfg config.Config, ep config.Endpoint) func(context.Context) (rpc.Located, error) {
+	if !cfg.MaySpawnDaemon() {
+		return nil
+	}
+	if _, _, err := meta.StoreID(cfg.Meta); errors.Is(err, meta.ErrNoLeaseRecord) {
+		return nil
+	}
+	return func(ctx context.Context) (rpc.Located, error) { return rpc.Locate(ctx, ep, cfg.Meta) }
+}
+
 func runUI(configPath, remoteProfile string) error {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -1232,6 +1227,9 @@ func runUIOn(backend tuicore.Backend, network string, cfg config.Config, start t
 	// than becoming what listens.
 	session := tuiapp.NewSessionOn(network, addr, logger.Nop{}, spawnFor(cfg, configPath))
 	defer session.Close()
+	// Where this store's daemon answers, which may not be the configured
+	// address (a different $TMPDIR, a swept socket): see locatorFor.
+	session.SetLocator(locatorFor(cfg, config.Endpoint{Network: network, Address: addr}))
 
 	// The About modal reports what THIS frontend resolved — the paths it
 	// would actually use — rather than asking the server, so the splash
@@ -1511,8 +1509,53 @@ func runPrintEndpoint(configPath string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s\t%s\n", ep.Network, ep.Address)
+	network, addr, storeLine, err := printedEndpoint(context.Background(), cfg, ep)
+	if err != nil {
+		return err
+	}
+	// Line 1 is unchanged, so an older lifecycle.lua (it reads only the first
+	// line) still parses it. NOTHING ON STDERR on success: vim.fn.systemlist
+	// merges stderr in FIRST, and a note there would be read as the endpoint.
+	fmt.Printf("%s\t%s\n", network, addr)
+	if storeLine != "" {
+		fmt.Printf("store\t%s\n", storeLine)
+	}
 	return nil
+}
+
+// printedEndpoint is where --print-endpoint sends a frontend, and the store
+// check it must make there.
+//
+// storeLine is the second line's value: the store id (the frontend's session
+// must see it in its own hello), "pending" (a local sqlite store not created
+// yet: no daemon can be serving it, so the frontend spawns and asks again),
+// or "" — no second line, the explicit no-check mode: a config that may not
+// spawn, or a store with no file identity. A missing line never stands in
+// for an error: anything unexpected fails the command instead.
+func printedEndpoint(ctx context.Context, cfg config.Config, ep config.Endpoint) (network, addr, storeLine string, err error) {
+	network, addr = ep.Network, ep.Address
+	if !cfg.MaySpawnDaemon() {
+		return network, addr, "", nil
+	}
+	loc, lerr := rpc.Locate(ctx, ep, cfg.Meta)
+	switch {
+	case lerr == nil:
+		return loc.Network, loc.Addr, loc.StoreID, nil
+	case errors.Is(lerr, meta.ErrNoLeaseRecord):
+		return network, addr, "", nil
+	case errors.Is(lerr, rpc.ErrDaemonNotFound):
+		id, _, serr := meta.StoreID(cfg.Meta)
+		switch {
+		case serr == nil:
+			return network, addr, id, nil
+		case errors.Is(serr, meta.ErrNoStore):
+			return network, addr, "pending", nil
+		default:
+			return "", "", "", serr
+		}
+	default:
+		return "", "", "", lerr // another store answers, or the store cannot be read
+	}
 }
 
 // partitionRollInterval is how often the month-roll re-checks.

@@ -52,9 +52,9 @@ func (h *Host) aboutRows() [][2]string {
 		case addr == "":
 			backend = "not connected (" + h.session.addr + " configured)"
 		case pid > 0:
-			backend = "[PID:" + strconv.FormatInt(pid, 10) + "] " + addr
+			backend = "[PID:" + strconv.FormatInt(pid, 10) + "] " + addr + foundNote(h.session)
 		default:
-			backend = addr
+			backend = addr + foundNote(h.session)
 		}
 	}
 	meta := info.MetaPath

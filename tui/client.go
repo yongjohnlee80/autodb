@@ -33,6 +33,11 @@ type Session struct {
 	addr  string
 	log   logger.Logger
 	spawn func() (logHint string, err error) // start `autodb --serve`; nil = never spawn
+	// locate answers where the daemon serving this config's store listens,
+	// which may not be addr (rpc.Locate). nil = dial addr as configured, with
+	// no store check: a config that may not spawn, or a store with no file
+	// identity.
+	locate func(ctx context.Context) (rpc.Located, error)
 
 	mu         sync.Mutex
 	client     *golibrpc.Client
@@ -41,9 +46,12 @@ type Session struct {
 	version    string
 	serverPID  int64
 	serverAddr string
-	token      string
-	user       UserInfo
-	gen        uint64 // state epoch; bumps when a (re)connect/disconnect BEGINS
+	// foundVia is "lease" when the live client was found through the store's
+	// lease record rather than at addr, for the status line.
+	foundVia string
+	token    string
+	user     UserInfo
+	gen      uint64 // state epoch; bumps when a (re)connect/disconnect BEGINS
 	// idEpoch is the IDENTITY epoch, and it is separate from gen because the
 	// two change independently. A sign-in over a live connection does not bump
 	// gen, and comparing the user's ID instead cannot see the case that matters
@@ -134,6 +142,19 @@ func (s *Session) IsAdmin() bool { return s.User().Role == "admin" }
 // install_frontdoor.sh writes so a config handed to somebody who is not the
 // operator cannot become what listens.
 func (s *Session) CanSpawn() bool { return s.spawn != nil }
+
+// SetLocator gives the session a way to find this store's daemon when it does
+// not answer at the configured address (rpc.Locate). nil keeps the configured
+// address. Set before the first Connect.
+func (s *Session) SetLocator(f func(ctx context.Context) (rpc.Located, error)) { s.locate = f }
+
+// FoundVia reports how the live client was reached: "lease" when through the
+// store's lease record, "configured" or "" otherwise.
+func (s *Session) FoundVia() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.foundVia
+}
 
 // Connected reports whether a live client is installed.
 func (s *Session) Connected() bool {
@@ -319,13 +340,34 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 	}
 
 	var cli *golibrpc.Client
+	var loc rpc.Located
 	backoff := 100 * time.Millisecond
 	spawned := false
 	logHint := ""
 	var deadline time.Time
 	for {
-		cli, err = golibrpc.Dial(ctx, s.addr, msgpackrpc.New(nil),
-			golibrpc.ClientNetwork(s.network))
+		if s.locate == nil {
+			cli, err = golibrpc.Dial(ctx, s.addr, msgpackrpc.New(nil),
+				golibrpc.ClientNetwork(s.network))
+		} else {
+			// Asked on EVERY attempt, before spawning and after: the daemon
+			// found last time may have exited, and the spawn binds the
+			// configured address.
+			var lerr error
+			loc, lerr = s.locate(ctx)
+			switch {
+			case lerr == nil:
+				cli, err = golibrpc.Dial(ctx, loc.Addr, msgpackrpc.New(nil),
+					golibrpc.ClientNetwork(loc.Network))
+			case errors.Is(lerr, rpc.ErrDaemonNotFound):
+				err = lerr // spawn once, as for a refused dial
+			default:
+				// Another store's daemon holds the configured address, or this
+				// store cannot be read. Never attach to the one, and spawning
+				// cannot help with either.
+				return false, lerr
+			}
+		}
 		if err == nil {
 			break
 		}
@@ -385,6 +427,14 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 		return false, fmt.Errorf("handshake: %w", err)
 	}
 	m, _ := res.(map[string]any)
+	// THE STORE, ON THIS SESSION'S OWN HELLO. Locate's probe was evidence at
+	// probe time; the address can change hands before this dial. Nothing
+	// carrying a credential has been sent yet, so a mismatch costs nothing.
+	if storeID, _ := m["store_id"].(string); loc.StoreID != "" && storeID != loc.StoreID {
+		_ = cli.Close()
+		return false, fmt.Errorf("%w: %s answered for %v; this config's store is %s",
+			rpc.ErrOtherStore, loc.Addr, m["store_path"], loc.StoreID)
+	}
 	inst, _ := m["instance"].(string)
 	ver, _ := m["version"].(string)
 	pid, _ := m["pid"].(int64)
@@ -411,6 +461,7 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 	s.version = ver
 	s.serverPID = pid
 	s.serverAddr = srvAddr
+	s.foundVia = loc.Via
 	return instanceChanged, nil
 }
 
