@@ -36,11 +36,14 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           if [ "$GOOS" = "linux" ]; then
-            # golib/gui's window libraries (Wayland/X11), per golib/gui/README.
+            # golib/gui's window libraries (Wayland/X11/Vulkan), per
+            # golib/gui/README. libvulkan-dev carries the headers; there is
+            # no vulkan-headers package on bookworm/trixie.
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends \
               libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev \
-              libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev
+              libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev \
+              libvulkan-dev
           fi
           VERSION="${GITHUB_REF_NAME}"
           COMMIT="$(git rev-parse --short HEAD)"
