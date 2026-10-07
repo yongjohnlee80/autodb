@@ -14,11 +14,11 @@ Dialog {
     onRejected: { passphrase.clear(); App.keyFormClosed() }
     Flex {
         direction: Tui.Vertical
-        Text { visible: App.keyFormAdding; text: "public key (the one line of your .pub file)" }
+        Text { visible: App.keyFormAdding; text: qsTrId("autodb.sshKeyForm.text") }
         TextField { id: publicKey; visible: App.keyFormAdding; text: App.keyFormPublic }
-        Text { text: "label (which computer or key it is)" }
+        Text { text: qsTrId("autodb.sshKeyForm.text2") }
         TextField { id: label; text: App.keyFormLabel }
-        Text { visible: App.keyFormPassphrase; text: "your autodb passphrase (a wrong one signs you out)" }
+        Text { visible: App.keyFormPassphrase; text: qsTrId("autodb.sshKeyForm.text3") }
         TextField { id: passphrase; visible: App.keyFormPassphrase; echoMode: TextInput.Password }
     }
     onAccepted: { App.saveKey(publicKey.text, label.text, passphrase.text); passphrase.clear() }

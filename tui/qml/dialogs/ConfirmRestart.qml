@@ -4,12 +4,12 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "restart server"
+    title: qsTrId("autodb.confirmRestart.title")
     dim: false
     Text { wrapMode: Tui.WordWrap; text: App.restartQuestion }
     DialogButtonBox {
-        Button { text: "&No, stay"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
-        Button { text: "&Yes, restart"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
+        Button { text: qsTrId("autodb.confirmRestart.text"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: qsTrId("autodb.confirmRestart.text2"); DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
     }
     onAccepted: App.restartConfirmed()
 }

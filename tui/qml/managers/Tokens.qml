@@ -3,7 +3,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "my access tokens"
+    title: qsTrId("autodb.tokens.title")
     dim: false
     helpText: App.tokensStatus
     onRejected: App.tokensClosed()
@@ -22,9 +22,9 @@ Dialog {
         }
     }
     DialogButtonBox {
-        Button { text: "&Create"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.tokenCreate() }
-        Button { text: "&Revoke"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.tokenRevoke(table.currentIndex) }
+        Button { text: qsTrId("autodb.tokens.text"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.tokenCreate() }
+        Button { text: qsTrId("autodb.tokens.text2"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.tokenRevoke(table.currentIndex) }
         Button { text: App.showRevokedLabel; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.tokenToggleRevoked() }
-        Button { text: "Close(&q)"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: qsTrId("autodb.tokens.text3"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

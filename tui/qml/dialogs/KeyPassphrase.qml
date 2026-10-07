@@ -6,12 +6,12 @@ Dialog {
     closeOnQ: false
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "the SSH key's passphrase"
+    title: qsTrId("autodb.keyPassphrase.title")
     width: 80
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok
     dim: true
-    helpText: "not your autodb passphrase: the one that protects this key file"
+    helpText: qsTrId("autodb.keyPassphrase.helpText")
     Flex {
         direction: Tui.Vertical
         Text { text: App.keyPassphrasePath }

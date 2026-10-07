@@ -13,7 +13,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "connect to a remote server"
+    title: qsTrId("autodb.remoteConnect.title")
     width: 80
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok          // Enter connects, from the last field too
@@ -21,7 +21,7 @@ Dialog {
     helpText: App.remoteConnectError
     Flex {
         direction: Tui.Vertical
-        Text { text: "server" }
+        Text { text: qsTrId("autodb.remoteConnect.text") }
         ComboBox {
             id: profile
             model: App.remoteProfiles
@@ -30,9 +30,9 @@ Dialog {
             currentIndex: App.remoteProfile
             onActivated: App.remoteChoose(index)
         }
-        Text { text: "autodb passphrase" }
+        Text { text: qsTrId("autodb.remoteConnect.text2") }
         TextField { id: passphrase; echoMode: TextInput.Password }
-        Text { visible: App.remoteFirst; text: "the passphrase again" }
+        Text { visible: App.remoteFirst; text: qsTrId("autodb.remoteConnect.text3") }
         TextField { id: again; visible: App.remoteFirst; echoMode: TextInput.Password }
         Text { visible: App.remoteFirst; wrapMode: Tui.WordWrap; text: App.remoteWarning }
     }

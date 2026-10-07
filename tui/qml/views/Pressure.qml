@@ -3,7 +3,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "pressure"
+    title: qsTrId("autodb.pressure.title")
     dim: false
     standardButtons: Dialog.Close
     helpText: App.pressureAge

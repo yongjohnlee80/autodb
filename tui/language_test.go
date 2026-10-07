@@ -177,7 +177,9 @@ func TestSwitchingLanguageRelabelsTheOpenScreen(t *testing.T) {
 
 	// Back to English: the dialog is still there, and the source restores.
 	h.RunCommand("options.language.en")
-	s.WaitFor(t, "back to English", func(string) bool { return h.SourceText("App.language") == "en" })
+	s.WaitFor(t, "back to English", func(sc string) bool {
+		return h.SourceText("App.language") == "en" && strings.Contains(sc, "quit autodb?")
+	})
 	if !strings.Contains(s.String(), "quit autodb?") {
 		t.Fatal("the dialog did not survive the switches")
 	}

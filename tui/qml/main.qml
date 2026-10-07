@@ -148,7 +148,7 @@ Window {
         palette.text: Theme.document.text
 
         Frame {
-            title: "explorer"
+            title: qsTrId("autodb.main.title")
             visible: App.explorerShown
             // Enter on a row: a folder opens, a table scaffolds its query, and
             // a connection — or anything under one — becomes the query's.
@@ -195,7 +195,7 @@ Window {
             }
             Frame {
                 id: results
-                title: "results"
+                title: qsTrId("autodb.main.title2")
                 visible: App.resultsShown
                 Flex {
                     direction: Tui.Vertical

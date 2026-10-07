@@ -7,13 +7,13 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 90
     maxHeightPercent: 85
-    title: "manage remote access"
+    title: qsTrId("autodb.remoteManage.title")
     dim: false
     helpText: App.manageStatus
     onRejected: App.manageClosed()
     Flex {
         direction: Tui.Vertical
-        Text { text: "section" }
+        Text { text: qsTrId("autodb.remoteManage.text") }
         ComboBox {
             id: section
             model: App.manageSections
@@ -63,7 +63,7 @@ Dialog {
             TableViewColumn { role: "last"; title: "LAST REFUSAL"; width: 18 }
             TableViewColumn { role: "reason"; title: "REASON"; width: 0 }
         }
-        Text { visible: App.manageOnActivity; text: "kind" }
+        Text { visible: App.manageOnActivity; text: qsTrId("autodb.remoteManage.text2") }
         ComboBox {
             id: kind
             visible: App.manageOnActivity
@@ -87,19 +87,19 @@ Dialog {
         }
     }
     DialogButtonBox {
-        Button { text: "&Add"; visible: App.manageOnServers; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.serverAdd() }
-        Button { text: "&Edit"; visible: App.manageOnServers; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.serverEdit(servers.currentIndex) }
-        Button { text: "Re&move"; visible: App.manageOnServers; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.serverRemove(servers.currentIndex) }
-        Button { text: "Forget &host key"; visible: App.manageOnServers; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.serverForget(servers.currentIndex) }
-        Button { text: "Add &key"; visible: App.manageKeysEdit; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.keyAdd() }
-        Button { text: "&Label"; visible: App.manageKeysEdit; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.keyLabel(keys.currentIndex) }
-        Button { text: "Re&voke key"; visible: App.manageOnKeys; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.keyRevoke(keys.currentIndex) }
-        Button { text: "Revoke &device"; visible: App.manageOnKeys; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.deviceRevoke(keys.currentIndex) }
+        Button { text: qsTrId("autodb.remoteManage.text3"); visible: App.manageOnServers; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.serverAdd() }
+        Button { text: qsTrId("autodb.remoteManage.text4"); visible: App.manageOnServers; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.serverEdit(servers.currentIndex) }
+        Button { text: qsTrId("autodb.remoteManage.text5"); visible: App.manageOnServers; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.serverRemove(servers.currentIndex) }
+        Button { text: qsTrId("autodb.remoteManage.text6"); visible: App.manageOnServers; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.serverForget(servers.currentIndex) }
+        Button { text: qsTrId("autodb.remoteManage.text7"); visible: App.manageKeysEdit; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.keyAdd() }
+        Button { text: qsTrId("autodb.remoteManage.text8"); visible: App.manageKeysEdit; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.keyLabel(keys.currentIndex) }
+        Button { text: qsTrId("autodb.remoteManage.text9"); visible: App.manageOnKeys; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.keyRevoke(keys.currentIndex) }
+        Button { text: qsTrId("autodb.remoteManage.text10"); visible: App.manageOnKeys; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.deviceRevoke(keys.currentIndex) }
         Button { text: App.controlToggleLabel; visible: App.manageOnControl; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.controlToggle() }
-        Button { text: "&Unblock"; visible: App.manageOnBlocks; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.blockUnblock(blocks.currentIndex) }
-        Button { text: "&Next page"; visible: App.manageOnActivity; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.activityNext() }
-        Button { text: "&Prev page"; visible: App.manageOnActivity; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.activityPrev() }
-        Button { text: "Refre&sh"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.manageRefresh() }
-        Button { text: "Close(&q)"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: qsTrId("autodb.remoteManage.text11"); visible: App.manageOnBlocks; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.blockUnblock(blocks.currentIndex) }
+        Button { text: qsTrId("autodb.remoteManage.text12"); visible: App.manageOnActivity; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.activityNext() }
+        Button { text: qsTrId("autodb.remoteManage.text13"); visible: App.manageOnActivity; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.activityPrev() }
+        Button { text: qsTrId("autodb.remoteManage.text14"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.manageRefresh() }
+        Button { text: qsTrId("autodb.remoteManage.text15"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

@@ -17,6 +17,6 @@ Flex {
     }
     Text {
         visible: App.resultsEmpty
-        text: "no results — SPC r runs the query"
+        text: qsTrId("autodb.results.text")
     }
 }

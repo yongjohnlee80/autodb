@@ -10,12 +10,12 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "quit autodb?"
+    title: qsTrId("autodb.confirmQuit.title")
     dim: true
     onAccepted: App.quitConfirmed()
     Text { text: App.quitQuestion }
     DialogButtonBox {
-        Button { text: "&Yes, quit";  DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
-        Button { text: "&No, stay";   DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: qsTrId("autodb.confirmQuit.text");  DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
+        Button { text: qsTrId("autodb.confirmQuit.text2");   DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

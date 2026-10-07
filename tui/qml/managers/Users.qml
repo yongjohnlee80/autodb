@@ -3,7 +3,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "users"
+    title: qsTrId("autodb.users.title")
     dim: false
     helpText: App.usersStatus
     onRejected: App.usersClosed()
@@ -22,14 +22,14 @@ Dialog {
         }
     }
     DialogButtonBox {
-        Button { text: "&Add"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userAdd() }
-        Button { text: "&Role"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userRole(table.currentIndex) }
-        Button { text: "&Passphrase"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userResetPassphrase(table.currentIndex) }
-        Button { text: "&Toggle"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userToggle(table.currentIndex) }
-        Button { text: "Grant &connection"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userGrant(table.currentIndex) }
-        Button { text: "&IPs"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userIPs(table.currentIndex) }
-        Button { text: "SS&H keys"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userSSHKeys(table.currentIndex) }
-        Button { text: "Remo&ve"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userRemove(table.currentIndex) }
-        Button { text: "Close(&q)"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: qsTrId("autodb.users.text"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userAdd() }
+        Button { text: qsTrId("autodb.users.text2"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userRole(table.currentIndex) }
+        Button { text: qsTrId("autodb.users.text3"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userResetPassphrase(table.currentIndex) }
+        Button { text: qsTrId("autodb.users.text4"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userToggle(table.currentIndex) }
+        Button { text: qsTrId("autodb.users.text5"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userGrant(table.currentIndex) }
+        Button { text: qsTrId("autodb.users.text6"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userIPs(table.currentIndex) }
+        Button { text: qsTrId("autodb.users.text7"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userSSHKeys(table.currentIndex) }
+        Button { text: qsTrId("autodb.users.text8"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userRemove(table.currentIndex) }
+        Button { text: qsTrId("autodb.users.text9"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

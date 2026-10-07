@@ -16,15 +16,15 @@ Dialog {
     helpText: App.connFormError
     Flex {
         direction: Tui.Vertical
-        Text { text: "name" }
+        Text { text: qsTrId("autodb.connectionForm.text") }
         TextField { id: name; text: App.connFormName }
-        Text { text: "engine"; visible: App.connFormAdding }
+        Text { text: qsTrId("autodb.connectionForm.text2"); visible: App.connFormAdding }
         ComboBox { id: engine; visible: App.connFormAdding; model: App.engines; textRole: "label"; valueRole: "id"; currentIndex: App.connFormEngine; placeholderText: "choose an engine" }
-        Text { text: "DSN (stored encrypted at rest)"; visible: App.connFormAdding }
-        TextField { id: dsn; visible: App.connFormAdding; echoMode: TextInput.Password; placeholderText: "postgres://user@host/db" }
-        Text { text: "proxy — front door reachability"; visible: App.connFormEditing }
+        Text { text: qsTrId("autodb.connectionForm.text3"); visible: App.connFormAdding }
+        TextField { id: dsn; visible: App.connFormAdding; echoMode: TextInput.Password; placeholderText: qsTrId("autodb.connectionForm.placeholderText") }
+        Text { text: qsTrId("autodb.connectionForm.text4"); visible: App.connFormEditing }
         ComboBox { id: proxy; visible: App.connFormEditing; model: App.proxyChoices; textRole: "label"; valueRole: "id"; currentIndex: App.connFormProxy }
-        Text { text: "capability profile — what SQL clients may send"; visible: App.connFormEditing }
+        Text { text: qsTrId("autodb.connectionForm.text5"); visible: App.connFormEditing }
         ComboBox { id: profile; visible: App.connFormEditing; model: App.profileChoices; textRole: "label"; valueRole: "id"; currentIndex: App.connFormProfile }
     }
     onOpened: dsn.clear()

@@ -23,15 +23,15 @@ Dialog {
         Flex {
             direction: Tui.Horizontal
             visible: App.addressAdding
-            TextField { id: cidr; Layout.fillWidth: true; placeholderText: "IP or CIDR (blank = this address for personal list)" }
-            TextField { id: note; Layout.fillWidth: true; placeholderText: "label"; onAccepted: App.addressSave(cidr.text, note.text) }
-            Button { text: "&Save"; onClicked: App.addressSave(cidr.text, note.text) }
+            TextField { id: cidr; Layout.fillWidth: true; placeholderText: qsTrId("autodb.addresses.placeholderText") }
+            TextField { id: note; Layout.fillWidth: true; placeholderText: qsTrId("autodb.addresses.placeholderText2"); onAccepted: App.addressSave(cidr.text, note.text) }
+            Button { text: qsTrId("autodb.addresses.text"); onClicked: App.addressSave(cidr.text, note.text) }
         }
     }
     DialogButtonBox {
-        Button { text: "&Add"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole
+        Button { text: qsTrId("autodb.addresses.text2"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole
                  onClicked: { cidr.clear(); note.clear(); App.addressAdd(); cidr.forceActiveFocus() } }
-        Button { text: "&Remove"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.addressRemove(table.currentIndex) }
-        Button { text: "Close(&q)"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: qsTrId("autodb.addresses.text3"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.addressRemove(table.currentIndex) }
+        Button { text: qsTrId("autodb.addresses.text4"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

@@ -12,7 +12,7 @@ Dialog {
     onRejected: App.workspaceNameCancelled()
     Flex {
         direction: Tui.Vertical
-        Text { text: "name" }
+        Text { text: qsTrId("autodb.workspaceName.text") }
         TextField { id: name; text: App.workspaceFormName }
     }
     onAccepted: App.saveWorkspace(name.text)

@@ -379,5 +379,677 @@
             <source>Português (Brasil) (&amp;6)</source>
             <translation>Português (Brasil) (&amp;6)</translation>
         </message>
+        <message id="autodb.about.helpText">
+            <source>q, Enter or Esc closes</source>
+            <translation>q, Enter 또는 Esc로 닫습니다</translation>
+        </message>
+        <message id="autodb.about.title">
+            <source>About autodb</source>
+            <translation>autodb 정보</translation>
+        </message>
+        <message id="autodb.addresses.placeholderText">
+            <source>IP or CIDR (blank = this address for personal list)</source>
+            <translation>IP 또는 CIDR (비우면 개인 목록의 이 주소)</translation>
+        </message>
+        <message id="autodb.addresses.placeholderText2">
+            <source>label</source>
+            <translation>라벨</translation>
+        </message>
+        <message id="autodb.addresses.text">
+            <source>&amp;Save</source>
+            <translation>저장(&amp;s)</translation>
+        </message>
+        <message id="autodb.addresses.text2">
+            <source>&amp;Add</source>
+            <translation>추가(&amp;a)</translation>
+        </message>
+        <message id="autodb.addresses.text3">
+            <source>&amp;Remove</source>
+            <translation>제거(&amp;r)</translation>
+        </message>
+        <message id="autodb.addresses.text4">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.audit.title">
+            <source>audit log</source>
+            <translation>감사 로그</translation>
+        </message>
+        <message id="autodb.auditFilter.text">
+            <source>connection</source>
+            <translation>연결</translation>
+        </message>
+        <message id="autodb.auditFilter.text2">
+            <source>workspace</source>
+            <translation>워크스페이스</translation>
+        </message>
+        <message id="autodb.auditFilter.text3">
+            <source>user</source>
+            <translation>사용자</translation>
+        </message>
+        <message id="autodb.auditFilter.text4">
+            <source>actions (comma-separated, e.g. login_failed, connection_archived)</source>
+            <translation>작업 (쉼표로 구분, 예: login_failed, connection_archived)</translation>
+        </message>
+        <message id="autodb.auditFilter.text5">
+            <source>from (YYYY-MM-DD)</source>
+            <translation>시작 (YYYY-MM-DD)</translation>
+        </message>
+        <message id="autodb.auditFilter.text6">
+            <source>to (YYYY-MM-DD, inclusive)</source>
+            <translation>끝 (YYYY-MM-DD, 포함)</translation>
+        </message>
+        <message id="autodb.auditFilter.title">
+            <source>filter audit log</source>
+            <translation>감사 로그 필터</translation>
+        </message>
+        <message id="autodb.bootstrap.text">
+            <source>root user (root if empty)</source>
+            <translation>root 사용자 (비우면 root)</translation>
+        </message>
+        <message id="autodb.bootstrap.text2">
+            <source>passphrase — at least 8 characters</source>
+            <translation>passphrase — 8자 이상</translation>
+        </message>
+        <message id="autodb.bootstrap.text3">
+            <source>again</source>
+            <translation>다시 입력</translation>
+        </message>
+        <message id="autodb.bootstrap.title">
+            <source>first run — create the root user</source>
+            <translation>첫 실행 — root 사용자 만들기</translation>
+        </message>
+        <message id="autodb.cacert.text">
+            <source>Cop&amp;y certificate</source>
+            <translation>인증서 복사(&amp;y)</translation>
+        </message>
+        <message id="autodb.cacert.text2">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.confirmQuit.text">
+            <source>&amp;Yes, quit</source>
+            <translation>예, 종료(&amp;y)</translation>
+        </message>
+        <message id="autodb.confirmQuit.text2">
+            <source>&amp;No, stay</source>
+            <translation>아니요, 계속(&amp;n)</translation>
+        </message>
+        <message id="autodb.confirmQuit.title">
+            <source>quit autodb?</source>
+            <translation>autodb를 종료할까요?</translation>
+        </message>
+        <message id="autodb.confirmRestart.text">
+            <source>&amp;No, stay</source>
+            <translation>아니요, 계속(&amp;n)</translation>
+        </message>
+        <message id="autodb.confirmRestart.text2">
+            <source>&amp;Yes, restart</source>
+            <translation>예, 재시작(&amp;y)</translation>
+        </message>
+        <message id="autodb.confirmRestart.title">
+            <source>restart server</source>
+            <translation>서버 재시작</translation>
+        </message>
+        <message id="autodb.connCard.helpText">
+            <source>Select and yank with v/y · Copy all button · q/Esc close</source>
+            <translation>v/y로 선택 후 복사 · 모두 복사 버튼 · q/Esc로 닫기</translation>
+        </message>
+        <message id="autodb.connCard.text">
+            <source>Cop&amp;y all</source>
+            <translation>모두 복사(&amp;y)</translation>
+        </message>
+        <message id="autodb.connCard.text2">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.connPicker.title">
+            <source>connection for this query</source>
+            <translation>이 쿼리의 연결</translation>
+        </message>
+        <message id="autodb.connectionForm.placeholderText">
+            <source>postgres://user@host/db</source>
+            <translation>postgres://user@host/db</translation>
+        </message>
+        <message id="autodb.connectionForm.text">
+            <source>name</source>
+            <translation>이름</translation>
+        </message>
+        <message id="autodb.connectionForm.text2">
+            <source>engine</source>
+            <translation>엔진</translation>
+        </message>
+        <message id="autodb.connectionForm.text3">
+            <source>DSN (stored encrypted at rest)</source>
+            <translation>DSN (저장 시 암호화됨)</translation>
+        </message>
+        <message id="autodb.connectionForm.text4">
+            <source>proxy — front door reachability</source>
+            <translation>proxy — 프론트도어 도달 가능성</translation>
+        </message>
+        <message id="autodb.connectionForm.text5">
+            <source>capability profile — what SQL clients may send</source>
+            <translation>기능 프로필 — SQL 클라이언트가 보낼 수 있는 것</translation>
+        </message>
+        <message id="autodb.connections.text">
+            <source>&amp;Add</source>
+            <translation>추가(&amp;a)</translation>
+        </message>
+        <message id="autodb.connections.text2">
+            <source>&amp;Edit</source>
+            <translation>편집(&amp;e)</translation>
+        </message>
+        <message id="autodb.connections.text3">
+            <source>&amp;Test</source>
+            <translation>테스트(&amp;t)</translation>
+        </message>
+        <message id="autodb.connections.text4">
+            <source>&amp;Delete</source>
+            <translation>삭제(&amp;d)</translation>
+        </message>
+        <message id="autodb.connections.text5">
+            <source>Attach to &amp;workspace</source>
+            <translation>워크스페이스에 연결(&amp;w)</translation>
+        </message>
+        <message id="autodb.connections.text6">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.connections.title">
+            <source>connections</source>
+            <translation>연결</translation>
+        </message>
+        <message id="autodb.help.helpText">
+            <source>q, Esc or Enter closes</source>
+            <translation>q, Esc 또는 Enter로 닫습니다</translation>
+        </message>
+        <message id="autodb.help.title">
+            <source>help</source>
+            <translation>도움말</translation>
+        </message>
+        <message id="autodb.hints.title">
+            <source>keys here</source>
+            <translation>이 화면의 키</translation>
+        </message>
+        <message id="autodb.history.title">
+            <source>history</source>
+            <translation>기록</translation>
+        </message>
+        <message id="autodb.historyFilter.text">
+            <source>connection</source>
+            <translation>연결</translation>
+        </message>
+        <message id="autodb.historyFilter.text2">
+            <source>workspace</source>
+            <translation>워크스페이스</translation>
+        </message>
+        <message id="autodb.historyFilter.text3">
+            <source>user</source>
+            <translation>사용자</translation>
+        </message>
+        <message id="autodb.historyFilter.text4">
+            <source>status</source>
+            <translation>상태</translation>
+        </message>
+        <message id="autodb.historyFilter.text5">
+            <source>from (YYYY-MM-DD)</source>
+            <translation>시작 (YYYY-MM-DD)</translation>
+        </message>
+        <message id="autodb.historyFilter.text6">
+            <source>to (YYYY-MM-DD, inclusive)</source>
+            <translation>끝 (YYYY-MM-DD, 포함)</translation>
+        </message>
+        <message id="autodb.historyFilter.title">
+            <source>filter history</source>
+            <translation>기록 필터</translation>
+        </message>
+        <message id="autodb.inspect.helpText">
+            <source>j/k move · y copy · Enter open</source>
+            <translation>j/k 이동 · y 복사 · Enter 열기</translation>
+        </message>
+        <message id="autodb.inspect.title">
+            <source>row</source>
+            <translation>행</translation>
+        </message>
+        <message id="autodb.keyPassphrase.helpText">
+            <source>not your autodb passphrase: the one that protects this key file</source>
+            <translation>autodb passphrase가 아니라 이 키 파일을 보호하는 passphrase입니다</translation>
+        </message>
+        <message id="autodb.keyPassphrase.title">
+            <source>the SSH key's passphrase</source>
+            <translation>SSH 키의 passphrase</translation>
+        </message>
+        <message id="autodb.keyslot.text">
+            <source>&amp;Enable</source>
+            <translation>활성화(&amp;e)</translation>
+        </message>
+        <message id="autodb.keyslot.text2">
+            <source>&amp;Remove</source>
+            <translation>제거(&amp;r)</translation>
+        </message>
+        <message id="autodb.keyslot.text3">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.keyslot.title">
+            <source>service keyslot</source>
+            <translation>서비스 키슬롯</translation>
+        </message>
+        <message id="autodb.keyslotConfirm.text">
+            <source>&amp;Proceed</source>
+            <translation>계속(&amp;p)</translation>
+        </message>
+        <message id="autodb.keyslotConfirm.text2">
+            <source>&amp;Cancel</source>
+            <translation>취소(&amp;c)</translation>
+        </message>
+        <message id="autodb.leader.helpText">
+            <source>a key runs its command · Esc closes</source>
+            <translation>키 하나가 명령을 실행합니다 · Esc로 닫기</translation>
+        </message>
+        <message id="autodb.leader.title">
+            <source>SPC — commands</source>
+            <translation>SPC — 명령</translation>
+        </message>
+        <message id="autodb.login.text">
+            <source>user</source>
+            <translation>사용자</translation>
+        </message>
+        <message id="autodb.login.text2">
+            <source>passphrase</source>
+            <translation>passphrase</translation>
+        </message>
+        <message id="autodb.login.title">
+            <source>sign in</source>
+            <translation>로그인</translation>
+        </message>
+        <message id="autodb.main.title">
+            <source>explorer</source>
+            <translation>탐색기</translation>
+        </message>
+        <message id="autodb.main.title2">
+            <source>results</source>
+            <translation>결과</translation>
+        </message>
+        <message id="autodb.noteConflict.text">
+            <source>&amp;Keep</source>
+            <translation>유지(&amp;k)</translation>
+        </message>
+        <message id="autodb.noteConflict.text2">
+            <source>&amp;Overwrite</source>
+            <translation>덮어쓰기(&amp;o)</translation>
+        </message>
+        <message id="autodb.noteConflict.text3">
+            <source>&amp;Save as…</source>
+            <translation>다른 이름으로 저장(&amp;s)…</translation>
+        </message>
+        <message id="autodb.noteConflict.title">
+            <source>note changed on disk</source>
+            <translation>노트가 디스크에서 변경됨</translation>
+        </message>
+        <message id="autodb.noteName.placeholderText">
+            <source>report.sql</source>
+            <translation>report.sql</translation>
+        </message>
+        <message id="autodb.noteName.text">
+            <source>workspace</source>
+            <translation>워크스페이스</translation>
+        </message>
+        <message id="autodb.noteName.text2">
+            <source>name</source>
+            <translation>이름</translation>
+        </message>
+        <message id="autodb.noteOpen.placeholderText">
+            <source>filter by note or workspace</source>
+            <translation>노트 또는 워크스페이스로 필터</translation>
+        </message>
+        <message id="autodb.noteOpen.title">
+            <source>open a note</source>
+            <translation>노트 열기</translation>
+        </message>
+        <message id="autodb.pressure.title">
+            <source>pressure</source>
+            <translation>부하</translation>
+        </message>
+        <message id="autodb.profile.text">
+            <source>current passphrase</source>
+            <translation>현재 passphrase</translation>
+        </message>
+        <message id="autodb.profile.text2">
+            <source>new passphrase</source>
+            <translation>새 passphrase</translation>
+        </message>
+        <message id="autodb.profile.text3">
+            <source>again</source>
+            <translation>다시 입력</translation>
+        </message>
+        <message id="autodb.profile.text4">
+            <source>&amp;Update passphrase</source>
+            <translation>passphrase 변경(&amp;u)</translation>
+        </message>
+        <message id="autodb.profile.text5">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.profile.title">
+            <source>profile</source>
+            <translation>프로필</translation>
+        </message>
+        <message id="autodb.remoteConnect.text">
+            <source>server</source>
+            <translation>서버</translation>
+        </message>
+        <message id="autodb.remoteConnect.text2">
+            <source>autodb passphrase</source>
+            <translation>autodb passphrase</translation>
+        </message>
+        <message id="autodb.remoteConnect.text3">
+            <source>the passphrase again</source>
+            <translation>passphrase 다시 입력</translation>
+        </message>
+        <message id="autodb.remoteConnect.title">
+            <source>connect to a remote server</source>
+            <translation>원격 서버에 연결</translation>
+        </message>
+        <message id="autodb.remoteManage.text">
+            <source>section</source>
+            <translation>섹션</translation>
+        </message>
+        <message id="autodb.remoteManage.text10">
+            <source>Revoke &amp;device</source>
+            <translation>기기 폐기(&amp;d)</translation>
+        </message>
+        <message id="autodb.remoteManage.text11">
+            <source>&amp;Unblock</source>
+            <translation>차단 해제(&amp;u)</translation>
+        </message>
+        <message id="autodb.remoteManage.text12">
+            <source>&amp;Next page</source>
+            <translation>다음 페이지(&amp;n)</translation>
+        </message>
+        <message id="autodb.remoteManage.text13">
+            <source>&amp;Prev page</source>
+            <translation>이전 페이지(&amp;p)</translation>
+        </message>
+        <message id="autodb.remoteManage.text14">
+            <source>Refre&amp;sh</source>
+            <translation>새로 고침(&amp;s)</translation>
+        </message>
+        <message id="autodb.remoteManage.text15">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.remoteManage.text2">
+            <source>kind</source>
+            <translation>종류</translation>
+        </message>
+        <message id="autodb.remoteManage.text3">
+            <source>&amp;Add</source>
+            <translation>추가(&amp;a)</translation>
+        </message>
+        <message id="autodb.remoteManage.text4">
+            <source>&amp;Edit</source>
+            <translation>편집(&amp;e)</translation>
+        </message>
+        <message id="autodb.remoteManage.text5">
+            <source>Re&amp;move</source>
+            <translation>제거(&amp;m)</translation>
+        </message>
+        <message id="autodb.remoteManage.text6">
+            <source>Forget &amp;host key</source>
+            <translation>호스트 키 잊기(&amp;h)</translation>
+        </message>
+        <message id="autodb.remoteManage.text7">
+            <source>Add &amp;key</source>
+            <translation>키 추가(&amp;k)</translation>
+        </message>
+        <message id="autodb.remoteManage.text8">
+            <source>&amp;Label</source>
+            <translation>라벨(&amp;l)</translation>
+        </message>
+        <message id="autodb.remoteManage.text9">
+            <source>Re&amp;voke key</source>
+            <translation>키 폐기(&amp;v)</translation>
+        </message>
+        <message id="autodb.remoteManage.title">
+            <source>manage remote access</source>
+            <translation>원격 접근 관리</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text">
+            <source>name (how the menus show it)</source>
+            <translation>이름 (메뉴에 표시되는 대로)</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text2">
+            <source>host (name or address)</source>
+            <translation>호스트 (이름 또는 주소)</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text3">
+            <source>port (blank for 7422)</source>
+            <translation>포트 (비우면 7422)</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text4">
+            <source>your autodb user there</source>
+            <translation>그곳의 당신의 autodb 사용자</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text5">
+            <source>SSH key file (its .pub must be registered on your profile there)</source>
+            <translation>SSH 키 파일 (.pub이 그곳의 프로필에 등록되어 있어야 합니다)</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text6">
+            <source>signing</source>
+            <translation>서명</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text7">
+            <source>host key</source>
+            <translation>호스트 키</translation>
+        </message>
+        <message id="autodb.results.text">
+            <source>no results — SPC r runs the query</source>
+            <translation>결과 없음 — SPC r이 쿼리를 실행합니다</translation>
+        </message>
+        <message id="autodb.search.placeholderText">
+            <source>find text</source>
+            <translation>찾을 텍스트</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text">
+            <source>public key (the one line of your .pub file)</source>
+            <translation>공개 키 (.pub 파일의 그 한 줄)</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text2">
+            <source>label (which computer or key it is)</source>
+            <translation>라벨 (어떤 컴퓨터 또는 키인지)</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text3">
+            <source>your autodb passphrase (a wrong one signs you out)</source>
+            <translation>당신의 autodb passphrase (틀리면 로그아웃됩니다)</translation>
+        </message>
+        <message id="autodb.startChoice.helpText">
+            <source>Enter starts there · Esc starts connected to nothing</source>
+            <translation>Enter로 선택 · Esc는 연결 없이 시작</translation>
+        </message>
+        <message id="autodb.startChoice.title">
+            <source>start on</source>
+            <translation>시작 위치</translation>
+        </message>
+        <message id="autodb.tokenForm.placeholderText">
+            <source>no</source>
+            <translation>no</translation>
+        </message>
+        <message id="autodb.tokenForm.text">
+            <source>name</source>
+            <translation>이름</translation>
+        </message>
+        <message id="autodb.tokenForm.text2">
+            <source>expires in days (1–365, blank for default)</source>
+            <translation>만료까지 일수 (1–365, 비우면 기본값)</translation>
+        </message>
+        <message id="autodb.tokenForm.text3">
+            <source>IPs (comma-separated CIDRs, blank inherits your allowlist)</source>
+            <translation>IP (쉼표로 구분된 CIDR, 비우면 허용 목록 상속)</translation>
+        </message>
+        <message id="autodb.tokenForm.text4">
+            <source>connection</source>
+            <translation>연결</translation>
+        </message>
+        <message id="autodb.tokenForm.text5">
+            <source>allow cleartext debug traffic? (yes/no)</source>
+            <translation>cleartext 디버그 트래픽을 허용할까요? (yes/no)</translation>
+        </message>
+        <message id="autodb.tokenForm.title">
+            <source>create access token</source>
+            <translation>액세스 토큰 만들기</translation>
+        </message>
+        <message id="autodb.tokens.text">
+            <source>&amp;Create</source>
+            <translation>만들기(&amp;c)</translation>
+        </message>
+        <message id="autodb.tokens.text2">
+            <source>&amp;Revoke</source>
+            <translation>폐기(&amp;r)</translation>
+        </message>
+        <message id="autodb.tokens.text3">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.tokens.title">
+            <source>my access tokens</source>
+            <translation>내 액세스 토큰</translation>
+        </message>
+        <message id="autodb.unsavedNote.text">
+            <source>&amp;Save</source>
+            <translation>저장(&amp;s)</translation>
+        </message>
+        <message id="autodb.unsavedNote.text2">
+            <source>&amp;Discard</source>
+            <translation>버리기(&amp;d)</translation>
+        </message>
+        <message id="autodb.unsavedNote.text3">
+            <source>S&amp;tay</source>
+            <translation>계속(&amp;t)</translation>
+        </message>
+        <message id="autodb.unsavedNote.title">
+            <source>unsaved note</source>
+            <translation>저장되지 않은 노트</translation>
+        </message>
+        <message id="autodb.userForm.text">
+            <source>name</source>
+            <translation>이름</translation>
+        </message>
+        <message id="autodb.userForm.text2">
+            <source>role</source>
+            <translation>역할</translation>
+        </message>
+        <message id="autodb.userForm.text3">
+            <source>connection</source>
+            <translation>연결</translation>
+        </message>
+        <message id="autodb.userForm.text4">
+            <source>passphrase (min 8 characters)</source>
+            <translation>passphrase (8자 이상)</translation>
+        </message>
+        <message id="autodb.users.text">
+            <source>&amp;Add</source>
+            <translation>추가(&amp;a)</translation>
+        </message>
+        <message id="autodb.users.text2">
+            <source>&amp;Role</source>
+            <translation>역할(&amp;r)</translation>
+        </message>
+        <message id="autodb.users.text3">
+            <source>&amp;Passphrase</source>
+            <translation>passphrase(&amp;p)</translation>
+        </message>
+        <message id="autodb.users.text4">
+            <source>&amp;Toggle</source>
+            <translation>토글(&amp;t)</translation>
+        </message>
+        <message id="autodb.users.text5">
+            <source>Grant &amp;connection</source>
+            <translation>연결 부여(&amp;c)</translation>
+        </message>
+        <message id="autodb.users.text6">
+            <source>&amp;IPs</source>
+            <translation>IP(&amp;i)</translation>
+        </message>
+        <message id="autodb.users.text7">
+            <source>SS&amp;H keys</source>
+            <translation>SSH 키(&amp;h)</translation>
+        </message>
+        <message id="autodb.users.text8">
+            <source>Remo&amp;ve</source>
+            <translation>제거(&amp;v)</translation>
+        </message>
+        <message id="autodb.users.text9">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.users.title">
+            <source>users</source>
+            <translation>사용자</translation>
+        </message>
+        <message id="autodb.value.helpText">
+            <source>Tab to Copy · q/Esc close</source>
+            <translation>Tab으로 복사 · q/Esc 닫기</translation>
+        </message>
+        <message id="autodb.value.text">
+            <source>Cop&amp;y</source>
+            <translation>복사(&amp;y)</translation>
+        </message>
+        <message id="autodb.value.text2">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.widening.text">
+            <source>&amp;Add and mint</source>
+            <translation>추가하고 발급(&amp;a)</translation>
+        </message>
+        <message id="autodb.widening.text2">
+            <source>&amp;Cancel</source>
+            <translation>취소(&amp;c)</translation>
+        </message>
+        <message id="autodb.widening.title">
+            <source>allowlist widening</source>
+            <translation>허용 목록 확장</translation>
+        </message>
+        <message id="autodb.workspaceName.text">
+            <source>name</source>
+            <translation>이름</translation>
+        </message>
+        <message id="autodb.workspaces.text">
+            <source>&amp;New</source>
+            <translation>새로 만들기(&amp;n)</translation>
+        </message>
+        <message id="autodb.workspaces.text2">
+            <source>&amp;Rename</source>
+            <translation>이름 바꾸기(&amp;r)</translation>
+        </message>
+        <message id="autodb.workspaces.text3">
+            <source>&amp;Delete</source>
+            <translation>삭제(&amp;d)</translation>
+        </message>
+        <message id="autodb.workspaces.text4">
+            <source>&amp;Attach</source>
+            <translation>연결(&amp;a)</translation>
+        </message>
+        <message id="autodb.workspaces.text5">
+            <source>De&amp;tach</source>
+            <translation>해제(&amp;t)</translation>
+        </message>
+        <message id="autodb.workspaces.text6">
+            <source>Close(&amp;q)</source>
+            <translation>닫기(&amp;q)</translation>
+        </message>
+        <message id="autodb.workspaces.title">
+            <source>workspaces</source>
+            <translation>워크스페이스</translation>
+        </message>
+        <message id="autodb.workspaces.title2">
+            <source>workspaces</source>
+            <translation>워크스페이스</translation>
+        </message>
+        <message id="autodb.workspaces.title3">
+            <source>connections here</source>
+            <translation>워크스페이스</translation>
+        </message>
     </context>
 </TS>

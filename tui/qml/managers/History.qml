@@ -3,7 +3,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "history"
+    title: qsTrId("autodb.history.title")
     dim: false
     standardButtons: Dialog.Close
     helpText: App.historyStatus

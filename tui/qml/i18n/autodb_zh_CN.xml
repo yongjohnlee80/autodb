@@ -379,5 +379,677 @@
             <source>Português (Brasil) (&amp;6)</source>
             <translation>Português (Brasil) (&amp;6)</translation>
         </message>
+        <message id="autodb.about.helpText">
+            <source>q, Enter or Esc closes</source>
+            <translation>q、Enter 或 Esc 关闭</translation>
+        </message>
+        <message id="autodb.about.title">
+            <source>About autodb</source>
+            <translation>关于 autodb</translation>
+        </message>
+        <message id="autodb.addresses.placeholderText">
+            <source>IP or CIDR (blank = this address for personal list)</source>
+            <translation>IP 或 CIDR（留空则将此地址加入个人列表）</translation>
+        </message>
+        <message id="autodb.addresses.placeholderText2">
+            <source>label</source>
+            <translation>标签</translation>
+        </message>
+        <message id="autodb.addresses.text">
+            <source>&amp;Save</source>
+            <translation>保存(&amp;s)</translation>
+        </message>
+        <message id="autodb.addresses.text2">
+            <source>&amp;Add</source>
+            <translation>添加(&amp;a)</translation>
+        </message>
+        <message id="autodb.addresses.text3">
+            <source>&amp;Remove</source>
+            <translation>移除(&amp;r)</translation>
+        </message>
+        <message id="autodb.addresses.text4">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.audit.title">
+            <source>audit log</source>
+            <translation>审计日志</translation>
+        </message>
+        <message id="autodb.auditFilter.text">
+            <source>connection</source>
+            <translation>连接</translation>
+        </message>
+        <message id="autodb.auditFilter.text2">
+            <source>workspace</source>
+            <translation>工作区</translation>
+        </message>
+        <message id="autodb.auditFilter.text3">
+            <source>user</source>
+            <translation>用户</translation>
+        </message>
+        <message id="autodb.auditFilter.text4">
+            <source>actions (comma-separated, e.g. login_failed, connection_archived)</source>
+            <translation>操作（逗号分隔，如 login_failed, connection_archived）</translation>
+        </message>
+        <message id="autodb.auditFilter.text5">
+            <source>from (YYYY-MM-DD)</source>
+            <translation>起始（YYYY-MM-DD）</translation>
+        </message>
+        <message id="autodb.auditFilter.text6">
+            <source>to (YYYY-MM-DD, inclusive)</source>
+            <translation>截止（YYYY-MM-DD，含当日）</translation>
+        </message>
+        <message id="autodb.auditFilter.title">
+            <source>filter audit log</source>
+            <translation>筛选审计日志</translation>
+        </message>
+        <message id="autodb.bootstrap.text">
+            <source>root user (root if empty)</source>
+            <translation>root 用户（留空为 root）</translation>
+        </message>
+        <message id="autodb.bootstrap.text2">
+            <source>passphrase — at least 8 characters</source>
+            <translation>passphrase — 至少 8 个字符</translation>
+        </message>
+        <message id="autodb.bootstrap.text3">
+            <source>again</source>
+            <translation>再输一次</translation>
+        </message>
+        <message id="autodb.bootstrap.title">
+            <source>first run — create the root user</source>
+            <translation>首次运行 — 创建 root 用户</translation>
+        </message>
+        <message id="autodb.cacert.text">
+            <source>Cop&amp;y certificate</source>
+            <translation>复制证书(&amp;y)</translation>
+        </message>
+        <message id="autodb.cacert.text2">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.confirmQuit.text">
+            <source>&amp;Yes, quit</source>
+            <translation>是，退出(&amp;y)</translation>
+        </message>
+        <message id="autodb.confirmQuit.text2">
+            <source>&amp;No, stay</source>
+            <translation>否，留下(&amp;n)</translation>
+        </message>
+        <message id="autodb.confirmQuit.title">
+            <source>quit autodb?</source>
+            <translation>退出 autodb？</translation>
+        </message>
+        <message id="autodb.confirmRestart.text">
+            <source>&amp;No, stay</source>
+            <translation>否，留下(&amp;n)</translation>
+        </message>
+        <message id="autodb.confirmRestart.text2">
+            <source>&amp;Yes, restart</source>
+            <translation>是，重启(&amp;y)</translation>
+        </message>
+        <message id="autodb.confirmRestart.title">
+            <source>restart server</source>
+            <translation>重启服务器</translation>
+        </message>
+        <message id="autodb.connCard.helpText">
+            <source>Select and yank with v/y · Copy all button · q/Esc close</source>
+            <translation>v/y 选择并复制 · 全部复制按钮 · q/Esc 关闭</translation>
+        </message>
+        <message id="autodb.connCard.text">
+            <source>Cop&amp;y all</source>
+            <translation>全部复制(&amp;y)</translation>
+        </message>
+        <message id="autodb.connCard.text2">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.connPicker.title">
+            <source>connection for this query</source>
+            <translation>此查询的连接</translation>
+        </message>
+        <message id="autodb.connectionForm.placeholderText">
+            <source>postgres://user@host/db</source>
+            <translation>postgres://user@host/db</translation>
+        </message>
+        <message id="autodb.connectionForm.text">
+            <source>name</source>
+            <translation>名称</translation>
+        </message>
+        <message id="autodb.connectionForm.text2">
+            <source>engine</source>
+            <translation>引擎</translation>
+        </message>
+        <message id="autodb.connectionForm.text3">
+            <source>DSN (stored encrypted at rest)</source>
+            <translation>DSN（存储时加密）</translation>
+        </message>
+        <message id="autodb.connectionForm.text4">
+            <source>proxy — front door reachability</source>
+            <translation>proxy — 前门可达性</translation>
+        </message>
+        <message id="autodb.connectionForm.text5">
+            <source>capability profile — what SQL clients may send</source>
+            <translation>能力配置 — SQL 客户端可发送的内容</translation>
+        </message>
+        <message id="autodb.connections.text">
+            <source>&amp;Add</source>
+            <translation>添加(&amp;a)</translation>
+        </message>
+        <message id="autodb.connections.text2">
+            <source>&amp;Edit</source>
+            <translation>编辑(&amp;e)</translation>
+        </message>
+        <message id="autodb.connections.text3">
+            <source>&amp;Test</source>
+            <translation>测试(&amp;t)</translation>
+        </message>
+        <message id="autodb.connections.text4">
+            <source>&amp;Delete</source>
+            <translation>删除(&amp;d)</translation>
+        </message>
+        <message id="autodb.connections.text5">
+            <source>Attach to &amp;workspace</source>
+            <translation>附加到工作区(&amp;w)</translation>
+        </message>
+        <message id="autodb.connections.text6">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.connections.title">
+            <source>connections</source>
+            <translation>连接</translation>
+        </message>
+        <message id="autodb.help.helpText">
+            <source>q, Esc or Enter closes</source>
+            <translation>q、Esc 或 Enter 关闭</translation>
+        </message>
+        <message id="autodb.help.title">
+            <source>help</source>
+            <translation>帮助</translation>
+        </message>
+        <message id="autodb.hints.title">
+            <source>keys here</source>
+            <translation>此界面的按键</translation>
+        </message>
+        <message id="autodb.history.title">
+            <source>history</source>
+            <translation>历史</translation>
+        </message>
+        <message id="autodb.historyFilter.text">
+            <source>connection</source>
+            <translation>连接</translation>
+        </message>
+        <message id="autodb.historyFilter.text2">
+            <source>workspace</source>
+            <translation>工作区</translation>
+        </message>
+        <message id="autodb.historyFilter.text3">
+            <source>user</source>
+            <translation>用户</translation>
+        </message>
+        <message id="autodb.historyFilter.text4">
+            <source>status</source>
+            <translation>状态</translation>
+        </message>
+        <message id="autodb.historyFilter.text5">
+            <source>from (YYYY-MM-DD)</source>
+            <translation>起始（YYYY-MM-DD）</translation>
+        </message>
+        <message id="autodb.historyFilter.text6">
+            <source>to (YYYY-MM-DD, inclusive)</source>
+            <translation>截止（YYYY-MM-DD，含当日）</translation>
+        </message>
+        <message id="autodb.historyFilter.title">
+            <source>filter history</source>
+            <translation>筛选历史</translation>
+        </message>
+        <message id="autodb.inspect.helpText">
+            <source>j/k move · y copy · Enter open</source>
+            <translation>j/k 移动 · y 复制 · Enter 打开</translation>
+        </message>
+        <message id="autodb.inspect.title">
+            <source>row</source>
+            <translation>行</translation>
+        </message>
+        <message id="autodb.keyPassphrase.helpText">
+            <source>not your autodb passphrase: the one that protects this key file</source>
+            <translation>不是您的 autodb passphrase：是保护这个密钥文件的那个</translation>
+        </message>
+        <message id="autodb.keyPassphrase.title">
+            <source>the SSH key's passphrase</source>
+            <translation>SSH 密钥的 passphrase</translation>
+        </message>
+        <message id="autodb.keyslot.text">
+            <source>&amp;Enable</source>
+            <translation>启用(&amp;e)</translation>
+        </message>
+        <message id="autodb.keyslot.text2">
+            <source>&amp;Remove</source>
+            <translation>移除(&amp;r)</translation>
+        </message>
+        <message id="autodb.keyslot.text3">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.keyslot.title">
+            <source>service keyslot</source>
+            <translation>服务密钥槽</translation>
+        </message>
+        <message id="autodb.keyslotConfirm.text">
+            <source>&amp;Proceed</source>
+            <translation>继续(&amp;p)</translation>
+        </message>
+        <message id="autodb.keyslotConfirm.text2">
+            <source>&amp;Cancel</source>
+            <translation>取消(&amp;c)</translation>
+        </message>
+        <message id="autodb.leader.helpText">
+            <source>a key runs its command · Esc closes</source>
+            <translation>按键执行命令 · Esc 关闭</translation>
+        </message>
+        <message id="autodb.leader.title">
+            <source>SPC — commands</source>
+            <translation>SPC — 命令</translation>
+        </message>
+        <message id="autodb.login.text">
+            <source>user</source>
+            <translation>用户</translation>
+        </message>
+        <message id="autodb.login.text2">
+            <source>passphrase</source>
+            <translation>passphrase</translation>
+        </message>
+        <message id="autodb.login.title">
+            <source>sign in</source>
+            <translation>登录</translation>
+        </message>
+        <message id="autodb.main.title">
+            <source>explorer</source>
+            <translation>资源管理器</translation>
+        </message>
+        <message id="autodb.main.title2">
+            <source>results</source>
+            <translation>结果</translation>
+        </message>
+        <message id="autodb.noteConflict.text">
+            <source>&amp;Keep</source>
+            <translation>保留(&amp;k)</translation>
+        </message>
+        <message id="autodb.noteConflict.text2">
+            <source>&amp;Overwrite</source>
+            <translation>覆盖(&amp;o)</translation>
+        </message>
+        <message id="autodb.noteConflict.text3">
+            <source>&amp;Save as…</source>
+            <translation>另存为(&amp;s)…</translation>
+        </message>
+        <message id="autodb.noteConflict.title">
+            <source>note changed on disk</source>
+            <translation>笔记在磁盘上已更改</translation>
+        </message>
+        <message id="autodb.noteName.placeholderText">
+            <source>report.sql</source>
+            <translation>report.sql</translation>
+        </message>
+        <message id="autodb.noteName.text">
+            <source>workspace</source>
+            <translation>工作区</translation>
+        </message>
+        <message id="autodb.noteName.text2">
+            <source>name</source>
+            <translation>名称</translation>
+        </message>
+        <message id="autodb.noteOpen.placeholderText">
+            <source>filter by note or workspace</source>
+            <translation>按笔记或工作区筛选</translation>
+        </message>
+        <message id="autodb.noteOpen.title">
+            <source>open a note</source>
+            <translation>打开笔记</translation>
+        </message>
+        <message id="autodb.pressure.title">
+            <source>pressure</source>
+            <translation>负载</translation>
+        </message>
+        <message id="autodb.profile.text">
+            <source>current passphrase</source>
+            <translation>当前 passphrase</translation>
+        </message>
+        <message id="autodb.profile.text2">
+            <source>new passphrase</source>
+            <translation>新 passphrase</translation>
+        </message>
+        <message id="autodb.profile.text3">
+            <source>again</source>
+            <translation>再输一次</translation>
+        </message>
+        <message id="autodb.profile.text4">
+            <source>&amp;Update passphrase</source>
+            <translation>更改 passphrase(&amp;u)</translation>
+        </message>
+        <message id="autodb.profile.text5">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.profile.title">
+            <source>profile</source>
+            <translation>个人资料</translation>
+        </message>
+        <message id="autodb.remoteConnect.text">
+            <source>server</source>
+            <translation>服务器</translation>
+        </message>
+        <message id="autodb.remoteConnect.text2">
+            <source>autodb passphrase</source>
+            <translation>autodb passphrase</translation>
+        </message>
+        <message id="autodb.remoteConnect.text3">
+            <source>the passphrase again</source>
+            <translation>再输入一次 passphrase</translation>
+        </message>
+        <message id="autodb.remoteConnect.title">
+            <source>connect to a remote server</source>
+            <translation>连接到远程服务器</translation>
+        </message>
+        <message id="autodb.remoteManage.text">
+            <source>section</source>
+            <translation>区域</translation>
+        </message>
+        <message id="autodb.remoteManage.text10">
+            <source>Revoke &amp;device</source>
+            <translation>吊销设备(&amp;d)</translation>
+        </message>
+        <message id="autodb.remoteManage.text11">
+            <source>&amp;Unblock</source>
+            <translation>解除封锁(&amp;u)</translation>
+        </message>
+        <message id="autodb.remoteManage.text12">
+            <source>&amp;Next page</source>
+            <translation>下一页(&amp;n)</translation>
+        </message>
+        <message id="autodb.remoteManage.text13">
+            <source>&amp;Prev page</source>
+            <translation>上一页(&amp;p)</translation>
+        </message>
+        <message id="autodb.remoteManage.text14">
+            <source>Refre&amp;sh</source>
+            <translation>刷新(&amp;s)</translation>
+        </message>
+        <message id="autodb.remoteManage.text15">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.remoteManage.text2">
+            <source>kind</source>
+            <translation>种类</translation>
+        </message>
+        <message id="autodb.remoteManage.text3">
+            <source>&amp;Add</source>
+            <translation>添加(&amp;a)</translation>
+        </message>
+        <message id="autodb.remoteManage.text4">
+            <source>&amp;Edit</source>
+            <translation>编辑(&amp;e)</translation>
+        </message>
+        <message id="autodb.remoteManage.text5">
+            <source>Re&amp;move</source>
+            <translation>移除(&amp;m)</translation>
+        </message>
+        <message id="autodb.remoteManage.text6">
+            <source>Forget &amp;host key</source>
+            <translation>忘记主机密钥(&amp;h)</translation>
+        </message>
+        <message id="autodb.remoteManage.text7">
+            <source>Add &amp;key</source>
+            <translation>添加密钥(&amp;k)</translation>
+        </message>
+        <message id="autodb.remoteManage.text8">
+            <source>&amp;Label</source>
+            <translation>标签(&amp;l)</translation>
+        </message>
+        <message id="autodb.remoteManage.text9">
+            <source>Re&amp;voke key</source>
+            <translation>吊销密钥(&amp;v)</translation>
+        </message>
+        <message id="autodb.remoteManage.title">
+            <source>manage remote access</source>
+            <translation>管理远程访问</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text">
+            <source>name (how the menus show it)</source>
+            <translation>名称（菜单中的显示名）</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text2">
+            <source>host (name or address)</source>
+            <translation>主机（名称或地址）</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text3">
+            <source>port (blank for 7422)</source>
+            <translation>端口（留空为 7422）</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text4">
+            <source>your autodb user there</source>
+            <translation>您在那边的 autodb 用户</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text5">
+            <source>SSH key file (its .pub must be registered on your profile there)</source>
+            <translation>SSH 密钥文件（其 .pub 须在那边您的资料中注册）</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text6">
+            <source>signing</source>
+            <translation>签名</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text7">
+            <source>host key</source>
+            <translation>主机密钥</translation>
+        </message>
+        <message id="autodb.results.text">
+            <source>no results — SPC r runs the query</source>
+            <translation>暂无结果 — SPC r 运行查询</translation>
+        </message>
+        <message id="autodb.search.placeholderText">
+            <source>find text</source>
+            <translation>查找文本</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text">
+            <source>public key (the one line of your .pub file)</source>
+            <translation>公钥（.pub 文件的那一行）</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text2">
+            <source>label (which computer or key it is)</source>
+            <translation>标签（哪台电脑或哪个密钥）</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text3">
+            <source>your autodb passphrase (a wrong one signs you out)</source>
+            <translation>您的 autodb passphrase（输错会登出）</translation>
+        </message>
+        <message id="autodb.startChoice.helpText">
+            <source>Enter starts there · Esc starts connected to nothing</source>
+            <translation>Enter 从那里启动 · Esc 不连接直接启动</translation>
+        </message>
+        <message id="autodb.startChoice.title">
+            <source>start on</source>
+            <translation>启动于</translation>
+        </message>
+        <message id="autodb.tokenForm.placeholderText">
+            <source>no</source>
+            <translation>no</translation>
+        </message>
+        <message id="autodb.tokenForm.text">
+            <source>name</source>
+            <translation>名称</translation>
+        </message>
+        <message id="autodb.tokenForm.text2">
+            <source>expires in days (1–365, blank for default)</source>
+            <translation>有效天数（1–365，留空为默认）</translation>
+        </message>
+        <message id="autodb.tokenForm.text3">
+            <source>IPs (comma-separated CIDRs, blank inherits your allowlist)</source>
+            <translation>IP（逗号分隔的 CIDR，留空继承您的白名单）</translation>
+        </message>
+        <message id="autodb.tokenForm.text4">
+            <source>connection</source>
+            <translation>连接</translation>
+        </message>
+        <message id="autodb.tokenForm.text5">
+            <source>allow cleartext debug traffic? (yes/no)</source>
+            <translation>允许明文调试流量吗？（yes/no）</translation>
+        </message>
+        <message id="autodb.tokenForm.title">
+            <source>create access token</source>
+            <translation>创建访问令牌</translation>
+        </message>
+        <message id="autodb.tokens.text">
+            <source>&amp;Create</source>
+            <translation>创建(&amp;c)</translation>
+        </message>
+        <message id="autodb.tokens.text2">
+            <source>&amp;Revoke</source>
+            <translation>吊销(&amp;r)</translation>
+        </message>
+        <message id="autodb.tokens.text3">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.tokens.title">
+            <source>my access tokens</source>
+            <translation>我的访问令牌</translation>
+        </message>
+        <message id="autodb.unsavedNote.text">
+            <source>&amp;Save</source>
+            <translation>保存(&amp;s)</translation>
+        </message>
+        <message id="autodb.unsavedNote.text2">
+            <source>&amp;Discard</source>
+            <translation>丢弃(&amp;d)</translation>
+        </message>
+        <message id="autodb.unsavedNote.text3">
+            <source>S&amp;tay</source>
+            <translation>留下(&amp;t)</translation>
+        </message>
+        <message id="autodb.unsavedNote.title">
+            <source>unsaved note</source>
+            <translation>未保存的笔记</translation>
+        </message>
+        <message id="autodb.userForm.text">
+            <source>name</source>
+            <translation>名称</translation>
+        </message>
+        <message id="autodb.userForm.text2">
+            <source>role</source>
+            <translation>角色</translation>
+        </message>
+        <message id="autodb.userForm.text3">
+            <source>connection</source>
+            <translation>连接</translation>
+        </message>
+        <message id="autodb.userForm.text4">
+            <source>passphrase (min 8 characters)</source>
+            <translation>passphrase（至少 8 个字符）</translation>
+        </message>
+        <message id="autodb.users.text">
+            <source>&amp;Add</source>
+            <translation>添加(&amp;a)</translation>
+        </message>
+        <message id="autodb.users.text2">
+            <source>&amp;Role</source>
+            <translation>角色(&amp;r)</translation>
+        </message>
+        <message id="autodb.users.text3">
+            <source>&amp;Passphrase</source>
+            <translation>passphrase(&amp;p)</translation>
+        </message>
+        <message id="autodb.users.text4">
+            <source>&amp;Toggle</source>
+            <translation>切换(&amp;t)</translation>
+        </message>
+        <message id="autodb.users.text5">
+            <source>Grant &amp;connection</source>
+            <translation>授予连接(&amp;c)</translation>
+        </message>
+        <message id="autodb.users.text6">
+            <source>&amp;IPs</source>
+            <translation>IP(&amp;i)</translation>
+        </message>
+        <message id="autodb.users.text7">
+            <source>SS&amp;H keys</source>
+            <translation>SSH 密钥(&amp;h)</translation>
+        </message>
+        <message id="autodb.users.text8">
+            <source>Remo&amp;ve</source>
+            <translation>移除(&amp;v)</translation>
+        </message>
+        <message id="autodb.users.text9">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.users.title">
+            <source>users</source>
+            <translation>用户</translation>
+        </message>
+        <message id="autodb.value.helpText">
+            <source>Tab to Copy · q/Esc close</source>
+            <translation>Tab 复制 · q/Esc 关闭</translation>
+        </message>
+        <message id="autodb.value.text">
+            <source>Cop&amp;y</source>
+            <translation>复制(&amp;y)</translation>
+        </message>
+        <message id="autodb.value.text2">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.widening.text">
+            <source>&amp;Add and mint</source>
+            <translation>添加并签发(&amp;a)</translation>
+        </message>
+        <message id="autodb.widening.text2">
+            <source>&amp;Cancel</source>
+            <translation>取消(&amp;c)</translation>
+        </message>
+        <message id="autodb.widening.title">
+            <source>allowlist widening</source>
+            <translation>白名单扩展</translation>
+        </message>
+        <message id="autodb.workspaceName.text">
+            <source>name</source>
+            <translation>名称</translation>
+        </message>
+        <message id="autodb.workspaces.text">
+            <source>&amp;New</source>
+            <translation>新建(&amp;n)</translation>
+        </message>
+        <message id="autodb.workspaces.text2">
+            <source>&amp;Rename</source>
+            <translation>重命名(&amp;r)</translation>
+        </message>
+        <message id="autodb.workspaces.text3">
+            <source>&amp;Delete</source>
+            <translation>删除(&amp;d)</translation>
+        </message>
+        <message id="autodb.workspaces.text4">
+            <source>&amp;Attach</source>
+            <translation>附加(&amp;a)</translation>
+        </message>
+        <message id="autodb.workspaces.text5">
+            <source>De&amp;tach</source>
+            <translation>解除(&amp;t)</translation>
+        </message>
+        <message id="autodb.workspaces.text6">
+            <source>Close(&amp;q)</source>
+            <translation>关闭(&amp;q)</translation>
+        </message>
+        <message id="autodb.workspaces.title">
+            <source>workspaces</source>
+            <translation>工作区</translation>
+        </message>
+        <message id="autodb.workspaces.title2">
+            <source>workspaces</source>
+            <translation>工作区</translation>
+        </message>
+        <message id="autodb.workspaces.title3">
+            <source>connections here</source>
+            <translation>工作区</translation>
+        </message>
     </context>
 </TS>

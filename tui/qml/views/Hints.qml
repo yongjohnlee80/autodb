@@ -7,6 +7,6 @@ Dialog {
     id: hints
     closeOnQ: true
     dim: false
-    title: "keys here"
+    title: qsTrId("autodb.hints.title")
     Text { wrapMode: Tui.WordWrap; text: App.hints }
 }
