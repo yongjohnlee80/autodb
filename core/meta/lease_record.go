@@ -10,8 +10,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/yongjohnlee80/autodb/core/engine"
 )
 
 // THE LEASE RECORD: WHO HOLDS THIS STORE, AND WHERE IT LISTENS.
@@ -72,7 +70,7 @@ type LeaseHolder struct {
 // the store it is asking about. ErrNoStore when the file does not exist;
 // ErrNoLeaseRecord for a store with no file identity (postgres, :memory:).
 func StoreID(mcfg StoreConfig) (id, resolvedPath string, err error) {
-	if mcfg.StoreEngine() != engine.SQLite {
+	if !fileLeased(mcfg) {
 		return "", "", ErrNoLeaseRecord
 	}
 	resolved, err := resolveStoreFile(mcfg.StorePath())
@@ -204,7 +202,7 @@ func writeLeaseInfo(path string, h LeaseHolder) error {
 // record with no "role" was written before the record carried one; it reads as
 // a "serve" holder with no address, which nothing can attach to.
 func ReadLeaseHolder(mcfg StoreConfig) (LeaseHolder, error) {
-	if mcfg.StoreEngine() != engine.SQLite {
+	if !fileLeased(mcfg) {
 		return LeaseHolder{}, ErrNoLeaseRecord
 	}
 	resolved, err := resolveStoreFile(mcfg.StorePath())
