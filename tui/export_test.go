@@ -13,7 +13,9 @@ import (
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
+	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/widget"
+	"github.com/yongjohnlee80/golib/parse/qml"
 )
 
 // export_test.go opens the QML host to the external tests: the same options
@@ -205,6 +207,14 @@ func (h *Host) SourceText(name string) string {
 	got := make(chan string, 1)
 	h.p.Post(func() {
 		v, _ := h.p.Tree().Source(name)
+		// A catalog message's source resolves through the App's language, as
+		// the widget showing it does — the tests read what the screen says.
+		if v.Kind == qml.SpecValueObject {
+			if m, ok := v.Obj.(tuicore.Message); ok {
+				got <- h.p.App().Translate(m)
+				return
+			}
+		}
 		got <- v.Raw
 	})
 	return <-got

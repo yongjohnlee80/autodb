@@ -1051,5 +1051,229 @@
             <source>connections here</source>
             <translation>워크스페이스</translation>
         </message>
+        <message id="autodb.auth.status.status">
+            <source>not signed in — SPC L signs in</source>
+            <translation>로그인되지 않았습니다 — SPC L로 로그인합니다</translation>
+        </message>
+        <message id="autodb.auth.status.status2">
+            <source>signing in…</source>
+            <translation>로그인 중…</translation>
+        </message>
+        <message id="autodb.auth.status.status3">
+            <source>signed out by the server — sign in again</source>
+            <translation>서버가 로그아웃시켰습니다 — 다시 로그인하세요</translation>
+        </message>
+        <message id="autodb.auth.status.status4">
+            <source>session ended — reload the page to sign in again</source>
+            <translation>세션이 끝났습니다 — 페이지를 다시 불러와 로그인하세요</translation>
+        </message>
+        <message id="autodb.ca.status.status">
+            <source>reading front-door CA certificate…</source>
+            <translation>프론트도어 CA 인증서를 읽는 중…</translation>
+        </message>
+        <message id="autodb.ca.status.status2">
+            <source>CA certificate: the daemon returned an empty document</source>
+            <translation>CA 인증서: 데몬이 빈 문서를 반환했습니다</translation>
+        </message>
+        <message id="autodb.conncard.status.status">
+            <source>whole card copied to clipboard and editor register</source>
+            <translation>카드 전체가 클립보드와 편집기 레지스터에 복사되었습니다</translation>
+        </message>
+        <message id="autodb.conncard.status.status2">
+            <source>clipboard unavailable — whole card copied to editor register</source>
+            <translation>클립보드를 사용할 수 없습니다 — 카드 전체가 편집기 레지스터에 복사되었습니다</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status">
+            <source>FRONT DOOR IS SERVING WITHOUT TLS — access tokens cross the network in cleartext. SPC ! dismisses this.</source>
+            <translation>프론트도어가 TLS 없이 서비스 중입니다 — 액세스 토큰이 네트워크를 평문으로 건넙니다. SPC !로 이 경고를 닫습니다.</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status2">
+            <source>no cleartext warning to dismiss</source>
+            <translation>닫을 평문 경고가 없습니다</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status3">
+            <source>cleartext warning dismissed for this session</source>
+            <translation>이 세션에서는 평문 경고를 닫았습니다</translation>
+        </message>
+        <message id="autodb.note_open.status.status">
+            <source>notes appear once you sign in</source>
+            <translation>로그인하면 노트가 나타납니다</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status">
+            <source>notes appear once you sign in</source>
+            <translation>로그인하면 노트가 나타납니다</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status2">
+            <source>notes appear once you sign in</source>
+            <translation>로그인하면 노트가 나타납니다</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status3">
+            <source>nothing to save — the query buffer is empty</source>
+            <translation>저장할 것이 없습니다 — 쿼리 버퍼가 비어 있습니다</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status4">
+            <source>notes appear once you sign in</source>
+            <translation>로그인하면 노트가 나타납니다</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status5">
+            <source>no workspace to keep a note in</source>
+            <translation>노트를 둘 워크스페이스가 없습니다</translation>
+        </message>
+        <message id="autodb.picker.status.status">
+            <source>loading connections…</source>
+            <translation>연결을 불러오는 중…</translation>
+        </message>
+        <message id="autodb.picker.status.status2">
+            <source>no connections yet — an administrator adds one</source>
+            <translation>아직 연결이 없습니다 — 관리자가 추가합니다</translation>
+        </message>
+        <message id="autodb.picker.status.status3">
+            <source></source>
+            <translation></translation>
+        </message>
+        <message id="autodb.profile.status.status">
+            <source>profile: sign in first</source>
+            <translation>프로필: 먼저 로그인하세요</translation>
+        </message>
+        <message id="autodb.profile.status.status2">
+            <source>passphrase changed</source>
+            <translation>passphrase가 변경되었습니다</translation>
+        </message>
+        <message id="autodb.remote_manage.status.status">
+            <source>nothing to manage here</source>
+            <translation>여기에 관리할 것이 없습니다</translation>
+        </message>
+        <message id="autodb.remote_menu.status.status">
+            <source>no remote servers yet — add one under Remote › Manage…</source>
+            <translation>아직 원격 서버가 없습니다 — Remote › Manage…에서 추가하세요</translation>
+        </message>
+        <message id="autodb.remote_start.status.around">
+            <source>connect to %1…</source>
+            <translation>%1에 연결 중…</translation>
+        </message>
+        <message id="autodb.remote_start.status.around2">
+            <source>remote profiles: %1 — starting on this computer</source>
+            <translation>원격 프로필: %1 — 이 컴퓨터에서 시작합니다</translation>
+        </message>
+        <message id="autodb.restart.status.status">
+            <source>restart is unavailable from this frontend</source>
+            <translation>이 프론트엔드에서는 재시작할 수 없습니다</translation>
+        </message>
+        <message id="autodb.restart.status.status2">
+            <source>asking the server to restart…</source>
+            <translation>서버에 재시작을 요청하는 중…</translation>
+        </message>
+        <message id="autodb.restart.status.status3">
+            <source>server stopping — reconnecting through the configured spawner…</source>
+            <translation>서버가 중지 중입니다 — 설정된 스포너를 통해 다시 연결합니다…</translation>
+        </message>
+        <message id="autodb.results.status.around">
+            <source>running on %1…</source>
+            <translation>%1에서 실행 중…</translation>
+        </message>
+        <message id="autodb.results.status.status">
+            <source>no selection — SPC r runs the buffer</source>
+            <translation>선택 영역이 없습니다 — SPC r이 버퍼를 실행합니다</translation>
+        </message>
+        <message id="autodb.results.status.status2">
+            <source>a query is already running</source>
+            <translation>쿼리가 이미 실행 중입니다</translation>
+        </message>
+        <message id="autodb.results.status.status3">
+            <source>sign in first — SPC L</source>
+            <translation>먼저 로그인하세요 — SPC L</translation>
+        </message>
+        <message id="autodb.results.status.status4">
+            <source>no connection — Enter on one in the explorer</source>
+            <translation>연결이 없습니다 — 탐색기에서 Enter를 누르세요</translation>
+        </message>
+        <message id="autodb.results.status.status5">
+            <source>the query buffer is empty</source>
+            <translation>쿼리 버퍼가 비어 있습니다</translation>
+        </message>
+        <message id="autodb.results.status.status6">
+            <source>the query was superseded by a reconnect — run it again</source>
+            <translation>재연결로 쿼리가 대체되었습니다 — 다시 실행하세요</translation>
+        </message>
+        <message id="autodb.results.status.status7">
+            <source>no rows to show as JSON</source>
+            <translation>JSON으로 표시할 행이 없습니다</translation>
+        </message>
+        <message id="autodb.results.status.status8">
+            <source>value copied to the editor register</source>
+            <translation>값이 편집기 레지스터에 복사되었습니다</translation>
+        </message>
+        <message id="autodb.results.status.status9">
+            <source>value copied to the editor register</source>
+            <translation>값이 편집기 레지스터에 복사되었습니다</translation>
+        </message>
+        <message id="autodb.search.status.status">
+            <source>nothing to search in the results</source>
+            <translation>결과에서 찾을 것이 없습니다</translation>
+        </message>
+        <message id="autodb.search.status.status2">
+            <source>focus the explorer, query or results pane before searching</source>
+            <translation>찾기 전에 탐색기, 쿼리 또는 결과 창에 포커스를 두세요</translation>
+        </message>
+        <message id="autodb.search.status.status3">
+            <source>search target changed — press / again</source>
+            <translation>찾기 대상이 바뀌었습니다 — /를 다시 누르세요</translation>
+        </message>
+        <message id="autodb.search.status.status4">
+            <source>no current search — / starts one</source>
+            <translation>현재 찾기가 없습니다 — /로 시작합니다</translation>
+        </message>
+        <message id="autodb.search.status.status5">
+            <source>search document changed — / starts again</source>
+            <translation>찾기 문서가 바뀌었습니다 — /로 다시 시작합니다</translation>
+        </message>
+        <message id="autodb.search.status.status6">
+            <source>focus the original search pane or press / for a new one</source>
+            <translation>원래 찾기 창에 포커스를 두거나 /로 새 찾기를 시작하세요</translation>
+        </message>
+        <message id="autodb.session.status.around">
+            <source>connecting to %1…</source>
+            <translation>%1에 연결 중…</translation>
+        </message>
+        <message id="autodb.session.status.around2">
+            <source>disconnected: %1 — reconnecting…</source>
+            <translation>연결 끊김: %1 — 다시 연결하는 중…</translation>
+        </message>
+        <message id="autodb.session.status.status">
+            <source>attaching…</source>
+            <translation>붙이는 중…</translation>
+        </message>
+        <message id="autodb.session.status.status2">
+            <source>connection changed — reconnect</source>
+            <translation>연결이 바뀌었습니다 — 다시 연결하세요</translation>
+        </message>
+        <message id="autodb.session.status.status3">
+            <source>server instance changed — login required</source>
+            <translation>서버 인스턴스가 바뀌었습니다 — 로그인이 필요합니다</translation>
+        </message>
+        <message id="autodb.session.status.status4">
+            <source>disconnected from the remote server</source>
+            <translation>원격 서버에서 연결을 끊었습니다</translation>
+        </message>
+        <message id="autodb.session.status.status5">
+            <source>disconnected — SPC x reconnects</source>
+            <translation>연결이 끊겼습니다 — SPC x가 다시 연결합니다</translation>
+        </message>
+        <message id="autodb.theme.status.status">
+            <source>main.qml imports no theme to switch</source>
+            <translation>main.qml이 바꿀 테마 import를 갖고 있지 않습니다</translation>
+        </message>
+        <message id="autodb.tokens.status.status">
+            <source>a token minted during sign-in change was revoked</source>
+            <translation>로그인 변경 중에 발급된 토큰이 폐기되었습니다</translation>
+        </message>
+        <message id="autodb.tokens.status.status2">
+            <source>a token may remain active after sign-in change; sign back in as its owner to revoke it</source>
+            <translation>로그인 변경 후에도 토큰이 활성 상태일 수 있습니다; 소유자로 다시 로그인해 폐기하세요</translation>
+        </message>
+        <message id="autodb.users.status.around">
+            <source>role changed to %1; permissions refreshed</source>
+            <translation>역할이 %1(으)로 바뀌었습니다; 권한이 새로 고쳐졌습니다</translation>
+        </message>
     </context>
 </TS>

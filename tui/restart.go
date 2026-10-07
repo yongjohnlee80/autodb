@@ -7,7 +7,7 @@ import "context"
 // would race that watcher and create two connection transitions.
 func (h *Host) restartConfirmed() error {
 	if !h.canRestartDaemon() || !h.session.Connected() || !h.session.IsAdmin() {
-		h.setStatus("restart is unavailable from this frontend")
+		h.statusMessage("autodb.restart.status.status")
 		return nil
 	}
 	b := h.session.Bind()
@@ -15,7 +15,7 @@ func (h *Host) restartConfirmed() error {
 	if call == nil {
 		call = func(ctx context.Context, b *Bound) error { return b.ShutdownServer(ctx) }
 	}
-	h.setStatus("asking the server to restart…")
+	h.statusMessage("autodb.restart.status.status2")
 	do(h, func(ctx context.Context) error { return call(ctx, b) }, func(err error) {
 		if b.Gen() != h.session.Gen() || b.IdentityEpoch() != h.session.IdentityEpoch() {
 			return
@@ -24,7 +24,7 @@ func (h *Host) restartConfirmed() error {
 			h.setStatus("restart refused: " + WireErrorMessage(err))
 			return
 		}
-		h.setStatus("server stopping — reconnecting through the configured spawner…")
+		h.statusMessage("autodb.restart.status.status3")
 	})
 	return nil
 }

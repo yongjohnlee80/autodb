@@ -1051,5 +1051,229 @@
             <source>connections here</source>
             <translation>ワークスペース</translation>
         </message>
+        <message id="autodb.auth.status.status">
+            <source>not signed in — SPC L signs in</source>
+            <translation>サインインしていません — SPC Lでサインインします</translation>
+        </message>
+        <message id="autodb.auth.status.status2">
+            <source>signing in…</source>
+            <translation>サインイン中…</translation>
+        </message>
+        <message id="autodb.auth.status.status3">
+            <source>signed out by the server — sign in again</source>
+            <translation>サーバによりサインアウトされました — 再サインインしてください</translation>
+        </message>
+        <message id="autodb.auth.status.status4">
+            <source>session ended — reload the page to sign in again</source>
+            <translation>セッションが終了しました — ページを再読み込みしてサインインしてください</translation>
+        </message>
+        <message id="autodb.ca.status.status">
+            <source>reading front-door CA certificate…</source>
+            <translation>フロントドアCA証明書を読み込み中…</translation>
+        </message>
+        <message id="autodb.ca.status.status2">
+            <source>CA certificate: the daemon returned an empty document</source>
+            <translation>CA証明書: デーモンが空の文書を返しました</translation>
+        </message>
+        <message id="autodb.conncard.status.status">
+            <source>whole card copied to clipboard and editor register</source>
+            <translation>カード全体をクリップボードとレジスタにコピーしました</translation>
+        </message>
+        <message id="autodb.conncard.status.status2">
+            <source>clipboard unavailable — whole card copied to editor register</source>
+            <translation>クリップボードが利用できません — カード全体をレジスタにコピーしました</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status">
+            <source>FRONT DOOR IS SERVING WITHOUT TLS — access tokens cross the network in cleartext. SPC ! dismisses this.</source>
+            <translation>フロントドアがTLSなしでサービス中 — アクセストークンが平文でネットワークを渡ります。SPC !で閉じます。</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status2">
+            <source>no cleartext warning to dismiss</source>
+            <translation>閉じる平文の警告はありません</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status3">
+            <source>cleartext warning dismissed for this session</source>
+            <translation>このセッションでは平文の警告を閉じました</translation>
+        </message>
+        <message id="autodb.note_open.status.status">
+            <source>notes appear once you sign in</source>
+            <translation>サインインするとノートが表示されます</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status">
+            <source>notes appear once you sign in</source>
+            <translation>サインインするとノートが表示されます</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status2">
+            <source>notes appear once you sign in</source>
+            <translation>サインインするとノートが表示されます</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status3">
+            <source>nothing to save — the query buffer is empty</source>
+            <translation>保存するものがありません — クエリバッファが空です</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status4">
+            <source>notes appear once you sign in</source>
+            <translation>サインインするとノートが表示されます</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status5">
+            <source>no workspace to keep a note in</source>
+            <translation>ノートを置くワークスペースがありません</translation>
+        </message>
+        <message id="autodb.picker.status.status">
+            <source>loading connections…</source>
+            <translation>接続を読み込み中…</translation>
+        </message>
+        <message id="autodb.picker.status.status2">
+            <source>no connections yet — an administrator adds one</source>
+            <translation>接続がまだありません — 管理者が追加します</translation>
+        </message>
+        <message id="autodb.picker.status.status3">
+            <source></source>
+            <translation></translation>
+        </message>
+        <message id="autodb.profile.status.status">
+            <source>profile: sign in first</source>
+            <translation>プロフィール: 先にサインインしてください</translation>
+        </message>
+        <message id="autodb.profile.status.status2">
+            <source>passphrase changed</source>
+            <translation>passphraseを変更しました</translation>
+        </message>
+        <message id="autodb.remote_manage.status.status">
+            <source>nothing to manage here</source>
+            <translation>ここに管理するものはありません</translation>
+        </message>
+        <message id="autodb.remote_menu.status.status">
+            <source>no remote servers yet — add one under Remote › Manage…</source>
+            <translation>リモートサーバがまだありません — Remote › Manage…で追加してください</translation>
+        </message>
+        <message id="autodb.remote_start.status.around">
+            <source>connect to %1…</source>
+            <translation>%1に接続中…</translation>
+        </message>
+        <message id="autodb.remote_start.status.around2">
+            <source>remote profiles: %1 — starting on this computer</source>
+            <translation>リモートプロファイル: %1 — このコンピュータで開始します</translation>
+        </message>
+        <message id="autodb.restart.status.status">
+            <source>restart is unavailable from this frontend</source>
+            <translation>このフロントエンドからは再起動できません</translation>
+        </message>
+        <message id="autodb.restart.status.status2">
+            <source>asking the server to restart…</source>
+            <translation>サーバに再起動を要求中…</translation>
+        </message>
+        <message id="autodb.restart.status.status3">
+            <source>server stopping — reconnecting through the configured spawner…</source>
+            <translation>サーバ停止中 — 設定されたスポーナー経由で再接続中…</translation>
+        </message>
+        <message id="autodb.results.status.around">
+            <source>running on %1…</source>
+            <translation>%1で実行中…</translation>
+        </message>
+        <message id="autodb.results.status.status">
+            <source>no selection — SPC r runs the buffer</source>
+            <translation>選択範囲がありません — SPC rがバッファを実行します</translation>
+        </message>
+        <message id="autodb.results.status.status2">
+            <source>a query is already running</source>
+            <translation>クエリはすでに実行中です</translation>
+        </message>
+        <message id="autodb.results.status.status3">
+            <source>sign in first — SPC L</source>
+            <translation>先にサインインしてください — SPC L</translation>
+        </message>
+        <message id="autodb.results.status.status4">
+            <source>no connection — Enter on one in the explorer</source>
+            <translation>接続がありません — エクスプローラでEnterを押してください</translation>
+        </message>
+        <message id="autodb.results.status.status5">
+            <source>the query buffer is empty</source>
+            <translation>クエリバッファが空です</translation>
+        </message>
+        <message id="autodb.results.status.status6">
+            <source>the query was superseded by a reconnect — run it again</source>
+            <translation>再接続によりクエリが置き換えられました — 再実行してください</translation>
+        </message>
+        <message id="autodb.results.status.status7">
+            <source>no rows to show as JSON</source>
+            <translation>JSONで表示する行がありません</translation>
+        </message>
+        <message id="autodb.results.status.status8">
+            <source>value copied to the editor register</source>
+            <translation>値をレジスタにコピーしました</translation>
+        </message>
+        <message id="autodb.results.status.status9">
+            <source>value copied to the editor register</source>
+            <translation>値をレジスタにコピーしました</translation>
+        </message>
+        <message id="autodb.search.status.status">
+            <source>nothing to search in the results</source>
+            <translation>結果に検索するものがありません</translation>
+        </message>
+        <message id="autodb.search.status.status2">
+            <source>focus the explorer, query or results pane before searching</source>
+            <translation>検索の前にエクスプローラ、クエリまたは結果ペインにフォーカスを</translation>
+        </message>
+        <message id="autodb.search.status.status3">
+            <source>search target changed — press / again</source>
+            <translation>検索対象が変わりました — /をもう一度</translation>
+        </message>
+        <message id="autodb.search.status.status4">
+            <source>no current search — / starts one</source>
+            <translation>現在の検索はありません — /で開始します</translation>
+        </message>
+        <message id="autodb.search.status.status5">
+            <source>search document changed — / starts again</source>
+            <translation>検索対象の文書が変わりました — /で再開します</translation>
+        </message>
+        <message id="autodb.search.status.status6">
+            <source>focus the original search pane or press / for a new one</source>
+            <translation>元の検索ペインにフォーカスを戻すか、/で新規検索を</translation>
+        </message>
+        <message id="autodb.session.status.around">
+            <source>connecting to %1…</source>
+            <translation>%1に接続中…</translation>
+        </message>
+        <message id="autodb.session.status.around2">
+            <source>disconnected: %1 — reconnecting…</source>
+            <translation>切断: %1 — 再接続中…</translation>
+        </message>
+        <message id="autodb.session.status.status">
+            <source>attaching…</source>
+            <translation>アタッチ中…</translation>
+        </message>
+        <message id="autodb.session.status.status2">
+            <source>connection changed — reconnect</source>
+            <translation>接続が変わりました — 再接続してください</translation>
+        </message>
+        <message id="autodb.session.status.status3">
+            <source>server instance changed — login required</source>
+            <translation>サーバインスタンスが変わりました — サインインが必要です</translation>
+        </message>
+        <message id="autodb.session.status.status4">
+            <source>disconnected from the remote server</source>
+            <translation>リモートサーバから切断されました</translation>
+        </message>
+        <message id="autodb.session.status.status5">
+            <source>disconnected — SPC x reconnects</source>
+            <translation>切断しました — SPC xで再接続します</translation>
+        </message>
+        <message id="autodb.theme.status.status">
+            <source>main.qml imports no theme to switch</source>
+            <translation>main.qmlに切り替えるテーマのimportがありません</translation>
+        </message>
+        <message id="autodb.tokens.status.status">
+            <source>a token minted during sign-in change was revoked</source>
+            <translation>サインイン変更中に発行されたトークンを失効しました</translation>
+        </message>
+        <message id="autodb.tokens.status.status2">
+            <source>a token may remain active after sign-in change; sign back in as its owner to revoke it</source>
+            <translation>サインイン変更後もトークンが有効の可能性があります; 所有者として再サインインして失効してください</translation>
+        </message>
+        <message id="autodb.users.status.around">
+            <source>role changed to %1; permissions refreshed</source>
+            <translation>役割を%1に変更しました; 権限を更新しました</translation>
+        </message>
     </context>
 </TS>

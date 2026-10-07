@@ -56,7 +56,7 @@ func listNoteChoices(store notesBackend, names map[int64]string) ([]noteChoice, 
 func (h *Host) openNotePicker() {
 	store := h.notes
 	if store == nil {
-		h.setStatus("notes appear once you sign in")
+		h.statusMessage("autodb.note_open.status.status")
 		return
 	}
 	p := h.noteOpen

@@ -47,7 +47,7 @@ func (h *Host) startAt() {
 func (h *Host) startRemote(id string) {
 	h.awaitingStart = true
 	h.setAuth("disconnected")
-	h.setStatus("connect to " + id + "…")
+	h.statusMessageAround("autodb.remote_start.status.around", id)
 	h.refreshIdentity()
 	h.openRemoteConnectAt(id)
 }
@@ -61,7 +61,7 @@ func (h *Host) askStart() {
 		profiles, err = remoteclient.LoadProfiles(path)
 	}
 	if err != nil {
-		h.setStatus("remote profiles: " + err.Error() + " — starting on this computer")
+		h.statusMessageAround("autodb.remote_start.status.around2", err.Error())
 		h.connect()
 		return
 	}

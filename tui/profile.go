@@ -11,7 +11,7 @@ import (
 func (h *Host) openProfile() {
 	b := h.session.Bind()
 	if b.User().Name == "" {
-		h.setStatus("profile: sign in first")
+		h.statusMessage("autodb.profile.status.status")
 		return
 	}
 	h.profileBound = b
@@ -61,7 +61,7 @@ func (h *Host) changePassphrase(oldPass, next, again string) error {
 				h.set("App.profileError", "change failed: "+WireErrorMessage(err))
 				return
 			}
-			h.setStatus("passphrase changed")
+			h.statusMessage("autodb.profile.status.status2")
 			h.profileBound = nil
 			if err := h.p.Call("profile", "close"); err != nil {
 				h.keep(err)

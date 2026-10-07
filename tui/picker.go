@@ -35,7 +35,7 @@ func (h *Host) openConnPicker() {
 		scoped bool
 		err    error
 	}
-	h.setStatus("loading connections…")
+	h.statusMessage("autodb.picker.status.status")
 	do(h, func(ctx context.Context) listed {
 		var conns []ConnInfo
 		var err error
@@ -63,10 +63,10 @@ func (h *Host) openConnPicker() {
 			h.setStatus("connections: " + WireErrorMessage(l.err))
 			return
 		case len(l.conns) == 0:
-			h.setStatus("no connections yet — an administrator adds one")
+			h.statusMessage("autodb.picker.status.status2")
 			return
 		}
-		h.setStatus("")
+		h.statusMessage("autodb.picker.status.status3")
 		// The workspace in use tags the rows only when they are its own: a
 		// connection from the fallback list is tagged with the workspace it
 		// lives in, as it is when no workspace is in use.

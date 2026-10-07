@@ -1051,5 +1051,229 @@
             <source>connections here</source>
             <translation>工作区</translation>
         </message>
+        <message id="autodb.auth.status.status">
+            <source>not signed in — SPC L signs in</source>
+            <translation>尚未登录 — SPC L 登录</translation>
+        </message>
+        <message id="autodb.auth.status.status2">
+            <source>signing in…</source>
+            <translation>登录中…</translation>
+        </message>
+        <message id="autodb.auth.status.status3">
+            <source>signed out by the server — sign in again</source>
+            <translation>被服务器登出 — 请重新登录</translation>
+        </message>
+        <message id="autodb.auth.status.status4">
+            <source>session ended — reload the page to sign in again</source>
+            <translation>会话已结束 — 刷新页面后重新登录</translation>
+        </message>
+        <message id="autodb.ca.status.status">
+            <source>reading front-door CA certificate…</source>
+            <translation>正在读取前门 CA 证书…</translation>
+        </message>
+        <message id="autodb.ca.status.status2">
+            <source>CA certificate: the daemon returned an empty document</source>
+            <translation>CA 证书：守护进程返回了空文档</translation>
+        </message>
+        <message id="autodb.conncard.status.status">
+            <source>whole card copied to clipboard and editor register</source>
+            <translation>整张卡片已复制到剪贴板和编辑器寄存器</translation>
+        </message>
+        <message id="autodb.conncard.status.status2">
+            <source>clipboard unavailable — whole card copied to editor register</source>
+            <translation>剪贴板不可用 — 整张卡片已复制到编辑器寄存器</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status">
+            <source>FRONT DOOR IS SERVING WITHOUT TLS — access tokens cross the network in cleartext. SPC ! dismisses this.</source>
+            <translation>前门正在无 TLS 服务 — 访问令牌以明文穿过网络。SPC ! 关闭此警告。</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status2">
+            <source>no cleartext warning to dismiss</source>
+            <translation>没有可关闭的明文警告</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status3">
+            <source>cleartext warning dismissed for this session</source>
+            <translation>本会话已关闭明文警告</translation>
+        </message>
+        <message id="autodb.note_open.status.status">
+            <source>notes appear once you sign in</source>
+            <translation>登录后即可看到笔记</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status">
+            <source>notes appear once you sign in</source>
+            <translation>登录后即可看到笔记</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status2">
+            <source>notes appear once you sign in</source>
+            <translation>登录后即可看到笔记</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status3">
+            <source>nothing to save — the query buffer is empty</source>
+            <translation>没有可保存的内容 — 查询缓冲为空</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status4">
+            <source>notes appear once you sign in</source>
+            <translation>登录后即可看到笔记</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status5">
+            <source>no workspace to keep a note in</source>
+            <translation>没有存放笔记的工作区</translation>
+        </message>
+        <message id="autodb.picker.status.status">
+            <source>loading connections…</source>
+            <translation>正在加载连接…</translation>
+        </message>
+        <message id="autodb.picker.status.status2">
+            <source>no connections yet — an administrator adds one</source>
+            <translation>还没有连接 — 由管理员添加</translation>
+        </message>
+        <message id="autodb.picker.status.status3">
+            <source></source>
+            <translation></translation>
+        </message>
+        <message id="autodb.profile.status.status">
+            <source>profile: sign in first</source>
+            <translation>个人资料：请先登录</translation>
+        </message>
+        <message id="autodb.profile.status.status2">
+            <source>passphrase changed</source>
+            <translation>passphrase 已更改</translation>
+        </message>
+        <message id="autodb.remote_manage.status.status">
+            <source>nothing to manage here</source>
+            <translation>这里没有可管理的内容</translation>
+        </message>
+        <message id="autodb.remote_menu.status.status">
+            <source>no remote servers yet — add one under Remote › Manage…</source>
+            <translation>还没有远程服务器 — 在 Remote › Manage… 中添加</translation>
+        </message>
+        <message id="autodb.remote_start.status.around">
+            <source>connect to %1…</source>
+            <translation>正在连接 %1…</translation>
+        </message>
+        <message id="autodb.remote_start.status.around2">
+            <source>remote profiles: %1 — starting on this computer</source>
+            <translation>远程配置：%1 — 在本机启动</translation>
+        </message>
+        <message id="autodb.restart.status.status">
+            <source>restart is unavailable from this frontend</source>
+            <translation>此前端无法重启</translation>
+        </message>
+        <message id="autodb.restart.status.status2">
+            <source>asking the server to restart…</source>
+            <translation>正在请求服务器重启…</translation>
+        </message>
+        <message id="autodb.restart.status.status3">
+            <source>server stopping — reconnecting through the configured spawner…</source>
+            <translation>服务器正在停止 — 通过配置的启动器重连…</translation>
+        </message>
+        <message id="autodb.results.status.around">
+            <source>running on %1…</source>
+            <translation>正在 %1 上运行…</translation>
+        </message>
+        <message id="autodb.results.status.status">
+            <source>no selection — SPC r runs the buffer</source>
+            <translation>没有选中内容 — SPC r 运行缓冲</translation>
+        </message>
+        <message id="autodb.results.status.status2">
+            <source>a query is already running</source>
+            <translation>已有查询在运行</translation>
+        </message>
+        <message id="autodb.results.status.status3">
+            <source>sign in first — SPC L</source>
+            <translation>请先登录 — SPC L</translation>
+        </message>
+        <message id="autodb.results.status.status4">
+            <source>no connection — Enter on one in the explorer</source>
+            <translation>没有连接 — 在资源管理器中按 Enter</translation>
+        </message>
+        <message id="autodb.results.status.status5">
+            <source>the query buffer is empty</source>
+            <translation>查询缓冲为空</translation>
+        </message>
+        <message id="autodb.results.status.status6">
+            <source>the query was superseded by a reconnect — run it again</source>
+            <translation>重连使查询被取代 — 请重新运行</translation>
+        </message>
+        <message id="autodb.results.status.status7">
+            <source>no rows to show as JSON</source>
+            <translation>没有可显示为 JSON 的行</translation>
+        </message>
+        <message id="autodb.results.status.status8">
+            <source>value copied to the editor register</source>
+            <translation>值已复制到编辑器寄存器</translation>
+        </message>
+        <message id="autodb.results.status.status9">
+            <source>value copied to the editor register</source>
+            <translation>值已复制到编辑器寄存器</translation>
+        </message>
+        <message id="autodb.search.status.status">
+            <source>nothing to search in the results</source>
+            <translation>结果中没有可搜索的内容</translation>
+        </message>
+        <message id="autodb.search.status.status2">
+            <source>focus the explorer, query or results pane before searching</source>
+            <translation>搜索前请先聚焦资源管理器、查询或结果窗格</translation>
+        </message>
+        <message id="autodb.search.status.status3">
+            <source>search target changed — press / again</source>
+            <translation>搜索目标已改变 — 再按一次 /</translation>
+        </message>
+        <message id="autodb.search.status.status4">
+            <source>no current search — / starts one</source>
+            <translation>当前没有搜索 — 按 / 开始</translation>
+        </message>
+        <message id="autodb.search.status.status5">
+            <source>search document changed — / starts again</source>
+            <translation>搜索文档已改变 — 按 / 重新开始</translation>
+        </message>
+        <message id="autodb.search.status.status6">
+            <source>focus the original search pane or press / for a new one</source>
+            <translation>聚焦原搜索窗格或按 / 开始新搜索</translation>
+        </message>
+        <message id="autodb.session.status.around">
+            <source>connecting to %1…</source>
+            <translation>正在连接 %1…</translation>
+        </message>
+        <message id="autodb.session.status.around2">
+            <source>disconnected: %1 — reconnecting…</source>
+            <translation>已断开：%1 — 正在重连…</translation>
+        </message>
+        <message id="autodb.session.status.status">
+            <source>attaching…</source>
+            <translation>正在附加…</translation>
+        </message>
+        <message id="autodb.session.status.status2">
+            <source>connection changed — reconnect</source>
+            <translation>连接已改变 — 请重连</translation>
+        </message>
+        <message id="autodb.session.status.status3">
+            <source>server instance changed — login required</source>
+            <translation>服务器实例已改变 — 需要登录</translation>
+        </message>
+        <message id="autodb.session.status.status4">
+            <source>disconnected from the remote server</source>
+            <translation>已从远程服务器断开</translation>
+        </message>
+        <message id="autodb.session.status.status5">
+            <source>disconnected — SPC x reconnects</source>
+            <translation>已断开 — SPC x 重连</translation>
+        </message>
+        <message id="autodb.theme.status.status">
+            <source>main.qml imports no theme to switch</source>
+            <translation>main.qml 没有可切换的主题 import</translation>
+        </message>
+        <message id="autodb.tokens.status.status">
+            <source>a token minted during sign-in change was revoked</source>
+            <translation>登录变更期间签发的令牌已吊销</translation>
+        </message>
+        <message id="autodb.tokens.status.status2">
+            <source>a token may remain active after sign-in change; sign back in as its owner to revoke it</source>
+            <translation>登录变更后令牌可能仍然有效；请以所有者身份重新登录来吊销</translation>
+        </message>
+        <message id="autodb.users.status.around">
+            <source>role changed to %1; permissions refreshed</source>
+            <translation>角色已改为 %1；权限已刷新</translation>
+        </message>
     </context>
 </TS>

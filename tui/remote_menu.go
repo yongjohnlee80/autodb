@@ -84,7 +84,7 @@ func (h *Host) openRemoteConnectAt(id string) {
 			return
 		}
 		if len(profiles) == 0 {
-			h.setStatus("no remote servers yet — add one under Remote › Manage…")
+			h.statusMessage("autodb.remote_menu.status.status")
 			return
 		}
 		h.profiles = profiles

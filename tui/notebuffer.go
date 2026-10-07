@@ -119,7 +119,7 @@ func (h *Host) openNote(wsID int64, name string) {
 func (h *Host) loadNote(wsID int64, name string) {
 	store := h.notes
 	if store == nil {
-		h.setStatus("notes appear once you sign in")
+		h.statusMessage("autodb.notebuffer.status.status")
 		return
 	}
 	h.buf.gen++
@@ -165,13 +165,13 @@ func (h *Host) newNote() {
 func (h *Host) saveNote(after ...func()) {
 	store := h.notes
 	if store == nil {
-		h.setStatus("notes appear once you sign in")
+		h.statusMessage("autodb.notebuffer.status.status2")
 		return
 	}
 	body := h.editor.Value()
 	if h.buf.note == nil {
 		if strings.TrimSpace(body) == "" {
-			h.setStatus("nothing to save — the query buffer is empty")
+			h.statusMessage("autodb.notebuffer.status.status3")
 			return
 		}
 		h.askNoteName("saveas", "save the query as", body)
@@ -258,11 +258,11 @@ func (h *Host) conflictAnswered(answer string) error {
 // under a new name.
 func (h *Host) askNoteName(mode, title, body string) {
 	if h.notes == nil {
-		h.setStatus("notes appear once you sign in")
+		h.statusMessage("autodb.notebuffer.status.status4")
 		return
 	}
 	if h.workspaces.Len() == 0 {
-		h.setStatus("no workspace to keep a note in")
+		h.statusMessage("autodb.notebuffer.status.status5")
 		return
 	}
 	h.buf.naming, h.buf.body = mode, body
