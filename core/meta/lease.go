@@ -118,6 +118,11 @@ func AcquireLease(ctx context.Context, s *Store, mcfg StoreConfig, h LeaseHolder
 	return nil, fmt.Errorf("meta: cannot lease an unknown engine %q", s.engine)
 }
 
+// fileLeased reports whether the store is leased by a file lock beside it —
+// and so keeps the lease record and has a file identity (lease_record.go) —
+// rather than by a lock inside a database server, which has neither.
+func fileLeased(mcfg StoreConfig) bool { return mcfg.StoreEngine() == engine.SQLite }
+
 // Release drops the lease. It is safe to call twice.
 func (l *InstanceLease) Release() error {
 	l.mu.Lock()
