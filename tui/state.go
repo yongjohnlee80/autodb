@@ -182,8 +182,18 @@ func backendText(s *Session) string {
 	case addr == "":
 		return "Backend [disconnected]"
 	case pid == 0:
-		return "Backend " + addr // an older server does not report its pid
+		return "Backend " + addr + foundNote(s) // an older server does not report its pid
 	default:
-		return fmt.Sprintf("Backend [PID:%d] %s", pid, addr)
+		return fmt.Sprintf("Backend [PID:%d] %s", pid, addr) + foundNote(s)
 	}
+}
+
+// foundNote says when the backend was found through the store's lease record
+// rather than at the configured address: the operator's config names one
+// socket and the status line shows another, and this is why.
+func foundNote(s *Session) string {
+	if s.FoundVia() != "lease" {
+		return ""
+	}
+	return " (found through the store's lease; configured " + s.addr + ")"
 }
