@@ -27,7 +27,7 @@ func parseCatalog(t *testing.T, fsys fs.FS, name string) map[string]string {
 	}
 	var ts struct {
 		Messages []struct {
-			ID           string `xml:"id,attr"`
+			ID          string `xml:"id,attr"`
 			Translation string `xml:"translation"`
 		} `xml:"context>message"`
 	}

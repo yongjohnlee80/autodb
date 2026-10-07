@@ -467,7 +467,7 @@ func (c *CatalogOf[H]) Nodes() []MenuNode { return append([]MenuNode(nil), c.nod
 
 // HelpRow is one line of the help screen's command section.
 type HelpRow struct {
-	Key   rune
+	Key rune
 	// ID is the command whose row this is: the help screen names the label's
 	// catalog message by it (autodb.leader.<id>).
 	ID    string

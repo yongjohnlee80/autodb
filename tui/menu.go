@@ -6,8 +6,8 @@ import (
 	"strings"
 	"unicode"
 
-	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui"
+	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 )
@@ -99,7 +99,7 @@ func (h *Host) projectBar() {
 			// hotkey used to be baked in here.
 			row := tuidecl.Row{
 				"key": string(cmd.ID), "kind": rowItem,
-				"label": tui.Msg(mp.msgID(cmd.ID)),
+				"label":   tui.Msg(mp.msgID(cmd.ID)),
 				"enabled": off.State == OfferOffered, "id": string(cmd.ID), "group": "", "checked": false,
 			}
 			if group, checked, ok := h.radioOf(cmd.ID); ok {

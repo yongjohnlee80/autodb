@@ -57,11 +57,11 @@ func TestCheckFlags(t *testing.T) {
 		"serve + print-endpoint":  {serve: true, printEndpoint: true, port: goodPort},
 		"ui + print-endpoint":     {ui: true, printEndpoint: true, port: goodPort},
 		// --gui is a mode beside --ui: the two would race for the screen.
-		"ui + gui":              {ui: true, gui: true, port: goodPort},
-		"gui + serve":           {gui: true, serve: true, port: goodPort},
-		"gui + web-ui":          {gui: true, webUI: true, port: goodPort},
-		"gui + print-endpoint":  {gui: true, printEndpoint: true, port: goodPort},
-		"three at once":         {serve: true, ui: true, webUI: true, port: goodPort},
+		"ui + gui":             {ui: true, gui: true, port: goodPort},
+		"gui + serve":          {gui: true, serve: true, port: goodPort},
+		"gui + web-ui":         {gui: true, webUI: true, port: goodPort},
+		"gui + print-endpoint": {gui: true, printEndpoint: true, port: goodPort},
+		"three at once":        {serve: true, ui: true, webUI: true, port: goodPort},
 		// --migrate-to-postgres is FIRST in the dispatch switch, so an
 		// uncounted pairing would migrate and never serve — the same class of
 		// bug as the web-ui/print-endpoint pairing this table was built for.
