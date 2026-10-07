@@ -32,7 +32,7 @@ name on it.
 
 ## Features
 
-**One binary, three frontends:** a terminal UI (`autodb --ui`), the same UI in a browser (`autodb --web-ui`), and a Neovim plugin
+**One binary, four frontends:** a terminal UI (`autodb --ui`), the same UI in a native window (`autodb --gui`), the same UI in a browser (`autodb --web-ui`), and a Neovim plugin
 
 **A production front door:** `psql`, DataGrip, your app or an AI agent connects to autodb with an ordinary PostgreSQL DSN; production only has to trust one host
 
@@ -156,6 +156,7 @@ Then:
 
 ```sh
 autodb --serve                # just the server (the UI starts one for you if needed)
+autodb --gui                  # the same UI in a native window (golib/gui; macOS, Linux)
 autodb --web-ui --port=7010   # the same UI in a browser, on 127.0.0.1
 autodb --version
 ```

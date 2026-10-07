@@ -9,14 +9,19 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # The shipped binaries carry --gui (golib/gui's native window), which
+    # needs cgo and each platform's window libraries — so Linux installs the
+    # Wayland/X11 headers and macOS builds on a mac runner. A cgo-less build
+    # still exists (`make build`): the gui flag then refuses with the reason
+    # instead of the binary failing to build.
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
-          - { goos: linux,  goarch: amd64 }
-          - { goos: linux,  goarch: arm64 }
-          - { goos: darwin, goarch: amd64 }
-          - { goos: darwin, goarch: arm64 }
+          - { goos: linux,  goarch: amd64, runner: ubuntu-latest }
+          - { goos: linux,  goarch: arm64, runner: ubuntu-24.04-arm }
+          - { goos: darwin, goarch: amd64, runner: macos-13 }
+          - { goos: darwin, goarch: arm64, runner: macos-14 }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,18 +31,25 @@ jobs:
           go-version: "1.25.x"
       - name: build
         env:
-          CGO_ENABLED: "0"
+          CGO_ENABLED: "1"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
+          if [ "$GOOS" = "linux" ]; then
+            # golib/gui's window libraries (Wayland/X11), per golib/gui/README.
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev \
+              libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev
+          fi
           VERSION="${GITHUB_REF_NAME}"
           COMMIT="$(git rev-parse --short HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           OUT="autodb-${VERSION}-${GOOS}-${GOARCH}"
           # -s -w: no symbol table or DWARF (about a third of the binary);
           # stack traces keep their function names. -trimpath keeps the
-          # runner's paths out of the artefact.
-          go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" -o "${OUT}" ./cmd/autodb
+          # runner's paths out of the artefact. -tags gui: the native window.
+          go build -tags gui -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" -o "${OUT}" ./cmd/autodb
           tar czf "${OUT}.tar.gz" "${OUT}"
           sha256sum "${OUT}.tar.gz" > "${OUT}.tar.gz.sha256"
       - uses: actions/upload-artifact@v4

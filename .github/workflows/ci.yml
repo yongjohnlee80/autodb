@@ -71,6 +71,17 @@ jobs:
         run: |
           CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/autodb
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/autodb
+      - name: gui-tagged test compile smoke
+        # --gui's build-tagged half (cmd/autodb/gui.go) links golib/gui, so it
+        # needs cgo and the window headers; vet still compiles both halves,
+        # which is what this job can and does check on a runner without a
+        # display.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev
+          go vet -tags gui ./cmd/...
 
   # The neovim smoke suite. A separate job because it needs neovim and the
   # auto-core.nvim plugin, and because it was in NEITHER the Makefile nor CI —
