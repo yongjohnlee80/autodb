@@ -29,7 +29,7 @@ type startup struct {
 // start begins the program's session: dial, or join the gateway's.
 func (h *Host) start() {
 	if !h.ownsConnection() {
-		h.setStatus("attaching…")
+		h.statusMessage("autodb.session.status.status")
 		gen := h.session.Gen()
 		do(h, func(context.Context) startup { return startup{gen: gen} }, h.startupDone)
 		return
@@ -44,7 +44,7 @@ func (h *Host) connect() {
 	}
 	h.connecting = true
 	h.setAuth("connecting")
-	h.setStatus("connecting to " + h.session.addr + "…")
+	h.statusMessageAround("autodb.session.status.around", h.session.addr)
 	sess := h.session
 	do(h, func(ctx context.Context) startup {
 		changed, err := sess.Connect(ctx)
@@ -76,13 +76,13 @@ func (h *Host) startupDone(s startup) {
 		// answer was in flight: it must not watch, prompt, or claim a
 		// connection that no longer exists.
 		h.setAuth("disconnected")
-		h.setStatus("connection changed — reconnect")
+		h.statusMessage("autodb.session.status.status2")
 		return
 	}
 	h.connectedOnce = true
 	h.watch(s.gen)
 	if s.instanceChanged {
-		h.setStatus("server instance changed — login required")
+		h.statusMessage("autodb.session.status.status3")
 	} else {
 		h.setStatus(fmt.Sprintf("connected — autodb %s", h.session.ServerVersion()))
 	}
@@ -138,10 +138,10 @@ func (h *Host) watch(gen uint64) {
 			// Ended by the revocation of this computer's own device, which
 			// goes back to local once answered: redialing would present the
 			// revoked device.
-			h.setStatus("disconnected from the remote server")
+			h.statusMessage("autodb.session.status.status4")
 			return
 		}
-		h.setStatus("disconnected: " + cause + " — reconnecting…")
+		h.statusMessageAround("autodb.session.status.around2", cause)
 		h.connect()
 	})
 }
@@ -154,7 +154,7 @@ func (h *Host) toggleConnection() {
 		h.session.Disconnect()
 		h.clearFrontDoorWarning()
 		h.setAuth("disconnected")
-		h.setStatus("disconnected — SPC x reconnects")
+		h.statusMessage("autodb.session.status.status5")
 		h.refreshIdentity()
 		return
 	}

@@ -65,7 +65,7 @@ func (h *Host) bootstrap(user, pass, again string) error {
 // signInDeclined is App.signInDeclined: a sign-in dialog cancelled. The
 // program stays connected and signed out; SPC L asks again.
 func (h *Host) signInDeclined() error {
-	h.setStatus("not signed in — SPC L signs in")
+	h.statusMessage("autodb.auth.status.status")
 	return nil
 }
 
@@ -79,7 +79,7 @@ func (h *Host) authTask(what string, fn func(context.Context, *Bound) error) {
 	h.authSeq++
 	attempt := h.authSeq
 	h.authAttempt = attempt
-	h.setStatus("signing in…")
+	h.statusMessage("autodb.auth.status.status2")
 	bound := h.session.Bind() // the generation is pinned when the answer is given
 	do(h, func(ctx context.Context) authDone {
 		return authDone{attempt: attempt, gen: bound.Gen(), what: what, err: fn(ctx, bound)}
@@ -218,7 +218,7 @@ func (h *Host) checkAuth() {
 		h.connect()
 		return
 	}
-	h.setStatus("signed out by the server — sign in again")
+	h.statusMessage("autodb.auth.status.status3")
 	h.setAuth("login")
 	h.refreshIdentity()
 	h.promptSignIn()
@@ -228,6 +228,6 @@ func (h *Host) checkAuth() {
 // the shared session out on its last reference, and the user signs in again
 // there. quit ends this browser session only.
 func (h *Host) endForLostAuth() {
-	h.setStatus("session ended — reload the page to sign in again")
+	h.statusMessage("autodb.auth.status.status4")
 	h.quit()
 }

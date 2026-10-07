@@ -159,7 +159,7 @@ func (h *Host) manageSections() []manageSection {
 func (h *Host) openManage(section string) {
 	h.sections = h.manageSections()
 	if len(h.sections) == 0 {
-		h.setStatus("nothing to manage here")
+		h.statusMessage("autodb.remote_manage.status.status")
 		return
 	}
 	rows := make([]tuidecl.Row, len(h.sections))

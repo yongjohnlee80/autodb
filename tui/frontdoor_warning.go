@@ -40,7 +40,7 @@ func (h *Host) setFrontDoorCleartext(on bool) {
 	}
 	h.cleartextFD, h.cleartextSeen = on, false
 	if on {
-		h.setStatus("FRONT DOOR IS SERVING WITHOUT TLS — access tokens cross the network in cleartext. SPC ! dismisses this.")
+		h.statusMessage("autodb.frontdoor_warning.status.status")
 	}
 	h.refreshIdentity()
 }
@@ -62,10 +62,10 @@ func (h *Host) backendWithWarning() string {
 
 func (h *Host) dismissCleartextWarning() {
 	if !h.cleartextFD {
-		h.setStatus("no cleartext warning to dismiss")
+		h.statusMessage("autodb.frontdoor_warning.status.status2")
 		return
 	}
 	h.cleartextSeen = true
 	h.refreshIdentity() // the warning and its leader entry vanish together
-	h.setStatus("cleartext warning dismissed for this session")
+	h.statusMessage("autodb.frontdoor_warning.status.status3")
 }

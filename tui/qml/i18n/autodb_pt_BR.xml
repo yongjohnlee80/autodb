@@ -1051,5 +1051,229 @@
             <source>connections here</source>
             <translation>espaços de trabalho</translation>
         </message>
+        <message id="autodb.auth.status.status">
+            <source>not signed in — SPC L signs in</source>
+            <translation>sem sessão — SPC L entra</translation>
+        </message>
+        <message id="autodb.auth.status.status2">
+            <source>signing in…</source>
+            <translation>entrando…</translation>
+        </message>
+        <message id="autodb.auth.status.status3">
+            <source>signed out by the server — sign in again</source>
+            <translation>o servidor encerrou sua sessão — entre de novo</translation>
+        </message>
+        <message id="autodb.auth.status.status4">
+            <source>session ended — reload the page to sign in again</source>
+            <translation>sessão encerrada — recarregue a página para entrar</translation>
+        </message>
+        <message id="autodb.ca.status.status">
+            <source>reading front-door CA certificate…</source>
+            <translation>lendo o certificado CA do front-door…</translation>
+        </message>
+        <message id="autodb.ca.status.status2">
+            <source>CA certificate: the daemon returned an empty document</source>
+            <translation>certificado CA: o daemon devolveu um documento vazio</translation>
+        </message>
+        <message id="autodb.conncard.status.status">
+            <source>whole card copied to clipboard and editor register</source>
+            <translation>cartão inteiro copiado para a área de transferência e o registrador</translation>
+        </message>
+        <message id="autodb.conncard.status.status2">
+            <source>clipboard unavailable — whole card copied to editor register</source>
+            <translation>área de transferência indisponível — cartão inteiro copiado para o registrador</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status">
+            <source>FRONT DOOR IS SERVING WITHOUT TLS — access tokens cross the network in cleartext. SPC ! dismisses this.</source>
+            <translation>O FRONT DOOR ATENDE SEM TLS — tokens cruzam a rede em texto claro. SPC ! fecha este aviso.</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status2">
+            <source>no cleartext warning to dismiss</source>
+            <translation>não há aviso de texto claro para fechar</translation>
+        </message>
+        <message id="autodb.frontdoor_warning.status.status3">
+            <source>cleartext warning dismissed for this session</source>
+            <translation>aviso de texto claro fechado nesta sessão</translation>
+        </message>
+        <message id="autodb.note_open.status.status">
+            <source>notes appear once you sign in</source>
+            <translation>as notas aparecem quando você entra</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status">
+            <source>notes appear once you sign in</source>
+            <translation>as notas aparecem quando você entra</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status2">
+            <source>notes appear once you sign in</source>
+            <translation>as notas aparecem quando você entra</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status3">
+            <source>nothing to save — the query buffer is empty</source>
+            <translation>nada para salvar — o buffer de consulta está vazio</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status4">
+            <source>notes appear once you sign in</source>
+            <translation>as notas aparecem quando você entra</translation>
+        </message>
+        <message id="autodb.notebuffer.status.status5">
+            <source>no workspace to keep a note in</source>
+            <translation>não há espaço de trabalho para guardar uma nota</translation>
+        </message>
+        <message id="autodb.picker.status.status">
+            <source>loading connections…</source>
+            <translation>carregando conexões…</translation>
+        </message>
+        <message id="autodb.picker.status.status2">
+            <source>no connections yet — an administrator adds one</source>
+            <translation>ainda não há conexões — um administrador adiciona uma</translation>
+        </message>
+        <message id="autodb.picker.status.status3">
+            <source></source>
+            <translation></translation>
+        </message>
+        <message id="autodb.profile.status.status">
+            <source>profile: sign in first</source>
+            <translation>perfil: entre primeiro</translation>
+        </message>
+        <message id="autodb.profile.status.status2">
+            <source>passphrase changed</source>
+            <translation>passphrase alterada</translation>
+        </message>
+        <message id="autodb.remote_manage.status.status">
+            <source>nothing to manage here</source>
+            <translation>nada para gerenciar aqui</translation>
+        </message>
+        <message id="autodb.remote_menu.status.status">
+            <source>no remote servers yet — add one under Remote › Manage…</source>
+            <translation>ainda não há servidores remotos — adicione um em Remote › Manage…</translation>
+        </message>
+        <message id="autodb.remote_start.status.around">
+            <source>connect to %1…</source>
+            <translation>conectando a %1…</translation>
+        </message>
+        <message id="autodb.remote_start.status.around2">
+            <source>remote profiles: %1 — starting on this computer</source>
+            <translation>perfis remotos: %1 — começando neste computador</translation>
+        </message>
+        <message id="autodb.restart.status.status">
+            <source>restart is unavailable from this frontend</source>
+            <translation>reiniciar não está disponível neste frontend</translation>
+        </message>
+        <message id="autodb.restart.status.status2">
+            <source>asking the server to restart…</source>
+            <translation>pedindo ao servidor para reiniciar…</translation>
+        </message>
+        <message id="autodb.restart.status.status3">
+            <source>server stopping — reconnecting through the configured spawner…</source>
+            <translation>servidor parando — reconectando pelo spawner configurado…</translation>
+        </message>
+        <message id="autodb.results.status.around">
+            <source>running on %1…</source>
+            <translation>executando em %1…</translation>
+        </message>
+        <message id="autodb.results.status.status">
+            <source>no selection — SPC r runs the buffer</source>
+            <translation>sem seleção — SPC r executa o buffer</translation>
+        </message>
+        <message id="autodb.results.status.status2">
+            <source>a query is already running</source>
+            <translation>já há uma consulta em execução</translation>
+        </message>
+        <message id="autodb.results.status.status3">
+            <source>sign in first — SPC L</source>
+            <translation>entre primeiro — SPC L</translation>
+        </message>
+        <message id="autodb.results.status.status4">
+            <source>no connection — Enter on one in the explorer</source>
+            <translation>sem conexão — Enter em uma do explorador</translation>
+        </message>
+        <message id="autodb.results.status.status5">
+            <source>the query buffer is empty</source>
+            <translation>o buffer de consulta está vazio</translation>
+        </message>
+        <message id="autodb.results.status.status6">
+            <source>the query was superseded by a reconnect — run it again</source>
+            <translation>a consulta foi substituída por uma reconexão — execute de novo</translation>
+        </message>
+        <message id="autodb.results.status.status7">
+            <source>no rows to show as JSON</source>
+            <translation>não há linhas para mostrar como JSON</translation>
+        </message>
+        <message id="autodb.results.status.status8">
+            <source>value copied to the editor register</source>
+            <translation>valor copiado para o registrador do editor</translation>
+        </message>
+        <message id="autodb.results.status.status9">
+            <source>value copied to the editor register</source>
+            <translation>valor copiado para o registrador do editor</translation>
+        </message>
+        <message id="autodb.search.status.status">
+            <source>nothing to search in the results</source>
+            <translation>nada para buscar nos resultados</translation>
+        </message>
+        <message id="autodb.search.status.status2">
+            <source>focus the explorer, query or results pane before searching</source>
+            <translation>focue o explorador, a consulta ou os resultados antes de buscar</translation>
+        </message>
+        <message id="autodb.search.status.status3">
+            <source>search target changed — press / again</source>
+            <translation>alvo da busca mudou — pressione / de novo</translation>
+        </message>
+        <message id="autodb.search.status.status4">
+            <source>no current search — / starts one</source>
+            <translation>não há busca atual — / inicia uma</translation>
+        </message>
+        <message id="autodb.search.status.status5">
+            <source>search document changed — / starts again</source>
+            <translation>documento buscado mudou — / recomeça</translation>
+        </message>
+        <message id="autodb.search.status.status6">
+            <source>focus the original search pane or press / for a new one</source>
+            <translation>focue o painel original ou pressione / para uma nova</translation>
+        </message>
+        <message id="autodb.session.status.around">
+            <source>connecting to %1…</source>
+            <translation>conectando a %1…</translation>
+        </message>
+        <message id="autodb.session.status.around2">
+            <source>disconnected: %1 — reconnecting…</source>
+            <translation>desconectado: %1 — reconectando…</translation>
+        </message>
+        <message id="autodb.session.status.status">
+            <source>attaching…</source>
+            <translation>anexando…</translation>
+        </message>
+        <message id="autodb.session.status.status2">
+            <source>connection changed — reconnect</source>
+            <translation>conexão mudou — reconecte</translation>
+        </message>
+        <message id="autodb.session.status.status3">
+            <source>server instance changed — login required</source>
+            <translation>instância do servidor mudou — entrada necessária</translation>
+        </message>
+        <message id="autodb.session.status.status4">
+            <source>disconnected from the remote server</source>
+            <translation>desconectado do servidor remoto</translation>
+        </message>
+        <message id="autodb.session.status.status5">
+            <source>disconnected — SPC x reconnects</source>
+            <translation>desconectado — SPC x reconecta</translation>
+        </message>
+        <message id="autodb.theme.status.status">
+            <source>main.qml imports no theme to switch</source>
+            <translation>main.qml não importa um tema para trocar</translation>
+        </message>
+        <message id="autodb.tokens.status.status">
+            <source>a token minted during sign-in change was revoked</source>
+            <translation>um token emitido durante troca de sessão foi revogado</translation>
+        </message>
+        <message id="autodb.tokens.status.status2">
+            <source>a token may remain active after sign-in change; sign back in as its owner to revoke it</source>
+            <translation>um token pode seguir ativo após troca de sessão; entre de novo como dono para revogá-lo</translation>
+        </message>
+        <message id="autodb.users.status.around">
+            <source>role changed to %1; permissions refreshed</source>
+            <translation>papel mudou para %1; permissões atualizadas</translation>
+        </message>
     </context>
 </TS>

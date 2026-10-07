@@ -28,9 +28,9 @@ func (h *Host) copyCard() error {
 	}
 	h.editor.SetRegister(h.cardText, false)
 	if h.p.App().CopyToClipboard(h.cardText) {
-		h.setStatus("whole card copied to clipboard and editor register")
+		h.statusMessage("autodb.conncard.status.status")
 	} else {
-		h.setStatus("clipboard unavailable — whole card copied to editor register")
+		h.statusMessage("autodb.conncard.status.status2")
 	}
 	return nil
 }

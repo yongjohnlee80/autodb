@@ -16,7 +16,7 @@ func (h *Host) openCA() {
 	if read == nil {
 		read = func(ctx context.Context, b *Bound) (CAPem, error) { return b.FrontDoorCAPem(ctx) }
 	}
-	h.setStatus("reading front-door CA certificate…")
+	h.statusMessage("autodb.ca.status.status")
 	type result struct {
 		ca  CAPem
 		err error
@@ -37,7 +37,7 @@ func (h *Host) openCA() {
 			h.set("App.caText", "This install has no private CA: clients verify against their own system roots.\nThere is no private certificate file to distribute.")
 		} else {
 			if strings.TrimSpace(v.ca.PEM) == "" {
-				h.setStatus("CA certificate: the daemon returned an empty document")
+				h.statusMessage("autodb.ca.status.status2")
 				return
 			}
 			h.caText = v.ca.PEM

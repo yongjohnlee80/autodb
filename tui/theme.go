@@ -69,7 +69,7 @@ func (h *Host) useTheme(name string) {
 		src = b
 	}
 	if themeOf(src) == "" {
-		h.setStatus("main.qml imports no theme to switch")
+		h.statusMessage("autodb.theme.status.status")
 		return
 	}
 	next := themeImport.ReplaceAll(src, []byte("import autodb.theme."+name+" "+moduleVersion))

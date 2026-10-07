@@ -70,7 +70,7 @@ func (h *Host) runQuery() {
 func (h *Host) runSelection() {
 	sql := h.editor.SelectedText()
 	if strings.TrimSpace(sql) == "" {
-		h.setStatus("no selection — SPC r runs the buffer")
+		h.statusMessage("autodb.results.status.status")
 		return
 	}
 	h.runSQL(sql)
@@ -80,23 +80,23 @@ func (h *Host) runSQL(sql string) {
 	r := h.results
 	switch {
 	case r.running:
-		h.setStatus("a query is already running")
+		h.statusMessage("autodb.results.status.status2")
 		return
 	case h.session.Token() == "":
-		h.setStatus("sign in first — SPC L")
+		h.statusMessage("autodb.results.status.status3")
 		return
 	case h.active.id == 0:
-		h.setStatus("no connection — Enter on one in the explorer")
+		h.statusMessage("autodb.results.status.status4")
 		return
 	case strings.TrimSpace(sql) == "":
-		h.setStatus("the query buffer is empty")
+		h.statusMessage("autodb.results.status.status5")
 		return
 	}
 	connID := h.active.id
 	r.running = true
 	r.seq++
 	seq := r.seq
-	h.setStatus("running on " + h.connLabel() + "…")
+	h.statusMessageAround("autodb.results.status.around", h.connLabel())
 	bound := h.session.Bind() // the generation is pinned when the run is asked for
 	type ran struct {
 		gen uint64
@@ -115,7 +115,7 @@ func (h *Host) runSQL(sql string) {
 		r.running = false
 		switch {
 		case v.gen != h.session.Gen():
-			h.setStatus("the query was superseded by a reconnect — run it again")
+			h.statusMessage("autodb.results.status.status6")
 		case v.err != nil:
 			h.setStatus(WireErrorMessage(v.err))
 		default:
@@ -131,7 +131,7 @@ func (h *Host) runSQL(sql string) {
 func (h *Host) toggleJSON() {
 	r := h.results
 	if r.last == nil || len(r.last.Columns) == 0 {
-		h.setStatus("no rows to show as JSON")
+		h.statusMessage("autodb.results.status.status7")
 		return
 	}
 	r.asJSON = !r.asJSON
@@ -260,14 +260,14 @@ func (h *Host) openValue(col int) error {
 func (h *Host) copyInspected(col int) error {
 	if col >= 0 && col < len(h.inspected) {
 		h.editor.SetRegister(h.inspected[col], false)
-		h.setStatus("value copied to the editor register")
+		h.statusMessage("autodb.results.status.status8")
 	}
 	return nil
 }
 
 func (h *Host) copyValue() error {
 	h.editor.SetRegister(h.valueText, false)
-	h.setStatus("value copied to the editor register")
+	h.statusMessage("autodb.results.status.status9")
 	return nil
 }
 

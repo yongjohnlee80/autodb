@@ -260,7 +260,7 @@ func (h *Host) saveUser(name, role, connText, pass string) error {
 				}
 				if b.adoptOwnRole(role) {
 					h.afterSignIn() // retires old-role UI and projects the new audience
-					h.setStatus("role changed to " + role + "; permissions refreshed")
+					h.statusMessageAround("autodb.users.status.around", role)
 				}
 			})
 		} else {

@@ -470,8 +470,8 @@ func (h *Host) recordMintError(name string, err error) {
 
 func (h *Host) mintNotice(revoked bool) {
 	if revoked {
-		h.setStatus("a token minted during sign-in change was revoked")
+		h.statusMessage("autodb.tokens.status.status")
 	} else {
-		h.setStatus("a token may remain active after sign-in change; sign back in as its owner to revoke it")
+		h.statusMessage("autodb.tokens.status.status2")
 	}
 }

@@ -38,7 +38,7 @@ func (h *Host) openSearch() error {
 		target = "query"
 	case paneResults:
 		if h.results.last == nil {
-			h.setStatus("nothing to search in the results")
+			h.statusMessage("autodb.search.status.status")
 			return nil
 		}
 		target = "table"
@@ -46,7 +46,7 @@ func (h *Host) openSearch() error {
 			target = "json"
 		}
 	default:
-		h.setStatus("focus the explorer, query or results pane before searching")
+		h.statusMessage("autodb.search.status.status2")
 		return nil
 	}
 	h.searchPending = target
@@ -63,7 +63,7 @@ func (h *Host) startSearch(pattern string) error {
 		return nil
 	}
 	if h.searchPending == "" {
-		h.setStatus("search target changed — press / again")
+		h.statusMessage("autodb.search.status.status3")
 		return nil
 	}
 	h.search.target, h.searchPending = h.searchPending, ""
@@ -98,7 +98,7 @@ func (h *Host) invalidateQuerySearch() {
 func (h *Host) searchJump(dir int, includeCurrent bool) {
 	s := &h.search
 	if s.query == "" || s.target == "" {
-		h.setStatus("no current search — / starts one")
+		h.statusMessage("autodb.search.status.status4")
 		return
 	}
 	// The explorer's rows are read afresh on every jump, so only a new
@@ -107,7 +107,7 @@ func (h *Host) searchJump(dir int, includeCurrent bool) {
 		(s.target == "query" && s.queryRev != h.searchQueryRev) ||
 		(s.target == "table" || s.target == "json") && (s.resultSeq != h.results.seq || s.json != h.results.asJSON) {
 		s.target = ""
-		h.setStatus("search document changed — / starts again")
+		h.statusMessage("autodb.search.status.status5")
 		return
 	}
 	if !includeCurrent {
@@ -117,7 +117,7 @@ func (h *Host) searchJump(dir int, includeCurrent bool) {
 			want = paneResults
 		}
 		if pane != want {
-			h.setStatus("focus the original search pane or press / for a new one")
+			h.statusMessage("autodb.search.status.status6")
 			return
 		}
 	}
