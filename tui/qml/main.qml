@@ -187,6 +187,9 @@ Window {
                     id: editor
                     focus: true
                     keyset: App.keyset
+                    // Undo, Redo, Copy, Cut and Paste at a right click, in the
+                    // App's language (golib's stock rows).
+                    contextMenu: true
                     onTextChanged: App.queryEdited()   // an open note is now unsaved
                     // The SQL of the connection the query runs on; the host
                     // follows the connection (syntax.go).
