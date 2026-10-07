@@ -121,7 +121,7 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	}
 	defer func() { _ = src.Close() }()
 
-	srcLease, err := meta.AcquireLease(ctx, src, srcCfg)
+	srcLease, err := meta.AcquireLease(ctx, src, srcCfg, meta.LeaseHolder{Role: "migrate", Version: version})
 	if err != nil {
 		if errors.Is(err, meta.ErrLeaseHeld) {
 			return fmt.Errorf("migrate-to-postgres: a daemon is serving the SOURCE store at %s. "+
@@ -141,7 +141,7 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	}
 	defer func() { _ = dst.Close() }()
 
-	dstLease, err := meta.AcquireLease(ctx, dst, dstCfg)
+	dstLease, err := meta.AcquireLease(ctx, dst, dstCfg, meta.LeaseHolder{Role: "migrate", Version: version})
 	if err != nil {
 		if errors.Is(err, meta.ErrLeaseHeld) {
 			return fmt.Errorf("migrate-to-postgres: a daemon is serving the DESTINATION store. " +

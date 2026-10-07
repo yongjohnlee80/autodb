@@ -42,7 +42,7 @@ func openLeased(ctx context.Context, configPath, verb string) (*meta.Store, func
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: opening the meta store: %w", verb, err)
 	}
-	lease, err := meta.AcquireLease(ctx, store, cfg.Meta)
+	lease, err := meta.AcquireLease(ctx, store, cfg.Meta, meta.LeaseHolder{Role: "schema", Version: version})
 	if err != nil {
 		_ = store.Close()
 		if errors.Is(err, meta.ErrLeaseHeld) {

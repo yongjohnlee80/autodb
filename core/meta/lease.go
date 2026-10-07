@@ -76,6 +76,11 @@ type InstanceLease struct {
 
 	// sqlite: the held lock file. Closing it drops the flock.
 	file *os.File
+	// infoPath and holder are the lease record (lease_record.go): written at
+	// acquisition, completed by Announce, removed by Release. infoPath is
+	// empty where there is no file to write beside (postgres, :memory:).
+	infoPath string
+	holder   LeaseHolder
 
 	// postgres: the pinned transaction holding the advisory lock, and the
 	// heartbeat that notices when it has died under us.
@@ -99,10 +104,14 @@ type InstanceLease struct {
 //   - PostgreSQL: Holds a transaction-scoped advisory lock. If the database connection drops,
 //     the background heartbeat detects the failure and closes the channel returned by Lost(),
 //     prompting the daemon to shut down cleanly.
-func AcquireLease(ctx context.Context, s *Store, mcfg StoreConfig) (*InstanceLease, error) {
+//
+// h says what the holder is doing (its Role and Version); the record beside a
+// sqlite store carries it, so a frontend that cannot reach this process at its
+// own socket can find out who holds the store and where (lease_record.go).
+func AcquireLease(ctx context.Context, s *Store, mcfg StoreConfig, h LeaseHolder) (*InstanceLease, error) {
 	switch s.engine {
 	case engine.SQLite:
-		return acquireFileLease(mcfg.StorePath())
+		return acquireFileLease(mcfg.StorePath(), h)
 	case engine.Postgres:
 		return acquirePGLease(ctx, s, mcfg.StoreDSN())
 	}
@@ -133,6 +142,14 @@ func (l *InstanceLease) Release() error {
 			errs = append(errs, fmt.Errorf("releasing the advisory lock: %w", err))
 		}
 	}
+	if l.infoPath != "" {
+		// BEFORE the flock goes: while it is held, no other process can have
+		// written the record, so the file removed is ours. A failure leaves a
+		// stale record, which every reader already treats as a claim to check.
+		if err := os.Remove(l.infoPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("removing the lease record: %w", err))
+		}
+	}
 	if l.file != nil {
 		// Closing the descriptor drops the flock; the file itself is left in
 		// place, because its existence means nothing — only the lock does.
@@ -161,7 +178,7 @@ func (l *InstanceLease) Lost() <-chan struct{} { return l.beatFailed }
 // exclusive-create sentinel would survive a crash and need a staleness rule —
 // a PID check that is wrong the moment the PID is reused, on a path where
 // being wrong means refusing to start.
-func acquireFileLease(path string) (*InstanceLease, error) {
+func acquireFileLease(path string, h LeaseHolder) (*InstanceLease, error) {
 	if path == ":memory:" {
 		// An in-memory store is private to the process by construction, so
 		// there is nothing to exclude. Returning a released lease keeps the
@@ -178,7 +195,7 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("meta: creating the lease directory: %w", err)
 	}
-	lockPath, err := leaseLockPath(path)
+	lockPath, resolved, err := leaseLockPath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -193,15 +210,19 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 		}
 		return nil, fmt.Errorf("meta: locking %s: %w", path, err)
 	}
-	// Who holds it, for a human reading a refusal. Best-effort and strictly
-	// diagnostic: it is written BESIDE the store, never into it, and nothing
-	// reads it back. The flock is the lock.
-	if info, err := os.OpenFile(path+".lease-info", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
-		_, _ = fmt.Fprintf(info, "pid %d\nsince %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
-		_ = info.Close()
+	// Who holds it: for a person reading a refusal, and for a frontend that
+	// missed this process's socket (lease_record.go). Best effort: a failed
+	// write never refuses the lease, it only leaves the holder unfindable. The
+	// flock is the lock.
+	h.PID, h.Since = os.Getpid(), time.Now().UTC()
+	if dev, ino, ierr := fileIdentity(resolved); ierr == nil {
+		h.StoreID = storeIDOf(dev, ino)
 	}
+	h.StorePath = resolved
+	infoPath := leaseInfoPath(resolved)
+	_ = writeLeaseInfo(infoPath, h)
 
-	return &InstanceLease{target: path, file: f, epoch: newEpoch()}, nil
+	return &InstanceLease{target: path, file: f, epoch: newEpoch(), infoPath: infoPath, holder: h}, nil
 }
 
 // leaseLockPath names the lock file for the store at path.
@@ -230,34 +251,31 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 // the inode without a descriptor. A missing store is created first (an empty
 // file is a valid empty SQLite database); no SQLite locks can exist on a file
 // that did not exist.
-func leaseLockPath(path string) (string, error) {
+func leaseLockPath(path string) (lockPath, resolved string, err error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("meta: resolving the meta store path %s: %w", path, err)
+		return "", "", fmt.Errorf("meta: resolving the meta store path %s: %w", path, err)
 	}
 	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
 		f, cerr := os.OpenFile(abs, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if cerr != nil && !errors.Is(cerr, os.ErrExist) {
-			return "", fmt.Errorf("meta: creating the meta store %s: %w", abs, cerr)
+			return "", "", fmt.Errorf("meta: creating the meta store %s: %w", abs, cerr)
 		}
 		if f != nil {
 			_ = f.Close()
 		}
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
+	resolved, err = resolveStoreFile(abs)
 	if err != nil {
-		return "", fmt.Errorf("meta: resolving the meta store path %s: %w", abs, err)
+		return "", "", err
 	}
-	fi, err := os.Stat(resolved)
+	// The SAME identity StoreID reports, so a frontend's store id and this
+	// lock's name can never disagree about which store is which.
+	dev, ino, err := fileIdentity(resolved)
 	if err != nil {
-		return "", fmt.Errorf("meta: reading the meta store %s: %w", resolved, err)
+		return "", "", err
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", fmt.Errorf("meta: no inode for the meta store %s on this platform", resolved)
-	}
-	return filepath.Join(filepath.Dir(resolved),
-		fmt.Sprintf(".autodb-lease-%d-%d", st.Dev, st.Ino)), nil
+	return filepath.Join(filepath.Dir(resolved), fmt.Sprintf(".autodb-lease-%d-%d", dev, ino)), resolved, nil
 }
 
 // --- postgres: an advisory lock on a pinned transaction ---------------------
