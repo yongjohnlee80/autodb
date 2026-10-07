@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/core/config"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/rpc"
 )
 
 // FINDING THE DAEMON THROUGH THE STORE'S LEASE, end to end through the real
@@ -58,7 +58,14 @@ func (e discoveryEnv) cmd(run string, args ...string) *exec.Cmd {
 	return c
 }
 
-// serve starts a daemon and waits until it answers.
+// serve starts a daemon and waits until it answers a hello.
+//
+// A HELLO, NOT A CONNECT. The socket accepts a connection as soon as it is
+// bound, which is before the daemon has taken the lease and recorded where it
+// listens; a cell that starts its second process then reads a record with no
+// address. That is what failed on the slower CI runner while passing locally.
+// The daemon announces before it serves, so an answered hello means the
+// record is complete.
 func (e discoveryEnv) serve(t *testing.T, run string) *exec.Cmd {
 	t.Helper()
 	d := e.cmd(run, "--serve")
@@ -67,14 +74,16 @@ func (e discoveryEnv) serve(t *testing.T, run string) *exec.Cmd {
 	}
 	t.Cleanup(func() { _ = d.Process.Signal(syscall.SIGTERM); _, _ = d.Process.Wait() })
 	sock := filepath.Join(run, "autodb.sock")
-	for i := 0; i < 200; i++ {
-		if c, err := net.Dial("unix", sock); err == nil {
-			_ = c.Close()
+	for i := 0; i < 400; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := rpc.ProbeHello(ctx, "unix", sock)
+		cancel()
+		if err == nil {
 			return d
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("the daemon never answered on %s", sock)
+	t.Fatalf("the daemon never answered a hello on %s", sock)
 	return nil
 }
 
