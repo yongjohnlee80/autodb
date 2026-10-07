@@ -18,16 +18,24 @@ import (
 // path.
 var ErrNotAutodb = errors.New("rpc: address is occupied by something other than a compatible autodb server")
 
-// probeLimits bounds the occupant's reply: a hello response is tiny, and
-// the occupant is by definition untrusted until it proves itself.
+// probeLimits bounds the occupant's reply: the occupant is by definition
+// untrusted until it proves itself.
+//
+// SIZED TO WHAT A REAL HELLO CARRIES, NOT TO A GUESS AT "TINY". The reply
+// names paths — the socket, the notes root, the store, the start's backup —
+// and a path may be as long as the platform allows, so a string is bounded
+// by PATH_MAX rather than by a line's width. It also lists the schema
+// scripts the start applied, one element each. A reply over the old 256-byte
+// string and 16-element bounds made a healthy daemon read as "not autodb",
+// which turned the bind race's "already running" into a refusal.
 func probeLimits() *msgpack.Limits {
 	return &msgpack.Limits{
 		MaxDepth:         4,
-		MaxStrBytes:      256,
+		MaxStrBytes:      4096,
 		MaxBinBytes:      256,
-		MaxElements:      16,
-		MaxTotalElements: 64,
-		MaxTotalBytes:    1024,
+		MaxElements:      256,
+		MaxTotalElements: 1024,
+		MaxTotalBytes:    16 << 10,
 	}
 }
 
@@ -67,10 +75,39 @@ func Probe(ctx context.Context, addr string) (version string, err error) {
 // caller's endpoint choice reaches the dial rather than being assumed
 // here: one resolver decides where we meet.
 func ProbeOn(ctx context.Context, network, addr string) (version string, err error) {
+	h, err := ProbeHello(ctx, network, addr)
+	if err != nil {
+		return "", err
+	}
+	if h.Protocol != Protocol {
+		return "", fmt.Errorf("%w: protocol %d, want %d", ErrNotAutodb, h.Protocol, Protocol)
+	}
+	return h.Version, nil
+}
+
+// Hello is what a probed autodb said about itself.
+type Hello struct {
+	Version  string
+	Protocol int64
+	// PID and Instance identify the process: the instance is random per
+	// process, so it is the one a lease record can be matched against.
+	PID      int64
+	Instance string
+	// StoreID and StorePath name the meta store it serves. Empty StoreID: the
+	// daemon predates store identity, or serves a store with no file identity.
+	StoreID   string
+	StorePath string
+}
+
+// ProbeHello is ProbeOn returning the whole answer, for an autodb of ANY
+// protocol: a holder of another protocol is still the holder, and a
+// frontend that finds it can say "rebuild" instead of spawning into its
+// lease. Anything that is not autodb is still ErrNotAutodb.
+func ProbeHello(ctx context.Context, network, addr string) (Hello, error) {
 	d := net.Dialer{}
 	conn, err := d.DialContext(ctx, network, addr)
 	if err != nil {
-		return "", err
+		return Hello{}, err
 	}
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {
@@ -86,39 +123,44 @@ func ProbeOn(ctx context.Context, network, addr string) (version string, err err
 	req := &golibrpc.Message{Kind: golibrpc.KindRequest, ID: probeID,
 		Method: "sys.hello", Params: []any{map[string]any{}}}
 	if err := codec.Write(bw, req); err != nil {
-		return "", err
+		return Hello{}, err
 	}
 	if err := bw.Flush(); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrNotAutodb, err)
+		return Hello{}, fmt.Errorf("%w: %v", ErrNotAutodb, err)
 	}
 
 	m, err := codec.Read(bufio.NewReader(conn))
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrNotAutodb, err)
+		return Hello{}, fmt.Errorf("%w: %v", ErrNotAutodb, err)
 	}
 	if m.Kind != golibrpc.KindResponse {
-		return "", fmt.Errorf("%w: occupant sent a non-response frame", ErrNotAutodb)
+		return Hello{}, fmt.Errorf("%w: occupant sent a non-response frame", ErrNotAutodb)
 	}
 	if m.ID != probeID {
-		return "", fmt.Errorf("%w: response msgid %d, want %d", ErrNotAutodb, m.ID, probeID)
+		return Hello{}, fmt.Errorf("%w: response msgid %d, want %d", ErrNotAutodb, m.ID, probeID)
 	}
 	if m.Err != nil {
-		return "", fmt.Errorf("%w: occupant answered the probe with an error", ErrNotAutodb)
+		return Hello{}, fmt.Errorf("%w: occupant answered the probe with an error", ErrNotAutodb)
 	}
 	result, ok := m.Result.(map[string]any)
 	if !ok {
-		return "", fmt.Errorf("%w: malformed hello result", ErrNotAutodb)
+		return Hello{}, fmt.Errorf("%w: malformed hello result", ErrNotAutodb)
 	}
 	if name, _ := result["server"].(string); name != "autodb" {
-		return "", ErrNotAutodb
+		return Hello{}, ErrNotAutodb
 	}
 	proto, ok := result["protocol"].(int64)
-	if !ok || proto != Protocol {
-		return "", fmt.Errorf("%w: protocol %v, want %d", ErrNotAutodb, result["protocol"], Protocol)
+	if !ok {
+		return Hello{}, fmt.Errorf("%w: malformed protocol %v", ErrNotAutodb, result["protocol"])
 	}
 	ver, ok := result["version"].(string)
 	if !ok {
-		return "", fmt.Errorf("%w: malformed version", ErrNotAutodb)
+		return Hello{}, fmt.Errorf("%w: malformed version", ErrNotAutodb)
 	}
-	return ver, nil
+	h := Hello{Version: ver, Protocol: proto}
+	h.PID, _ = result["pid"].(int64)
+	h.Instance, _ = result["instance"].(string)
+	h.StoreID, _ = result["store_id"].(string)
+	h.StorePath, _ = result["store_path"].(string)
+	return h, nil
 }

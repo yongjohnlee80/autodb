@@ -106,7 +106,11 @@ type Server struct {
 	rpc      *golibrpc.Server
 	version  string
 	instance string // random per-process id; hello exposes it
-	notesDir string // where per-workspace notes live; hello reports it so
+	// storeID and storePath name the meta store this daemon leases
+	// (meta.StoreID), so a frontend can refuse a daemon serving another
+	// store. Empty for a store with no file identity.
+	storeID, storePath string
+	notesDir           string // where per-workspace notes live; hello reports it so
 	//               the frontends resolve notes without re-deriving config
 	noteStores noteStores // the notes verbs' stores, one per subject
 
@@ -292,6 +296,16 @@ type options struct {
 	remoteClose     func(match func(*remote.Peer) bool) int
 	remoteControl   RemoteController
 	remoteUnblock   func(ctx context.Context, byUserID int64, prefix, ip string) error
+	storeID         string
+	storePath       string
+}
+
+// WithStoreIdentity names the meta store this daemon serves, for sys.hello:
+// the id a frontend compares (meta.StoreID) and the resolved path it names
+// in a refusal. Without it hello reports an empty id, which a frontend reads
+// as "cannot be checked" — what a daemon over a postgres store is.
+func WithStoreIdentity(id, path string) Option {
+	return func(o *options) { o.storeID, o.storePath = id, path }
 }
 
 // WithRemoteDenials sets what the server tells of a remote connection's
@@ -396,6 +410,7 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 	s := &Server{
 		auth: authSvc, eng: eng, version: version,
 		instance: newInstanceID(), stop: make(chan struct{}),
+		storeID: o.storeID, storePath: o.storePath,
 		notesDir:        o.notesDir,
 		frontDoor:       o.frontDoor,
 		pressure:        o.pressure,
@@ -463,6 +478,11 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.rpc.Shutdown(ctx
 
 // Addr reports the resolved listen address (real port after binding :0).
 func (s *Server) Addr() string { return s.rpc.Addr() }
+
+// Instance is the random per-process id sys.hello reports, for the lease
+// record: a frontend accepts a recorded address only if the daemon there
+// reports the instance the record names.
+func (s *Server) Instance() string { return s.instance }
 
 // DisclosesDetail reports whether this server may put operator-facing error
 // detail on the wire — the capability WithDetailDisclosure sets.
@@ -703,6 +723,10 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		// it applied and the backup it took first, so a frontend that
 		// restarted it can say so. Additive: an older frontend ignores it.
 		"schema": s.schemaAtStart(),
+		// Which store this daemon serves. A frontend that found this daemon
+		// through the store's lease record, or at an address another store's
+		// daemon could also hold, compares it before sending anything else.
+		"store_id": s.storeID,
 	}
 	// Notes are client-side files under <notes_dir>/ws-<id>/; the server is
 	// the authority on the path (config may override the default), so it
@@ -719,6 +743,7 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		}
 	} else {
 		reply["notes_dir"] = s.notesDir
+		reply["store_path"] = s.storePath
 	}
 	if len(req.Params) > 1 {
 		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
