@@ -6,19 +6,12 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # The cheap gates and the compile smokes, once. They used to run in front of
+  # the whole suite on one runner; split out, they finish while the shards run.
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # THE RELEASE HISTORY IS TEST INPUT HERE, not decoration. The
-          # upgrade-path cells construct a host provisioned at a tag predating
-          # exec.max_target_conns by running THAT TAG'S OWN installer, which
-          # needs the tags and their trees. The default depth-1 checkout fetches
-          # neither, and those cells would skip -- so SCRIPTGUARD_REQUIRE_GITTAGS
-          # below turns removing this line into a failing build rather than a
-          # silent loss of the only coverage the upgrade transition has.
-          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
@@ -35,10 +28,57 @@ jobs:
           fi
       - run: go vet ./...
       - run: go build ./...
+      # A shard naming a package that no longer exists would pass while
+      # testing nothing; this fails the build instead.
+      - name: test shards name real packages
+        run: .github/ci/test-shard.sh --check
+      - name: static cross-build smoke
+        run: |
+          CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/autodb
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/autodb
+      - name: gui-tagged test compile smoke
+        # --gui's build-tagged half (cmd/autodb/gui.go) links golib/gui, so it
+        # needs cgo and the window headers; vet still compiles both halves,
+        # which is what this job can and does check on a runner without a
+        # display.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev \
+            libvulkan-dev
+          go vet -tags gui ./cmd/...
+
+  # THE SUITE, SHARDED. One job ran every package in about 13 minutes;
+  # .github/ci/test-shard.sh splits it by measured time, so each shard is
+  # bounded by its slowest package, and a flake re-runs only its own shard
+  # ("Re-run failed jobs"). "rest" is every package no named shard claims,
+  # computed, so a new package cannot fall out of CI.
+  test:
+    name: test (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [tui, frontdoor, exec, cmd-auth, guards, rest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # THE RELEASE HISTORY IS TEST INPUT HERE, not decoration. The
+          # upgrade-path cells construct a host provisioned at a tag predating
+          # exec.max_target_conns by running THAT TAG'S OWN installer, which
+          # needs the tags and their trees. The default depth-1 checkout fetches
+          # neither, and those cells would skip -- so SCRIPTGUARD_REQUIRE_GITTAGS
+          # below turns removing this line into a failing build rather than a
+          # silent loss of the only coverage the upgrade transition has.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
       # -race because the RPC session pool, the web gateway and the TUI all run
       # concurrently, and a data race that only shows up under load is a race that
       # ships. -count=2 because a suite run once is a suite whose flakes are
-      # someone else's problem later; the whole suite takes ~17s this way.
+      # someone else's problem later.
       - name: test
         # DECLARE WHAT THIS RUNNER CAN DO. internal/scriptguard has cells that
         # need a usable container runtime, setsid(1), script(1) or an
@@ -66,23 +106,10 @@ jobs:
           SCRIPTGUARD_REQUIRE_SETSID: "1"
           SCRIPTGUARD_REQUIRE_SCRIPT: "1"
           SCRIPTGUARD_REQUIRE_UNPRIVILEGED: "1"
-        run: go test -race -count=2 ./...
-      - name: static cross-build smoke
         run: |
-          CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/autodb
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/autodb
-      - name: gui-tagged test compile smoke
-        # --gui's build-tagged half (cmd/autodb/gui.go) links golib/gui, so it
-        # needs cgo and the window headers; vet still compiles both halves,
-        # which is what this job can and does check on a runner without a
-        # display.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev \
-            libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev \
-            libvulkan-dev
-          go vet -tags gui ./cmd/...
+          pkgs=$(.github/ci/test-shard.sh "${{ matrix.shard }}")
+          echo "$pkgs"
+          go test -race -count=2 $pkgs
 
   # The neovim smoke suite. A separate job because it needs neovim and the
   # auto-core.nvim plugin, and because it was in NEITHER the Makefile nor CI —
