@@ -87,6 +87,10 @@ const (
 	// DetailDSNUnusable: the stored DSN did not survive the engine's own parser,
 	// or sets an option that would desynchronize the statement classifier.
 	DetailDSNUnusable ConfigDetail = "the stored connection string could not be used as written"
+	// DetailDSNRefused: a connection being CREATED named a DSN the engine's
+	// own parser rejects, or one setting an option the classifier forbids.
+	// Nothing was stored, which is why this is not DetailDSNUnusable.
+	DetailDSNRefused ConfigDetail = "the connection string was refused before anything was stored"
 	// DetailPoolRefused: the driver's pool object would not construct.
 	DetailPoolRefused ConfigDetail = "the driver would not build a connection pool for this connection"
 	// DetailGrammarUnproved: the target's parsing mode could not be established.
@@ -103,7 +107,7 @@ const (
 // configDetails is every member of the closed set, for the walk that proves no
 // raise site invents one.
 func configDetails() []ConfigDetail {
-	return []ConfigDetail{DetailUnknownEngine, DetailDSNUnusable, DetailPoolRefused,
+	return []ConfigDetail{DetailUnknownEngine, DetailDSNUnusable, DetailDSNRefused, DetailPoolRefused,
 		DetailGrammarUnproved, DetailNoDestroy, DetailStoreUnavailable, DetailUnclassified}
 }
 

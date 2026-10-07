@@ -17,6 +17,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/remote"
+	"github.com/yongjohnlee80/golib/logger"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 )
 
@@ -368,6 +369,31 @@ func causeOrShape(disclose bool, shaped, cause error) string {
 		return shaped.Error()
 	}
 	return scrubbed
+}
+
+// logCreateRefused puts a refused conn.create in the daemon log.
+//
+// THE TRANSPORT NO LONGER LOGS IT. golib logs only the untyped errors it
+// withholds, and a refusal that became a ConfigFailure reaches it as a typed
+// *Error. Without this line the cause would reach the caller's screen and
+// nowhere else.
+//
+// The log is this host's own, the same audience a host-local socket discloses
+// to, so it carries the cause under the same rule: scrubbed, and only when the
+// scrub is confident. Otherwise it carries the cause-free shape. An audit fault
+// joined to the refusal is the server's problem, not the caller's, and is
+// logged here whole: it names no DSN.
+func (s *Server) logCreateRefused(req *golibrpc.Request, name string, eng engine.Name, cf *exec.ConfigFailure, err error) {
+	fields := map[string]any{
+		"server": "rpc", "event": "connection refused before it was stored",
+		"method": req.Method, "remote": req.Peer.String(),
+		"name": name, "engine": eng.String(), "audit": cf.AuditDetail(),
+		"cause": causeOrShape(true, cf, cf.Cause()),
+	}
+	if err != error(cf) {
+		fields["err"] = err.Error()
+	}
+	s.logger.Log(logger.SeverityWarning, fields)
 }
 
 // --- positional argument decoding (msgpack-RPC params are arrays) ---
@@ -1515,6 +1541,9 @@ func (s *Server) register() {
 		}
 		id, err := s.eng.CreateConnection(ctx, token, name, eng, dsn, peerIP(req))
 		if err != nil {
+			if cf, ok := exec.ConfigFailureOf(err); ok {
+				s.logCreateRefused(req, name, eng, cf, err)
+			}
 			return nil, s.wireErrFor(req, err)
 		}
 		return id, nil

@@ -98,7 +98,7 @@ func TestConfigFailure_EveryRaiseSiteUsesTheClosedSet(t *testing.T) {
 	}
 	// The identifier names, which is what a call site actually writes.
 	allowedIdents := map[string]bool{
-		"DetailUnknownEngine": true, "DetailDSNUnusable": true, "DetailPoolRefused": true,
+		"DetailUnknownEngine": true, "DetailDSNUnusable": true, "DetailDSNRefused": true, "DetailPoolRefused": true,
 		"DetailGrammarUnproved": true, "DetailNoDestroy": true, "DetailStoreUnavailable": true,
 	}
 
