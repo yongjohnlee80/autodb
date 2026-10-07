@@ -1,6 +1,7 @@
 package rpc_test
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net"
@@ -12,6 +13,8 @@ import (
 	"github.com/yongjohnlee80/autodb/core/config"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/rpc"
+	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
+	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
 )
 
 // shortDir is a directory whose paths fit a unix socket (sun_path is ~104
@@ -185,18 +188,66 @@ func TestLocate_ARecordedNonLoopbackAddressIsNotDialled(t *testing.T) {
 	}
 }
 
-// A DAEMON FROM BEFORE STORE IDENTITY reports no id. It is accepted at the
+// legacyDaemonAt answers sys.hello as an autodb from before store identity
+// did: no store_id field at all. A current server cannot stand in for it —
+// it always sends the field, empty or not, which is the distinction under
+// test.
+func legacyDaemonAt(t *testing.T, sock string) {
+	t.Helper()
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				codec := msgpackrpc.New(nil)
+				m, err := codec.Read(bufio.NewReader(c))
+				if err != nil {
+					return
+				}
+				w := bufio.NewWriter(c)
+				_ = codec.Write(w, &golibrpc.Message{Kind: golibrpc.KindResponse, ID: m.ID,
+					Result: map[string]any{"server": "autodb", "protocol": rpc.Protocol,
+						"version": "v0.4.4", "instance": "legacy", "pid": int64(1)}})
+				_ = w.Flush()
+			}()
+		}
+	}()
+}
+
+// A DAEMON FROM BEFORE STORE IDENTITY sends no store_id. It is accepted at the
 // configured address with no expectation, as it always was: attaching is how
 // the frontend reaches it to restart it.
-func TestLocate_ADaemonWithoutStoreIdentityIsAcceptedUnchecked(t *testing.T) {
+func TestLocate_ADaemonFromBeforeStoreIdentityIsAcceptedUnchecked(t *testing.T) {
+	t.Parallel()
+	dir := shortDir(t)
+	mc, _, _ := aStore(t, dir, "m.db")
+	sock := filepath.Join(dir, "c.sock")
+	legacyDaemonAt(t, sock)
+	loc, err := rpc.Locate(context.Background(), unixEP(sock), mc)
+	if err != nil || loc.Via != "configured" || loc.StoreID != "" || loc.Hello.StoreIDReported {
+		t.Fatalf("located %+v, %v", loc, err)
+	}
+}
+
+// A CURRENT DAEMON WITH AN EMPTY store_id serves a store with no file identity
+// (postgres, :memory:). It is not this sqlite config's daemon, at any address:
+// an empty id is an answer, not a missing one.
+func TestLocate_ACurrentDaemonWithNoStoreIDIsAnotherStore(t *testing.T) {
 	t.Parallel()
 	dir := shortDir(t)
 	mc, _, _ := aStore(t, dir, "m.db")
 	sock := filepath.Join(dir, "c.sock")
 	daemonAt(t, sock, "", "")
-	loc, err := rpc.Locate(context.Background(), unixEP(sock), mc)
-	if err != nil || loc.Via != "configured" || loc.StoreID != "" {
-		t.Fatalf("located %+v, %v", loc, err)
+	if _, err := rpc.Locate(context.Background(), unixEP(sock), mc); !errors.Is(err, rpc.ErrOtherStore) {
+		t.Fatalf("err = %v, want ErrOtherStore", err)
 	}
 }
 

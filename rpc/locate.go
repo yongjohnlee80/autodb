@@ -69,10 +69,13 @@ func Locate(ctx context.Context, ep config.Endpoint, mcfg meta.StoreConfig) (Loc
 	var other *Hello
 	if hello, perr := probe(ctx, ep.Network, ep.Address); perr == nil {
 		switch {
-		case hello.StoreID == "":
-			// A daemon from before store identity. It cannot say which store
-			// it serves, so it is accepted exactly as it was before Locate
-			// existed — attaching is how an older daemon gets restarted.
+		case !hello.StoreIDReported:
+			// A daemon from before store identity: its hello has no store_id
+			// at all. It cannot say which store it serves, so it is accepted
+			// exactly as it was before Locate existed — attaching is how an
+			// older daemon gets restarted. A PRESENT but empty store_id is not
+			// this case: that is a current daemon over a store with no file
+			// identity, which is not this config's store.
 			return Located{ep.Network, ep.Address, "configured", "", hello}, nil
 		case want != "" && hello.StoreID == want:
 			return Located{ep.Network, ep.Address, "configured", want, hello}, nil
