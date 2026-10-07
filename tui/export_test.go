@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"path"
+	"regexp"
 	"github.com/yongjohnlee80/autodb/core/notes"
 	"sync"
 	"sync/atomic"
@@ -542,6 +545,71 @@ func (h *Host) SetActiveWorkspace(ws int64) {
 
 // ThemeNames are the themes this program ships, as Options › Theme lists them.
 func ThemeNames() []string { return themeNames() }
+
+// LanguageOfForTest is the language a stored preference resolves to.
+func LanguageOfForTest(pref string) string { return languageOf(pref) }
+
+// CatalogFiles are the program's own catalogs, as Translations reads them.
+func CatalogFiles() fs.FS { return qmlFiles }
+
+// CatalogInventoryForTest is every id the program can show: every projected
+// bar row (node and command) and every leader label, derived exactly as
+// projectBar and projectLeader derive theirs (ADR-0219 D7).
+func CatalogInventoryForTest() []string {
+	var ids []string
+	seen := map[string]bool{}
+	add := func(id string) {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	h := newHost(nil, nil, nil, Options{})
+	_ = h
+	for _, n := range menuNodes() {
+		add(n.msgID())
+	}
+	for _, cmd := range catalogCommands() {
+		for _, mp := range cmd.Menu {
+			add(mp.msgID(cmd.ID))
+		}
+		if cmd.Leader != nil {
+			if cmd.Leader.Label != "" {
+				add("autodb.leader." + string(cmd.ID))
+			}
+			if cmd.Leader.LabelFor != nil {
+				add("autodb.leader.session.connect")
+				add("autodb.leader.session.disconnect")
+			}
+		}
+	}
+	return ids
+}
+
+// QMLMessageIDsForTest is every qsTrId in the QML the program ships.
+func QMLMessageIDsForTest() []string {
+	var ids []string
+	err := fs.WalkDir(qmlFiles, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || path.Ext(p) != ".qml" {
+			return err
+		}
+		b, err := fs.ReadFile(qmlFiles, p)
+		if err != nil {
+			return err
+		}
+		for _, m := range qmlTrID.FindAllStringSubmatch(string(b), -1) {
+			ids = append(ids, m[1])
+		}
+		return nil
+	})
+	if err != nil {
+		panic("tui: catalog inventory: " + err.Error())
+	}
+	return ids
+}
+
+// qmlTrID matches qsTrId("id") in a QML file.
+var qmlTrID = regexp.MustCompile(`qsTrId\("([^"]+)"\)`)
 
 // SetHistoryPageSize makes the history listing page by n rows.
 func (h *Host) SetHistoryPageSize(n int64) {

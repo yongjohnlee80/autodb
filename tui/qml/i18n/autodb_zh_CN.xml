@@ -1,0 +1,383 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE TS>
+<TS version="2.1" language="zh_CN">
+    <context>
+        <name>autodb</name>
+        <message id="autodb.menu.home">
+            <source>&amp;Home</source>
+            <translation>主页(&amp;h)</translation>
+        </message>
+        <message id="autodb.menu.home.conns">
+            <source>&amp;DB conns</source>
+            <translation>数据库连接(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.file">
+            <source>&amp;File</source>
+            <translation>文件(&amp;f)</translation>
+        </message>
+        <message id="autodb.menu.edit">
+            <source>&amp;Edit</source>
+            <translation>编辑(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.run">
+            <source>&amp;Run</source>
+            <translation>运行(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.view">
+            <source>&amp;View</source>
+            <translation>查看(&amp;v)</translation>
+        </message>
+        <message id="autodb.menu.remote">
+            <source>Re&amp;mote</source>
+            <translation>远程(&amp;m)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom">
+            <source>&amp;Zoom</source>
+            <translation>缩放(&amp;z)</translation>
+        </message>
+        <message id="autodb.menu.options">
+            <source>&amp;Options</source>
+            <translation>选项(&amp;o)</translation>
+        </message>
+        <message id="autodb.menu.options.editor">
+            <source>&amp;Editor</source>
+            <translation>编辑器(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.options.theme">
+            <source>&amp;Theme</source>
+            <translation>主题(&amp;t)</translation>
+        </message>
+        <message id="autodb.menu.options.language">
+            <source>&amp;Language</source>
+            <translation>语言(&amp;l)</translation>
+        </message>
+        <message id="autodb.menu.system">
+            <source>&amp;System</source>
+            <translation>系统(&amp;s)</translation>
+        </message>
+        <message id="autodb.menu.query.run">
+            <source>&amp;Execute</source>
+            <translation>执行(&amp;e)</translation>
+        </message>
+        <message id="autodb.leader.query.run">
+            <source>run query (selection when active)</source>
+            <translation>运行查询（有选中区域时仅运行选中部分）</translation>
+        </message>
+        <message id="autodb.menu.query.run_selection">
+            <source>Execute &amp;selection</source>
+            <translation>执行选中部分(&amp;s)</translation>
+        </message>
+        <message id="autodb.leader.query.run_selection">
+            <source>run selection only</source>
+            <translation>仅运行选中部分</translation>
+        </message>
+        <message id="autodb.menu.results.toggle_json">
+            <source>&amp;Results as table/JSON</source>
+            <translation>结果 表格/JSON切换(&amp;r)</translation>
+        </message>
+        <message id="autodb.leader.results.toggle_json">
+            <source>toggle results table/JSON</source>
+            <translation>在表格/JSON间切换结果</translation>
+        </message>
+        <message id="autodb.leader.view.zoom_toggle">
+            <source>zoom the pane in use, or out</source>
+            <translation>放大当前窗格，或还原</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_editor">
+            <source>&amp;Query editor</source>
+            <translation>查询编辑器(&amp;q)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_results">
+            <source>&amp;Results</source>
+            <translation>结果(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_explorer">
+            <source>&amp;Explorer</source>
+            <translation>资源管理器(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_out">
+            <source>Z&amp;oom out</source>
+            <translation>取消缩放(&amp;o)</translation>
+        </message>
+        <message id="autodb.leader.focus.explorer">
+            <source>focus explorer</source>
+            <translation>转到资源管理器</translation>
+        </message>
+        <message id="autodb.leader.focus.editor">
+            <source>focus query editor</source>
+            <translation>转到查询编辑器</translation>
+        </message>
+        <message id="autodb.leader.focus.results">
+            <source>focus results</source>
+            <translation>转到结果</translation>
+        </message>
+        <message id="autodb.menu.note.new">
+            <source>&amp;New note</source>
+            <translation>新建笔记(&amp;n)</translation>
+        </message>
+        <message id="autodb.leader.note.new">
+            <source>new note</source>
+            <translation>新建笔记</translation>
+        </message>
+        <message id="autodb.menu.note.save">
+            <source>&amp;Save note</source>
+            <translation>保存笔记(&amp;s)</translation>
+        </message>
+        <message id="autodb.leader.note.save">
+            <source>save note</source>
+            <translation>保存笔记</translation>
+        </message>
+        <message id="autodb.menu.conn.select">
+            <source>&amp;Select…</source>
+            <translation>选择(&amp;s)…</translation>
+        </message>
+        <message id="autodb.leader.conn.select">
+            <source>select the query connection</source>
+            <translation>选择查询连接</translation>
+        </message>
+        <message id="autodb.menu.conn.manage">
+            <source>&amp;Edit…</source>
+            <translation>编辑(&amp;e)…</translation>
+        </message>
+        <message id="autodb.leader.conn.manage">
+            <source>connections…</source>
+            <translation>连接…</translation>
+        </message>
+        <message id="autodb.menu.workspace.manage">
+            <source>&amp;Workspaces…</source>
+            <translation>工作区(&amp;w)…</translation>
+        </message>
+        <message id="autodb.leader.workspace.manage">
+            <source>workspaces…</source>
+            <translation>工作区…</translation>
+        </message>
+        <message id="autodb.menu.user.manage">
+            <source>&amp;Users (admin)…</source>
+            <translation>用户（管理员）(&amp;u)…</translation>
+        </message>
+        <message id="autodb.leader.user.manage">
+            <source>users…</source>
+            <translation>用户…</translation>
+        </message>
+        <message id="autodb.menu.ip.mine">
+            <source>My &amp;IP addresses…</source>
+            <translation>我的IP地址(&amp;i)…</translation>
+        </message>
+        <message id="autodb.leader.ip.mine">
+            <source>my allowed IPs…</source>
+            <translation>我允许的IP…</translation>
+        </message>
+        <message id="autodb.menu.remote.my_keys">
+            <source>My &amp;SSH keys…</source>
+            <translation>我的SSH密钥(&amp;s)…</translation>
+        </message>
+        <message id="autodb.menu.token.mine">
+            <source>&amp;Access tokens…</source>
+            <translation>访问令牌(&amp;a)…</translation>
+        </message>
+        <message id="autodb.leader.token.mine">
+            <source>my access tokens…</source>
+            <translation>我的访问令牌…</translation>
+        </message>
+        <message id="autodb.menu.history.open">
+            <source>&amp;History…</source>
+            <translation>历史(&amp;h)…</translation>
+        </message>
+        <message id="autodb.leader.history.open">
+            <source>script history…</source>
+            <translation>脚本历史…</translation>
+        </message>
+        <message id="autodb.menu.audit.open">
+            <source>Au&amp;dit log (admin)…</source>
+            <translation>审计日志（管理员）(&amp;d)…</translation>
+        </message>
+        <message id="autodb.leader.audit.open">
+            <source>audit log…</source>
+            <translation>审计日志…</translation>
+        </message>
+        <message id="autodb.menu.frontdoor.cacert">
+            <source>&amp;CA certificate…</source>
+            <translation>CA证书(&amp;c)…</translation>
+        </message>
+        <message id="autodb.leader.frontdoor.cacert">
+            <source>front-door CA certificate…</source>
+            <translation>前门CA证书…</translation>
+        </message>
+        <message id="autodb.menu.explorer.refresh">
+            <source>Re&amp;fresh explorer</source>
+            <translation>刷新资源管理器(&amp;f)</translation>
+        </message>
+        <message id="autodb.leader.explorer.refresh">
+            <source>refresh explorer</source>
+            <translation>刷新资源管理器</translation>
+        </message>
+        <message id="autodb.menu.ip.allowlist">
+            <source>&amp;Global IP addresses (admin)…</source>
+            <translation>全局IP地址（管理员）(&amp;g)…</translation>
+        </message>
+        <message id="autodb.leader.ip.allowlist">
+            <source>ip allowlist (admin)…</source>
+            <translation>IP白名单（管理员）…</translation>
+        </message>
+        <message id="autodb.menu.keyslot.manage">
+            <source>Service &amp;keyslot (admin)…</source>
+            <translation>服务密钥槽（管理员）(&amp;k)…</translation>
+        </message>
+        <message id="autodb.leader.keyslot.manage">
+            <source>service keyslot (admin)…</source>
+            <translation>服务密钥槽（管理员）…</translation>
+        </message>
+        <message id="autodb.leader.warning.dismiss_cleartext">
+            <source>dismiss the no-TLS warning</source>
+            <translation>关闭无TLS警告</translation>
+        </message>
+        <message id="autodb.menu.session.login">
+            <source>&amp;Login / Switch user…</source>
+            <translation>登录 / 切换用户(&amp;l)…</translation>
+        </message>
+        <message id="autodb.leader.session.login">
+            <source>login / switch user</source>
+            <translation>登录 / 切换用户</translation>
+        </message>
+        <message id="autodb.menu.remote.connect">
+            <source>&amp;Connect…</source>
+            <translation>连接(&amp;c)…</translation>
+        </message>
+        <message id="autodb.menu.remote.disconnect">
+            <source>&amp;Disconnect</source>
+            <translation>断开连接(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.remote.manage">
+            <source>&amp;Manage…</source>
+            <translation>管理(&amp;m)…</translation>
+        </message>
+        <message id="autodb.leader.session.connect">
+            <source>connect</source>
+            <translation>连接</translation>
+        </message>
+        <message id="autodb.leader.session.disconnect">
+            <source>disconnect</source>
+            <translation>断开连接</translation>
+        </message>
+        <message id="autodb.menu.server.restart">
+            <source>&amp;Restart server</source>
+            <translation>重启服务器(&amp;r)</translation>
+        </message>
+        <message id="autodb.leader.server.restart">
+            <source>restart the server</source>
+            <translation>重启服务器</translation>
+        </message>
+        <message id="autodb.menu.app.pressure">
+            <source>&amp;Pressure</source>
+            <translation>负载(&amp;p)</translation>
+        </message>
+        <message id="autodb.leader.app.pressure">
+            <source>front-door pressure</source>
+            <translation>前门负载</translation>
+        </message>
+        <message id="autodb.menu.app.profile">
+            <source>Pro&amp;file…</source>
+            <translation>个人资料(&amp;f)…</translation>
+        </message>
+        <message id="autodb.leader.app.profile">
+            <source>profile</source>
+            <translation>个人资料</translation>
+        </message>
+        <message id="autodb.menu.app.about">
+            <source>&amp;About</source>
+            <translation>关于(&amp;a)</translation>
+        </message>
+        <message id="autodb.leader.app.about">
+            <source>about autodb</source>
+            <translation>关于 autodb</translation>
+        </message>
+        <message id="autodb.menu.app.help">
+            <source>&amp;Help</source>
+            <translation>帮助(&amp;h)</translation>
+        </message>
+        <message id="autodb.leader.app.help">
+            <source>help</source>
+            <translation>帮助</translation>
+        </message>
+        <message id="autodb.menu.app.quit">
+            <source>E&amp;xit</source>
+            <translation>退出(&amp;x)</translation>
+        </message>
+        <message id="autodb.leader.app.quit">
+            <source>quit</source>
+            <translation>退出</translation>
+        </message>
+        <message id="autodb.menu.edit.copy">
+            <source>&amp;Copy/Yank (register; clipboard if available)</source>
+            <translation>复制/寄存器复制(&amp;c)（可用时复制到剪贴板）</translation>
+        </message>
+        <message id="autodb.menu.edit.cut">
+            <source>Cu&amp;t to register</source>
+            <translation>剪切到寄存器(&amp;t)</translation>
+        </message>
+        <message id="autodb.menu.edit.paste">
+            <source>&amp;Paste register</source>
+            <translation>粘贴寄存器(&amp;p)</translation>
+        </message>
+        <message id="autodb.menu.options.editor.vim">
+            <source>&amp;Vim mode</source>
+            <translation>Vim 模式(&amp;v)</translation>
+        </message>
+        <message id="autodb.menu.options.editor.textedit">
+            <source>&amp;TextEdit mode</source>
+            <translation>TextEdit 模式(&amp;t)</translation>
+        </message>
+        <message id="autodb.menu.note.open">
+            <source>&amp;Open note…</source>
+            <translation>打开笔记(&amp;o)…</translation>
+        </message>
+        <message id="autodb.leader.note.open">
+            <source>open a note…</source>
+            <translation>打开笔记…</translation>
+        </message>
+        <message id="autodb.menu.options.theme.dark">
+            <source>&amp;Dark</source>
+            <translation>深色(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.light">
+            <source>&amp;Light</source>
+            <translation>浅色(&amp;l)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.mono">
+            <source>&amp;Mono</source>
+            <translation>单色(&amp;m)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.retro">
+            <source>&amp;Retro</source>
+            <translation>复古(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.sepia">
+            <source>&amp;Sepia</source>
+            <translation>泛黄(&amp;s)</translation>
+        </message>
+        <message id="autodb.menu.options.language.en">
+            <source>English (&amp;1)</source>
+            <translation>English (&amp;1)</translation>
+        </message>
+        <message id="autodb.menu.options.language.ko_KR">
+            <source>한국어 (&amp;2)</source>
+            <translation>한국어 (&amp;2)</translation>
+        </message>
+        <message id="autodb.menu.options.language.ja_JP">
+            <source>日本語 (&amp;3)</source>
+            <translation>日本語 (&amp;3)</translation>
+        </message>
+        <message id="autodb.menu.options.language.zh_CN">
+            <source>中文 (&amp;4)</source>
+            <translation>中文 (&amp;4)</translation>
+        </message>
+        <message id="autodb.menu.options.language.es">
+            <source>Español (&amp;5)</source>
+            <translation>Español (&amp;5)</translation>
+        </message>
+        <message id="autodb.menu.options.language.pt_BR">
+            <source>Português (Brasil) (&amp;6)</source>
+            <translation>Português (Brasil) (&amp;6)</translation>
+        </message>
+    </context>
+</TS>

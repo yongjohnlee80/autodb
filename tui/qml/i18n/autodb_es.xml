@@ -1,0 +1,383 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE TS>
+<TS version="2.1" language="es">
+    <context>
+        <name>autodb</name>
+        <message id="autodb.menu.home">
+            <source>&amp;Home</source>
+            <translation>Inicio(&amp;h)</translation>
+        </message>
+        <message id="autodb.menu.home.conns">
+            <source>&amp;DB conns</source>
+            <translation>Conexiones BD(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.file">
+            <source>&amp;File</source>
+            <translation>Archivo(&amp;f)</translation>
+        </message>
+        <message id="autodb.menu.edit">
+            <source>&amp;Edit</source>
+            <translation>Editar(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.run">
+            <source>&amp;Run</source>
+            <translation>Ejecutar(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.view">
+            <source>&amp;View</source>
+            <translation>Ver(&amp;v)</translation>
+        </message>
+        <message id="autodb.menu.remote">
+            <source>Re&amp;mote</source>
+            <translation>Re&amp;moto</translation>
+        </message>
+        <message id="autodb.menu.view.zoom">
+            <source>&amp;Zoom</source>
+            <translation>Zoom(&amp;z)</translation>
+        </message>
+        <message id="autodb.menu.options">
+            <source>&amp;Options</source>
+            <translation>Opciones(&amp;o)</translation>
+        </message>
+        <message id="autodb.menu.options.editor">
+            <source>&amp;Editor</source>
+            <translation>Editor(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.options.theme">
+            <source>&amp;Theme</source>
+            <translation>Tema(&amp;t)</translation>
+        </message>
+        <message id="autodb.menu.options.language">
+            <source>&amp;Language</source>
+            <translation>Idioma(&amp;l)</translation>
+        </message>
+        <message id="autodb.menu.system">
+            <source>&amp;System</source>
+            <translation>Sistema(&amp;s)</translation>
+        </message>
+        <message id="autodb.menu.query.run">
+            <source>&amp;Execute</source>
+            <translation>&amp;Ejecutar</translation>
+        </message>
+        <message id="autodb.leader.query.run">
+            <source>run query (selection when active)</source>
+            <translation>ejecutar consulta (la selección si hay una)</translation>
+        </message>
+        <message id="autodb.menu.query.run_selection">
+            <source>Execute &amp;selection</source>
+            <translation>Ejecutar &amp;selección</translation>
+        </message>
+        <message id="autodb.leader.query.run_selection">
+            <source>run selection only</source>
+            <translation>ejecutar solo la selección</translation>
+        </message>
+        <message id="autodb.menu.results.toggle_json">
+            <source>&amp;Results as table/JSON</source>
+            <translation>&amp;Resultados como tabla/JSON</translation>
+        </message>
+        <message id="autodb.leader.results.toggle_json">
+            <source>toggle results table/JSON</source>
+            <translation>alternar resultados tabla/JSON</translation>
+        </message>
+        <message id="autodb.leader.view.zoom_toggle">
+            <source>zoom the pane in use, or out</source>
+            <translation>ampliar el panel en uso, o restaurar</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_editor">
+            <source>&amp;Query editor</source>
+            <translation>Editor de consultas(&amp;q)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_results">
+            <source>&amp;Results</source>
+            <translation>&amp;Resultados</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_explorer">
+            <source>&amp;Explorer</source>
+            <translation>&amp;Explorador</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_out">
+            <source>Z&amp;oom out</source>
+            <translation>Restaurar z&amp;oom</translation>
+        </message>
+        <message id="autodb.leader.focus.explorer">
+            <source>focus explorer</source>
+            <translation>ir al explorador</translation>
+        </message>
+        <message id="autodb.leader.focus.editor">
+            <source>focus query editor</source>
+            <translation>ir al editor de consultas</translation>
+        </message>
+        <message id="autodb.leader.focus.results">
+            <source>focus results</source>
+            <translation>ir a resultados</translation>
+        </message>
+        <message id="autodb.menu.note.new">
+            <source>&amp;New note</source>
+            <translation>&amp;Nueva nota</translation>
+        </message>
+        <message id="autodb.leader.note.new">
+            <source>new note</source>
+            <translation>nueva nota</translation>
+        </message>
+        <message id="autodb.menu.note.save">
+            <source>&amp;Save note</source>
+            <translation>Guardar nota (&amp;s)</translation>
+        </message>
+        <message id="autodb.leader.note.save">
+            <source>save note</source>
+            <translation>guardar nota</translation>
+        </message>
+        <message id="autodb.menu.conn.select">
+            <source>&amp;Select…</source>
+            <translation>&amp;Seleccionar…</translation>
+        </message>
+        <message id="autodb.leader.conn.select">
+            <source>select the query connection</source>
+            <translation>elegir la conexión de la consulta</translation>
+        </message>
+        <message id="autodb.menu.conn.manage">
+            <source>&amp;Edit…</source>
+            <translation>&amp;Editar…</translation>
+        </message>
+        <message id="autodb.leader.conn.manage">
+            <source>connections…</source>
+            <translation>conexiones…</translation>
+        </message>
+        <message id="autodb.menu.workspace.manage">
+            <source>&amp;Workspaces…</source>
+            <translation>Espacios de trabajo… (&amp;w)</translation>
+        </message>
+        <message id="autodb.leader.workspace.manage">
+            <source>workspaces…</source>
+            <translation>espacios de trabajo…</translation>
+        </message>
+        <message id="autodb.menu.user.manage">
+            <source>&amp;Users (admin)…</source>
+            <translation>&amp;Usuarios (admin)…</translation>
+        </message>
+        <message id="autodb.leader.user.manage">
+            <source>users…</source>
+            <translation>usuarios…</translation>
+        </message>
+        <message id="autodb.menu.ip.mine">
+            <source>My &amp;IP addresses…</source>
+            <translation>Mis direcciones &amp;IP…</translation>
+        </message>
+        <message id="autodb.leader.ip.mine">
+            <source>my allowed IPs…</source>
+            <translation>mis IP permitidas…</translation>
+        </message>
+        <message id="autodb.menu.remote.my_keys">
+            <source>My &amp;SSH keys…</source>
+            <translation>Mis claves &amp;SSH…</translation>
+        </message>
+        <message id="autodb.menu.token.mine">
+            <source>&amp;Access tokens…</source>
+            <translation>Tokens de &amp;acceso…</translation>
+        </message>
+        <message id="autodb.leader.token.mine">
+            <source>my access tokens…</source>
+            <translation>mis tokens de acceso…</translation>
+        </message>
+        <message id="autodb.menu.history.open">
+            <source>&amp;History…</source>
+            <translation>&amp;Historial…</translation>
+        </message>
+        <message id="autodb.leader.history.open">
+            <source>script history…</source>
+            <translation>historial de scripts…</translation>
+        </message>
+        <message id="autodb.menu.audit.open">
+            <source>Au&amp;dit log (admin)…</source>
+            <translation>Registro de au&amp;ditoría (admin)…</translation>
+        </message>
+        <message id="autodb.leader.audit.open">
+            <source>audit log…</source>
+            <translation>registro de auditoría…</translation>
+        </message>
+        <message id="autodb.menu.frontdoor.cacert">
+            <source>&amp;CA certificate…</source>
+            <translation>Certificado &amp;CA…</translation>
+        </message>
+        <message id="autodb.leader.frontdoor.cacert">
+            <source>front-door CA certificate…</source>
+            <translation>certificado CA del front-door…</translation>
+        </message>
+        <message id="autodb.menu.explorer.refresh">
+            <source>Re&amp;fresh explorer</source>
+            <translation>Re&amp;frescar explorador</translation>
+        </message>
+        <message id="autodb.leader.explorer.refresh">
+            <source>refresh explorer</source>
+            <translation>refrescar el explorador</translation>
+        </message>
+        <message id="autodb.menu.ip.allowlist">
+            <source>&amp;Global IP addresses (admin)…</source>
+            <translation>Direcciones IP &amp;globales (admin)…</translation>
+        </message>
+        <message id="autodb.leader.ip.allowlist">
+            <source>ip allowlist (admin)…</source>
+            <translation>lista de IP permitidas (admin)…</translation>
+        </message>
+        <message id="autodb.menu.keyslot.manage">
+            <source>Service &amp;keyslot (admin)…</source>
+            <translation>Ranura de clave de servicio (&amp;k)</translation>
+        </message>
+        <message id="autodb.leader.keyslot.manage">
+            <source>service keyslot (admin)…</source>
+            <translation>ranura de clave del servicio (admin)…</translation>
+        </message>
+        <message id="autodb.leader.warning.dismiss_cleartext">
+            <source>dismiss the no-TLS warning</source>
+            <translation>cerrar el aviso de sin-TLS</translation>
+        </message>
+        <message id="autodb.menu.session.login">
+            <source>&amp;Login / Switch user…</source>
+            <translation>Iniciar sesión / Cambiar usuario… (&amp;l)</translation>
+        </message>
+        <message id="autodb.leader.session.login">
+            <source>login / switch user</source>
+            <translation>iniciar sesión / cambiar usuario</translation>
+        </message>
+        <message id="autodb.menu.remote.connect">
+            <source>&amp;Connect…</source>
+            <translation>&amp;Conectar…</translation>
+        </message>
+        <message id="autodb.menu.remote.disconnect">
+            <source>&amp;Disconnect</source>
+            <translation>&amp;Desconectar</translation>
+        </message>
+        <message id="autodb.menu.remote.manage">
+            <source>&amp;Manage…</source>
+            <translation>Ad&amp;ministrar…</translation>
+        </message>
+        <message id="autodb.leader.session.connect">
+            <source>connect</source>
+            <translation>conectar</translation>
+        </message>
+        <message id="autodb.leader.session.disconnect">
+            <source>disconnect</source>
+            <translation>desconectar</translation>
+        </message>
+        <message id="autodb.menu.server.restart">
+            <source>&amp;Restart server</source>
+            <translation>&amp;Reiniciar servidor</translation>
+        </message>
+        <message id="autodb.leader.server.restart">
+            <source>restart the server</source>
+            <translation>reiniciar el servidor</translation>
+        </message>
+        <message id="autodb.menu.app.pressure">
+            <source>&amp;Pressure</source>
+            <translation>&amp;Presión</translation>
+        </message>
+        <message id="autodb.leader.app.pressure">
+            <source>front-door pressure</source>
+            <translation>presión del front-door</translation>
+        </message>
+        <message id="autodb.menu.app.profile">
+            <source>Pro&amp;file…</source>
+            <translation>Perfil(&amp;f)…</translation>
+        </message>
+        <message id="autodb.leader.app.profile">
+            <source>profile</source>
+            <translation>perfil</translation>
+        </message>
+        <message id="autodb.menu.app.about">
+            <source>&amp;About</source>
+            <translation>&amp;Acerca de</translation>
+        </message>
+        <message id="autodb.leader.app.about">
+            <source>about autodb</source>
+            <translation>acerca de autodb</translation>
+        </message>
+        <message id="autodb.menu.app.help">
+            <source>&amp;Help</source>
+            <translation>Ayuda (&amp;h)</translation>
+        </message>
+        <message id="autodb.leader.app.help">
+            <source>help</source>
+            <translation>ayuda</translation>
+        </message>
+        <message id="autodb.menu.app.quit">
+            <source>E&amp;xit</source>
+            <translation>Salir(&amp;x)</translation>
+        </message>
+        <message id="autodb.leader.app.quit">
+            <source>quit</source>
+            <translation>salir</translation>
+        </message>
+        <message id="autodb.menu.edit.copy">
+            <source>&amp;Copy/Yank (register; clipboard if available)</source>
+            <translation>&amp;Copiar/Yank (registro; portapapeles si disponible)</translation>
+        </message>
+        <message id="autodb.menu.edit.cut">
+            <source>Cu&amp;t to register</source>
+            <translation>Cor&amp;tar al registro</translation>
+        </message>
+        <message id="autodb.menu.edit.paste">
+            <source>&amp;Paste register</source>
+            <translation>&amp;Pegar registro</translation>
+        </message>
+        <message id="autodb.menu.options.editor.vim">
+            <source>&amp;Vim mode</source>
+            <translation>Modo &amp;Vim</translation>
+        </message>
+        <message id="autodb.menu.options.editor.textedit">
+            <source>&amp;TextEdit mode</source>
+            <translation>Modo &amp;TextEdit</translation>
+        </message>
+        <message id="autodb.menu.note.open">
+            <source>&amp;Open note…</source>
+            <translation>Abrir n&amp;ota…</translation>
+        </message>
+        <message id="autodb.leader.note.open">
+            <source>open a note…</source>
+            <translation>abrir una nota…</translation>
+        </message>
+        <message id="autodb.menu.options.theme.dark">
+            <source>&amp;Dark</source>
+            <translation>Oscuro(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.light">
+            <source>&amp;Light</source>
+            <translation>Claro(&amp;l)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.mono">
+            <source>&amp;Mono</source>
+            <translation>Mono(&amp;m)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.retro">
+            <source>&amp;Retro</source>
+            <translation>Retro(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.sepia">
+            <source>&amp;Sepia</source>
+            <translation>Sepia(&amp;s)</translation>
+        </message>
+        <message id="autodb.menu.options.language.en">
+            <source>English (&amp;1)</source>
+            <translation>English (&amp;1)</translation>
+        </message>
+        <message id="autodb.menu.options.language.ko_KR">
+            <source>한국어 (&amp;2)</source>
+            <translation>한국어 (&amp;2)</translation>
+        </message>
+        <message id="autodb.menu.options.language.ja_JP">
+            <source>日本語 (&amp;3)</source>
+            <translation>日本語 (&amp;3)</translation>
+        </message>
+        <message id="autodb.menu.options.language.zh_CN">
+            <source>中文 (&amp;4)</source>
+            <translation>中文 (&amp;4)</translation>
+        </message>
+        <message id="autodb.menu.options.language.es">
+            <source>Español (&amp;5)</source>
+            <translation>Español (&amp;5)</translation>
+        </message>
+        <message id="autodb.menu.options.language.pt_BR">
+            <source>Português (Brasil) (&amp;6)</source>
+            <translation>Português (Brasil) (&amp;6)</translation>
+        </message>
+    </context>
+</TS>

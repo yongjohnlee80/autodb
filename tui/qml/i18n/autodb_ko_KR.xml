@@ -1,0 +1,383 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE TS>
+<TS version="2.1" language="ko_KR">
+    <context>
+        <name>autodb</name>
+        <message id="autodb.menu.home">
+            <source>&amp;Home</source>
+            <translation>홈(&amp;h)</translation>
+        </message>
+        <message id="autodb.menu.home.conns">
+            <source>&amp;DB conns</source>
+            <translation>DB 연결(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.file">
+            <source>&amp;File</source>
+            <translation>파일(&amp;f)</translation>
+        </message>
+        <message id="autodb.menu.edit">
+            <source>&amp;Edit</source>
+            <translation>편집(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.run">
+            <source>&amp;Run</source>
+            <translation>실행(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.view">
+            <source>&amp;View</source>
+            <translation>보기(&amp;v)</translation>
+        </message>
+        <message id="autodb.menu.remote">
+            <source>Re&amp;mote</source>
+            <translation>원격(&amp;m)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom">
+            <source>&amp;Zoom</source>
+            <translation>확대/축소(&amp;z)</translation>
+        </message>
+        <message id="autodb.menu.options">
+            <source>&amp;Options</source>
+            <translation>옵션(&amp;o)</translation>
+        </message>
+        <message id="autodb.menu.options.editor">
+            <source>&amp;Editor</source>
+            <translation>편집기(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.options.theme">
+            <source>&amp;Theme</source>
+            <translation>테마(&amp;t)</translation>
+        </message>
+        <message id="autodb.menu.options.language">
+            <source>&amp;Language</source>
+            <translation>언어(&amp;l)</translation>
+        </message>
+        <message id="autodb.menu.system">
+            <source>&amp;System</source>
+            <translation>시스템(&amp;s)</translation>
+        </message>
+        <message id="autodb.menu.query.run">
+            <source>&amp;Execute</source>
+            <translation>실행(&amp;e)</translation>
+        </message>
+        <message id="autodb.leader.query.run">
+            <source>run query (selection when active)</source>
+            <translation>쿼리 실행 (선택 영역이 있으면 그 영역만)</translation>
+        </message>
+        <message id="autodb.menu.query.run_selection">
+            <source>Execute &amp;selection</source>
+            <translation>선택 영역 실행(&amp;s)</translation>
+        </message>
+        <message id="autodb.leader.query.run_selection">
+            <source>run selection only</source>
+            <translation>선택 영역만 실행</translation>
+        </message>
+        <message id="autodb.menu.results.toggle_json">
+            <source>&amp;Results as table/JSON</source>
+            <translation>결과 테이블/JSON 전환(&amp;r)</translation>
+        </message>
+        <message id="autodb.leader.results.toggle_json">
+            <source>toggle results table/JSON</source>
+            <translation>결과를 테이블/JSON으로 전환</translation>
+        </message>
+        <message id="autodb.leader.view.zoom_toggle">
+            <source>zoom the pane in use, or out</source>
+            <translation>사용 중인 창 확대 또는 원복</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_editor">
+            <source>&amp;Query editor</source>
+            <translation>쿼리 편집기(&amp;q)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_results">
+            <source>&amp;Results</source>
+            <translation>결과(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_explorer">
+            <source>&amp;Explorer</source>
+            <translation>탐색기(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_out">
+            <source>Z&amp;oom out</source>
+            <translation>확대 해제(&amp;o)</translation>
+        </message>
+        <message id="autodb.leader.focus.explorer">
+            <source>focus explorer</source>
+            <translation>탐색기로 이동</translation>
+        </message>
+        <message id="autodb.leader.focus.editor">
+            <source>focus query editor</source>
+            <translation>쿼리 편집기로 이동</translation>
+        </message>
+        <message id="autodb.leader.focus.results">
+            <source>focus results</source>
+            <translation>결과로 이동</translation>
+        </message>
+        <message id="autodb.menu.note.new">
+            <source>&amp;New note</source>
+            <translation>새 노트(&amp;n)</translation>
+        </message>
+        <message id="autodb.leader.note.new">
+            <source>new note</source>
+            <translation>새 노트</translation>
+        </message>
+        <message id="autodb.menu.note.save">
+            <source>&amp;Save note</source>
+            <translation>노트 저장(&amp;s)</translation>
+        </message>
+        <message id="autodb.leader.note.save">
+            <source>save note</source>
+            <translation>노트 저장</translation>
+        </message>
+        <message id="autodb.menu.conn.select">
+            <source>&amp;Select…</source>
+            <translation>선택(&amp;s)…</translation>
+        </message>
+        <message id="autodb.leader.conn.select">
+            <source>select the query connection</source>
+            <translation>쿼리 연결 선택</translation>
+        </message>
+        <message id="autodb.menu.conn.manage">
+            <source>&amp;Edit…</source>
+            <translation>편집(&amp;e)…</translation>
+        </message>
+        <message id="autodb.leader.conn.manage">
+            <source>connections…</source>
+            <translation>연결…</translation>
+        </message>
+        <message id="autodb.menu.workspace.manage">
+            <source>&amp;Workspaces…</source>
+            <translation>워크스페이스(&amp;w)…</translation>
+        </message>
+        <message id="autodb.leader.workspace.manage">
+            <source>workspaces…</source>
+            <translation>워크스페이스…</translation>
+        </message>
+        <message id="autodb.menu.user.manage">
+            <source>&amp;Users (admin)…</source>
+            <translation>사용자 (관리자)(&amp;u)…</translation>
+        </message>
+        <message id="autodb.leader.user.manage">
+            <source>users…</source>
+            <translation>사용자…</translation>
+        </message>
+        <message id="autodb.menu.ip.mine">
+            <source>My &amp;IP addresses…</source>
+            <translation>내 IP 주소(&amp;i)…</translation>
+        </message>
+        <message id="autodb.leader.ip.mine">
+            <source>my allowed IPs…</source>
+            <translation>허용된 내 IP…</translation>
+        </message>
+        <message id="autodb.menu.remote.my_keys">
+            <source>My &amp;SSH keys…</source>
+            <translation>내 SSH 키(&amp;s)…</translation>
+        </message>
+        <message id="autodb.menu.token.mine">
+            <source>&amp;Access tokens…</source>
+            <translation>액세스 토큰(&amp;a)…</translation>
+        </message>
+        <message id="autodb.leader.token.mine">
+            <source>my access tokens…</source>
+            <translation>내 액세스 토큰…</translation>
+        </message>
+        <message id="autodb.menu.history.open">
+            <source>&amp;History…</source>
+            <translation>기록(&amp;h)…</translation>
+        </message>
+        <message id="autodb.leader.history.open">
+            <source>script history…</source>
+            <translation>스크립트 기록…</translation>
+        </message>
+        <message id="autodb.menu.audit.open">
+            <source>Au&amp;dit log (admin)…</source>
+            <translation>감사 로그 (관리자)(&amp;d)…</translation>
+        </message>
+        <message id="autodb.leader.audit.open">
+            <source>audit log…</source>
+            <translation>감사 로그…</translation>
+        </message>
+        <message id="autodb.menu.frontdoor.cacert">
+            <source>&amp;CA certificate…</source>
+            <translation>CA 인증서(&amp;c)…</translation>
+        </message>
+        <message id="autodb.leader.frontdoor.cacert">
+            <source>front-door CA certificate…</source>
+            <translation>프론트도어 CA 인증서…</translation>
+        </message>
+        <message id="autodb.menu.explorer.refresh">
+            <source>Re&amp;fresh explorer</source>
+            <translation>탐색기 새로 고침(&amp;f)</translation>
+        </message>
+        <message id="autodb.leader.explorer.refresh">
+            <source>refresh explorer</source>
+            <translation>탐색기 새로 고침</translation>
+        </message>
+        <message id="autodb.menu.ip.allowlist">
+            <source>&amp;Global IP addresses (admin)…</source>
+            <translation>전역 IP 주소 (관리자)(&amp;g)…</translation>
+        </message>
+        <message id="autodb.leader.ip.allowlist">
+            <source>ip allowlist (admin)…</source>
+            <translation>IP 허용 목록 (관리자)…</translation>
+        </message>
+        <message id="autodb.menu.keyslot.manage">
+            <source>Service &amp;keyslot (admin)…</source>
+            <translation>서비스 키슬롯 (관리자)(&amp;k)…</translation>
+        </message>
+        <message id="autodb.leader.keyslot.manage">
+            <source>service keyslot (admin)…</source>
+            <translation>서비스 키슬롯 (관리자)…</translation>
+        </message>
+        <message id="autodb.leader.warning.dismiss_cleartext">
+            <source>dismiss the no-TLS warning</source>
+            <translation>TLS 없음 경고 닫기</translation>
+        </message>
+        <message id="autodb.menu.session.login">
+            <source>&amp;Login / Switch user…</source>
+            <translation>로그인 / 사용자 전환(&amp;l)…</translation>
+        </message>
+        <message id="autodb.leader.session.login">
+            <source>login / switch user</source>
+            <translation>로그인 / 사용자 전환</translation>
+        </message>
+        <message id="autodb.menu.remote.connect">
+            <source>&amp;Connect…</source>
+            <translation>연결(&amp;c)…</translation>
+        </message>
+        <message id="autodb.menu.remote.disconnect">
+            <source>&amp;Disconnect</source>
+            <translation>연결 끊기(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.remote.manage">
+            <source>&amp;Manage…</source>
+            <translation>관리(&amp;m)…</translation>
+        </message>
+        <message id="autodb.leader.session.connect">
+            <source>connect</source>
+            <translation>연결</translation>
+        </message>
+        <message id="autodb.leader.session.disconnect">
+            <source>disconnect</source>
+            <translation>연결 끊기</translation>
+        </message>
+        <message id="autodb.menu.server.restart">
+            <source>&amp;Restart server</source>
+            <translation>서버 재시작(&amp;r)</translation>
+        </message>
+        <message id="autodb.leader.server.restart">
+            <source>restart the server</source>
+            <translation>서버 재시작</translation>
+        </message>
+        <message id="autodb.menu.app.pressure">
+            <source>&amp;Pressure</source>
+            <translation>부하(&amp;p)</translation>
+        </message>
+        <message id="autodb.leader.app.pressure">
+            <source>front-door pressure</source>
+            <translation>프론트도어 부하</translation>
+        </message>
+        <message id="autodb.menu.app.profile">
+            <source>Pro&amp;file…</source>
+            <translation>프로필(&amp;f)…</translation>
+        </message>
+        <message id="autodb.leader.app.profile">
+            <source>profile</source>
+            <translation>프로필</translation>
+        </message>
+        <message id="autodb.menu.app.about">
+            <source>&amp;About</source>
+            <translation>정보(&amp;a)</translation>
+        </message>
+        <message id="autodb.leader.app.about">
+            <source>about autodb</source>
+            <translation>autodb 정보</translation>
+        </message>
+        <message id="autodb.menu.app.help">
+            <source>&amp;Help</source>
+            <translation>도움말(&amp;h)</translation>
+        </message>
+        <message id="autodb.leader.app.help">
+            <source>help</source>
+            <translation>도움말</translation>
+        </message>
+        <message id="autodb.menu.app.quit">
+            <source>E&amp;xit</source>
+            <translation>종료(&amp;x)</translation>
+        </message>
+        <message id="autodb.leader.app.quit">
+            <source>quit</source>
+            <translation>종료</translation>
+        </message>
+        <message id="autodb.menu.edit.copy">
+            <source>&amp;Copy/Yank (register; clipboard if available)</source>
+            <translation>복사/얭크(&amp;c) (레지스터; 가능하면 클립보드)</translation>
+        </message>
+        <message id="autodb.menu.edit.cut">
+            <source>Cu&amp;t to register</source>
+            <translation>잘라내기(&amp;t) (레지스터로)</translation>
+        </message>
+        <message id="autodb.menu.edit.paste">
+            <source>&amp;Paste register</source>
+            <translation>레지스터 붙여넣기(&amp;p)</translation>
+        </message>
+        <message id="autodb.menu.options.editor.vim">
+            <source>&amp;Vim mode</source>
+            <translation>Vim 모드(&amp;v)</translation>
+        </message>
+        <message id="autodb.menu.options.editor.textedit">
+            <source>&amp;TextEdit mode</source>
+            <translation>TextEdit 모드(&amp;t)</translation>
+        </message>
+        <message id="autodb.menu.note.open">
+            <source>&amp;Open note…</source>
+            <translation>노트 열기(&amp;o)…</translation>
+        </message>
+        <message id="autodb.leader.note.open">
+            <source>open a note…</source>
+            <translation>노트 열기…</translation>
+        </message>
+        <message id="autodb.menu.options.theme.dark">
+            <source>&amp;Dark</source>
+            <translation>다크(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.light">
+            <source>&amp;Light</source>
+            <translation>라이트(&amp;l)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.mono">
+            <source>&amp;Mono</source>
+            <translation>모노(&amp;m)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.retro">
+            <source>&amp;Retro</source>
+            <translation>레트로(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.sepia">
+            <source>&amp;Sepia</source>
+            <translation>세피아(&amp;s)</translation>
+        </message>
+        <message id="autodb.menu.options.language.en">
+            <source>English (&amp;1)</source>
+            <translation>English (&amp;1)</translation>
+        </message>
+        <message id="autodb.menu.options.language.ko_KR">
+            <source>한국어 (&amp;2)</source>
+            <translation>한국어 (&amp;2)</translation>
+        </message>
+        <message id="autodb.menu.options.language.ja_JP">
+            <source>日本語 (&amp;3)</source>
+            <translation>日本語 (&amp;3)</translation>
+        </message>
+        <message id="autodb.menu.options.language.zh_CN">
+            <source>中文 (&amp;4)</source>
+            <translation>中文 (&amp;4)</translation>
+        </message>
+        <message id="autodb.menu.options.language.es">
+            <source>Español (&amp;5)</source>
+            <translation>Español (&amp;5)</translation>
+        </message>
+        <message id="autodb.menu.options.language.pt_BR">
+            <source>Português (Brasil) (&amp;6)</source>
+            <translation>Português (Brasil) (&amp;6)</translation>
+        </message>
+    </context>
+</TS>
