@@ -14,11 +14,11 @@ Dialog {
     helpText: App.noteNameError
     Flex {
         direction: Tui.Vertical
-        Text { text: "workspace" }
+        Text { text: qsTrId("autodb.noteName.text") }
         // Starts on the workspace the user is in (App.noteWorkspace).
         ComboBox { id: workspace; model: App.workspaces; textRole: "name"; valueRole: "id"; currentIndex: App.noteWorkspace }
-        Text { text: "name" }
-        TextField { id: name; placeholderText: "report.sql" }
+        Text { text: qsTrId("autodb.noteName.text2") }
+        TextField { id: name; placeholderText: qsTrId("autodb.noteName.placeholderText") }
     }
     onOpened: name.clear()            // a new name each time; the dialog outlives its answers
     onAccepted: App.nameNote(workspace.currentValue, name.text)

@@ -8,7 +8,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "first run — create the root user"
+    title: qsTrId("autodb.bootstrap.title")
     width: 72
     dim: false        // the first thing an operator sees: nothing behind it to fade
     standardButtons: Dialog.Ok | Dialog.Cancel
@@ -16,11 +16,11 @@ Dialog {
     helpText: App.bootstrapError
     Flex {
         direction: Tui.Vertical
-        Text { text: "root user (root if empty)" }
+        Text { text: qsTrId("autodb.bootstrap.text") }
         TextField { id: user }
-        Text { text: "passphrase — at least 8 characters" }
+        Text { text: qsTrId("autodb.bootstrap.text2") }
         TextField { id: passphrase; echoMode: TextInput.Password }
-        Text { text: "again" }
+        Text { text: qsTrId("autodb.bootstrap.text3") }
         TextField { id: again; echoMode: TextInput.Password }
     }
     onOpened: {

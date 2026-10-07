@@ -379,5 +379,677 @@
             <source>Português (Brasil) (&amp;6)</source>
             <translation>Português (Brasil) (&amp;6)</translation>
         </message>
+        <message id="autodb.about.helpText">
+            <source>q, Enter or Esc closes</source>
+            <translation>q、EnterまたはEscで閉じます</translation>
+        </message>
+        <message id="autodb.about.title">
+            <source>About autodb</source>
+            <translation>autodbについて</translation>
+        </message>
+        <message id="autodb.addresses.placeholderText">
+            <source>IP or CIDR (blank = this address for personal list)</source>
+            <translation>IPまたはCIDR（空欄でこのアドレスを個人リストに）</translation>
+        </message>
+        <message id="autodb.addresses.placeholderText2">
+            <source>label</source>
+            <translation>ラベル</translation>
+        </message>
+        <message id="autodb.addresses.text">
+            <source>&amp;Save</source>
+            <translation>保存(&amp;s)</translation>
+        </message>
+        <message id="autodb.addresses.text2">
+            <source>&amp;Add</source>
+            <translation>追加(&amp;a)</translation>
+        </message>
+        <message id="autodb.addresses.text3">
+            <source>&amp;Remove</source>
+            <translation>削除(&amp;r)</translation>
+        </message>
+        <message id="autodb.addresses.text4">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.audit.title">
+            <source>audit log</source>
+            <translation>監査ログ</translation>
+        </message>
+        <message id="autodb.auditFilter.text">
+            <source>connection</source>
+            <translation>接続</translation>
+        </message>
+        <message id="autodb.auditFilter.text2">
+            <source>workspace</source>
+            <translation>ワークスペース</translation>
+        </message>
+        <message id="autodb.auditFilter.text3">
+            <source>user</source>
+            <translation>ユーザ</translation>
+        </message>
+        <message id="autodb.auditFilter.text4">
+            <source>actions (comma-separated, e.g. login_failed, connection_archived)</source>
+            <translation>アクション（カンマ区切り、例: login_failed, connection_archived）</translation>
+        </message>
+        <message id="autodb.auditFilter.text5">
+            <source>from (YYYY-MM-DD)</source>
+            <translation>開始（YYYY-MM-DD）</translation>
+        </message>
+        <message id="autodb.auditFilter.text6">
+            <source>to (YYYY-MM-DD, inclusive)</source>
+            <translation>終了（YYYY-MM-DD、終了日を含む）</translation>
+        </message>
+        <message id="autodb.auditFilter.title">
+            <source>filter audit log</source>
+            <translation>監査ログの絞り込み</translation>
+        </message>
+        <message id="autodb.bootstrap.text">
+            <source>root user (root if empty)</source>
+            <translation>rootユーザ（空欄でroot）</translation>
+        </message>
+        <message id="autodb.bootstrap.text2">
+            <source>passphrase — at least 8 characters</source>
+            <translation>passphrase — 8文字以上</translation>
+        </message>
+        <message id="autodb.bootstrap.text3">
+            <source>again</source>
+            <translation>もう一度</translation>
+        </message>
+        <message id="autodb.bootstrap.title">
+            <source>first run — create the root user</source>
+            <translation>初回実行 — rootユーザを作成</translation>
+        </message>
+        <message id="autodb.cacert.text">
+            <source>Cop&amp;y certificate</source>
+            <translation>証明書をコピー(&amp;y)</translation>
+        </message>
+        <message id="autodb.cacert.text2">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.confirmQuit.text">
+            <source>&amp;Yes, quit</source>
+            <translation>はい、終了(&amp;y)</translation>
+        </message>
+        <message id="autodb.confirmQuit.text2">
+            <source>&amp;No, stay</source>
+            <translation>いいえ、続行(&amp;n)</translation>
+        </message>
+        <message id="autodb.confirmQuit.title">
+            <source>quit autodb?</source>
+            <translation>autodbを終了しますか？</translation>
+        </message>
+        <message id="autodb.confirmRestart.text">
+            <source>&amp;No, stay</source>
+            <translation>いいえ、続行(&amp;n)</translation>
+        </message>
+        <message id="autodb.confirmRestart.text2">
+            <source>&amp;Yes, restart</source>
+            <translation>はい、再起動(&amp;y)</translation>
+        </message>
+        <message id="autodb.confirmRestart.title">
+            <source>restart server</source>
+            <translation>サーバを再起動</translation>
+        </message>
+        <message id="autodb.connCard.helpText">
+            <source>Select and yank with v/y · Copy all button · q/Esc close</source>
+            <translation>v/yで選択してコピー · すべてコピー · q/Escで閉じる</translation>
+        </message>
+        <message id="autodb.connCard.text">
+            <source>Cop&amp;y all</source>
+            <translation>すべてコピー(&amp;y)</translation>
+        </message>
+        <message id="autodb.connCard.text2">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.connPicker.title">
+            <source>connection for this query</source>
+            <translation>このクエリの接続</translation>
+        </message>
+        <message id="autodb.connectionForm.placeholderText">
+            <source>postgres://user@host/db</source>
+            <translation>postgres://user@host/db</translation>
+        </message>
+        <message id="autodb.connectionForm.text">
+            <source>name</source>
+            <translation>名前</translation>
+        </message>
+        <message id="autodb.connectionForm.text2">
+            <source>engine</source>
+            <translation>エンジン</translation>
+        </message>
+        <message id="autodb.connectionForm.text3">
+            <source>DSN (stored encrypted at rest)</source>
+            <translation>DSN（保存時に暗号化）</translation>
+        </message>
+        <message id="autodb.connectionForm.text4">
+            <source>proxy — front door reachability</source>
+            <translation>proxy — フロントドアの到達性</translation>
+        </message>
+        <message id="autodb.connectionForm.text5">
+            <source>capability profile — what SQL clients may send</source>
+            <translation>機能プロファイル — SQLクライアントが送れるもの</translation>
+        </message>
+        <message id="autodb.connections.text">
+            <source>&amp;Add</source>
+            <translation>追加(&amp;a)</translation>
+        </message>
+        <message id="autodb.connections.text2">
+            <source>&amp;Edit</source>
+            <translation>編集(&amp;e)</translation>
+        </message>
+        <message id="autodb.connections.text3">
+            <source>&amp;Test</source>
+            <translation>テスト(&amp;t)</translation>
+        </message>
+        <message id="autodb.connections.text4">
+            <source>&amp;Delete</source>
+            <translation>削除(&amp;d)</translation>
+        </message>
+        <message id="autodb.connections.text5">
+            <source>Attach to &amp;workspace</source>
+            <translation>ワークスペースに接続(&amp;w)</translation>
+        </message>
+        <message id="autodb.connections.text6">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.connections.title">
+            <source>connections</source>
+            <translation>接続</translation>
+        </message>
+        <message id="autodb.help.helpText">
+            <source>q, Esc or Enter closes</source>
+            <translation>q、EscまたはEnterで閉じます</translation>
+        </message>
+        <message id="autodb.help.title">
+            <source>help</source>
+            <translation>ヘルプ</translation>
+        </message>
+        <message id="autodb.hints.title">
+            <source>keys here</source>
+            <translation>この画面のキー</translation>
+        </message>
+        <message id="autodb.history.title">
+            <source>history</source>
+            <translation>履歴</translation>
+        </message>
+        <message id="autodb.historyFilter.text">
+            <source>connection</source>
+            <translation>接続</translation>
+        </message>
+        <message id="autodb.historyFilter.text2">
+            <source>workspace</source>
+            <translation>ワークスペース</translation>
+        </message>
+        <message id="autodb.historyFilter.text3">
+            <source>user</source>
+            <translation>ユーザ</translation>
+        </message>
+        <message id="autodb.historyFilter.text4">
+            <source>status</source>
+            <translation>状態</translation>
+        </message>
+        <message id="autodb.historyFilter.text5">
+            <source>from (YYYY-MM-DD)</source>
+            <translation>開始（YYYY-MM-DD）</translation>
+        </message>
+        <message id="autodb.historyFilter.text6">
+            <source>to (YYYY-MM-DD, inclusive)</source>
+            <translation>終了（YYYY-MM-DD、終了日を含む）</translation>
+        </message>
+        <message id="autodb.historyFilter.title">
+            <source>filter history</source>
+            <translation>履歴の絞り込み</translation>
+        </message>
+        <message id="autodb.inspect.helpText">
+            <source>j/k move · y copy · Enter open</source>
+            <translation>j/k移動 · yコピー · Enterで開く</translation>
+        </message>
+        <message id="autodb.inspect.title">
+            <source>row</source>
+            <translation>行</translation>
+        </message>
+        <message id="autodb.keyPassphrase.helpText">
+            <source>not your autodb passphrase: the one that protects this key file</source>
+            <translation>autodbのpassphraseではなく、このキーファイルを保護するpassphraseです</translation>
+        </message>
+        <message id="autodb.keyPassphrase.title">
+            <source>the SSH key's passphrase</source>
+            <translation>SSHキーのpassphrase</translation>
+        </message>
+        <message id="autodb.keyslot.text">
+            <source>&amp;Enable</source>
+            <translation>有効化(&amp;e)</translation>
+        </message>
+        <message id="autodb.keyslot.text2">
+            <source>&amp;Remove</source>
+            <translation>削除(&amp;r)</translation>
+        </message>
+        <message id="autodb.keyslot.text3">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.keyslot.title">
+            <source>service keyslot</source>
+            <translation>サービスキースロット</translation>
+        </message>
+        <message id="autodb.keyslotConfirm.text">
+            <source>&amp;Proceed</source>
+            <translation>続行(&amp;p)</translation>
+        </message>
+        <message id="autodb.keyslotConfirm.text2">
+            <source>&amp;Cancel</source>
+            <translation>キャンセル(&amp;c)</translation>
+        </message>
+        <message id="autodb.leader.helpText">
+            <source>a key runs its command · Esc closes</source>
+            <translation>キーがコマンドを実行します · Escで閉じる</translation>
+        </message>
+        <message id="autodb.leader.title">
+            <source>SPC — commands</source>
+            <translation>SPC — コマンド</translation>
+        </message>
+        <message id="autodb.login.text">
+            <source>user</source>
+            <translation>ユーザ</translation>
+        </message>
+        <message id="autodb.login.text2">
+            <source>passphrase</source>
+            <translation>passphrase</translation>
+        </message>
+        <message id="autodb.login.title">
+            <source>sign in</source>
+            <translation>ログイン</translation>
+        </message>
+        <message id="autodb.main.title">
+            <source>explorer</source>
+            <translation>エクスプローラ</translation>
+        </message>
+        <message id="autodb.main.title2">
+            <source>results</source>
+            <translation>結果</translation>
+        </message>
+        <message id="autodb.noteConflict.text">
+            <source>&amp;Keep</source>
+            <translation>保持(&amp;k)</translation>
+        </message>
+        <message id="autodb.noteConflict.text2">
+            <source>&amp;Overwrite</source>
+            <translation>上書き(&amp;o)</translation>
+        </message>
+        <message id="autodb.noteConflict.text3">
+            <source>&amp;Save as…</source>
+            <translation>名前を付けて保存(&amp;s)…</translation>
+        </message>
+        <message id="autodb.noteConflict.title">
+            <source>note changed on disk</source>
+            <translation>ノートがディスク上で変更されました</translation>
+        </message>
+        <message id="autodb.noteName.placeholderText">
+            <source>report.sql</source>
+            <translation>report.sql</translation>
+        </message>
+        <message id="autodb.noteName.text">
+            <source>workspace</source>
+            <translation>ワークスペース</translation>
+        </message>
+        <message id="autodb.noteName.text2">
+            <source>name</source>
+            <translation>名前</translation>
+        </message>
+        <message id="autodb.noteOpen.placeholderText">
+            <source>filter by note or workspace</source>
+            <translation>ノートまたはワークスペースで絞り込み</translation>
+        </message>
+        <message id="autodb.noteOpen.title">
+            <source>open a note</source>
+            <translation>ノートを開く</translation>
+        </message>
+        <message id="autodb.pressure.title">
+            <source>pressure</source>
+            <translation>負荷</translation>
+        </message>
+        <message id="autodb.profile.text">
+            <source>current passphrase</source>
+            <translation>現在のpassphrase</translation>
+        </message>
+        <message id="autodb.profile.text2">
+            <source>new passphrase</source>
+            <translation>新しいpassphrase</translation>
+        </message>
+        <message id="autodb.profile.text3">
+            <source>again</source>
+            <translation>もう一度</translation>
+        </message>
+        <message id="autodb.profile.text4">
+            <source>&amp;Update passphrase</source>
+            <translation>passphraseを更新(&amp;u)</translation>
+        </message>
+        <message id="autodb.profile.text5">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.profile.title">
+            <source>profile</source>
+            <translation>プロファイル</translation>
+        </message>
+        <message id="autodb.remoteConnect.text">
+            <source>server</source>
+            <translation>サーバ</translation>
+        </message>
+        <message id="autodb.remoteConnect.text2">
+            <source>autodb passphrase</source>
+            <translation>autodb passphrase</translation>
+        </message>
+        <message id="autodb.remoteConnect.text3">
+            <source>the passphrase again</source>
+            <translation>passphraseをもう一度</translation>
+        </message>
+        <message id="autodb.remoteConnect.title">
+            <source>connect to a remote server</source>
+            <translation>リモートサーバへ接続</translation>
+        </message>
+        <message id="autodb.remoteManage.text">
+            <source>section</source>
+            <translation>セクション</translation>
+        </message>
+        <message id="autodb.remoteManage.text10">
+            <source>Revoke &amp;device</source>
+            <translation>デバイスを失効(&amp;d)</translation>
+        </message>
+        <message id="autodb.remoteManage.text11">
+            <source>&amp;Unblock</source>
+            <translation>ブロック解除(&amp;u)</translation>
+        </message>
+        <message id="autodb.remoteManage.text12">
+            <source>&amp;Next page</source>
+            <translation>次のページ(&amp;n)</translation>
+        </message>
+        <message id="autodb.remoteManage.text13">
+            <source>&amp;Prev page</source>
+            <translation>前のページ(&amp;p)</translation>
+        </message>
+        <message id="autodb.remoteManage.text14">
+            <source>Refre&amp;sh</source>
+            <translation>更新(&amp;s)</translation>
+        </message>
+        <message id="autodb.remoteManage.text15">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.remoteManage.text2">
+            <source>kind</source>
+            <translation>種類</translation>
+        </message>
+        <message id="autodb.remoteManage.text3">
+            <source>&amp;Add</source>
+            <translation>追加(&amp;a)</translation>
+        </message>
+        <message id="autodb.remoteManage.text4">
+            <source>&amp;Edit</source>
+            <translation>編集(&amp;e)</translation>
+        </message>
+        <message id="autodb.remoteManage.text5">
+            <source>Re&amp;move</source>
+            <translation>削除(&amp;m)</translation>
+        </message>
+        <message id="autodb.remoteManage.text6">
+            <source>Forget &amp;host key</source>
+            <translation>ホストキーを忘れる(&amp;h)</translation>
+        </message>
+        <message id="autodb.remoteManage.text7">
+            <source>Add &amp;key</source>
+            <translation>キーを追加(&amp;k)</translation>
+        </message>
+        <message id="autodb.remoteManage.text8">
+            <source>&amp;Label</source>
+            <translation>ラベル(&amp;l)</translation>
+        </message>
+        <message id="autodb.remoteManage.text9">
+            <source>Re&amp;voke key</source>
+            <translation>キーを失効(&amp;v)</translation>
+        </message>
+        <message id="autodb.remoteManage.title">
+            <source>manage remote access</source>
+            <translation>リモートアクセスの管理</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text">
+            <source>name (how the menus show it)</source>
+            <translation>名前（メニュー表示用）</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text2">
+            <source>host (name or address)</source>
+            <translation>ホスト（名前またはアドレス）</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text3">
+            <source>port (blank for 7422)</source>
+            <translation>ポート（空欄で7422）</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text4">
+            <source>your autodb user there</source>
+            <translation>そちらでのあなたのautodbユーザ</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text5">
+            <source>SSH key file (its .pub must be registered on your profile there)</source>
+            <translation>SSHキーファイル（.pubをそちらのプロファイルに登録してください）</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text6">
+            <source>signing</source>
+            <translation>署名</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text7">
+            <source>host key</source>
+            <translation>ホストキー</translation>
+        </message>
+        <message id="autodb.results.text">
+            <source>no results — SPC r runs the query</source>
+            <translation>結果はありません — SPC rでクエリを実行</translation>
+        </message>
+        <message id="autodb.search.placeholderText">
+            <source>find text</source>
+            <translation>検索するテキスト</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text">
+            <source>public key (the one line of your .pub file)</source>
+            <translation>公開鍵（.pubファイルのあの1行）</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text2">
+            <source>label (which computer or key it is)</source>
+            <translation>ラベル（どのコンピュータまたはキーか）</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text3">
+            <source>your autodb passphrase (a wrong one signs you out)</source>
+            <translation>あなたのautodb passphrase（誤るとサインアウトされます）</translation>
+        </message>
+        <message id="autodb.startChoice.helpText">
+            <source>Enter starts there · Esc starts connected to nothing</source>
+            <translation>Enterで開始 · Escは接続なしで開始</translation>
+        </message>
+        <message id="autodb.startChoice.title">
+            <source>start on</source>
+            <translation>開始先</translation>
+        </message>
+        <message id="autodb.tokenForm.placeholderText">
+            <source>no</source>
+            <translation>no</translation>
+        </message>
+        <message id="autodb.tokenForm.text">
+            <source>name</source>
+            <translation>名前</translation>
+        </message>
+        <message id="autodb.tokenForm.text2">
+            <source>expires in days (1–365, blank for default)</source>
+            <translation>有効日数（1–365、空欄で既定）</translation>
+        </message>
+        <message id="autodb.tokenForm.text3">
+            <source>IPs (comma-separated CIDRs, blank inherits your allowlist)</source>
+            <translation>IP（カンマ区切りのCIDR、空欄で許可リストを継承）</translation>
+        </message>
+        <message id="autodb.tokenForm.text4">
+            <source>connection</source>
+            <translation>接続</translation>
+        </message>
+        <message id="autodb.tokenForm.text5">
+            <source>allow cleartext debug traffic? (yes/no)</source>
+            <translation>cleartextのデバッグトラフィックを許可しますか？（yes/no）</translation>
+        </message>
+        <message id="autodb.tokenForm.title">
+            <source>create access token</source>
+            <translation>アクセストークンを作成</translation>
+        </message>
+        <message id="autodb.tokens.text">
+            <source>&amp;Create</source>
+            <translation>作成(&amp;c)</translation>
+        </message>
+        <message id="autodb.tokens.text2">
+            <source>&amp;Revoke</source>
+            <translation>失効(&amp;r)</translation>
+        </message>
+        <message id="autodb.tokens.text3">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.tokens.title">
+            <source>my access tokens</source>
+            <translation>自分のアクセストークン</translation>
+        </message>
+        <message id="autodb.unsavedNote.text">
+            <source>&amp;Save</source>
+            <translation>保存(&amp;s)</translation>
+        </message>
+        <message id="autodb.unsavedNote.text2">
+            <source>&amp;Discard</source>
+            <translation>破棄(&amp;d)</translation>
+        </message>
+        <message id="autodb.unsavedNote.text3">
+            <source>S&amp;tay</source>
+            <translation>続行(&amp;t)</translation>
+        </message>
+        <message id="autodb.unsavedNote.title">
+            <source>unsaved note</source>
+            <translation>未保存のノート</translation>
+        </message>
+        <message id="autodb.userForm.text">
+            <source>name</source>
+            <translation>名前</translation>
+        </message>
+        <message id="autodb.userForm.text2">
+            <source>role</source>
+            <translation>ロール</translation>
+        </message>
+        <message id="autodb.userForm.text3">
+            <source>connection</source>
+            <translation>接続</translation>
+        </message>
+        <message id="autodb.userForm.text4">
+            <source>passphrase (min 8 characters)</source>
+            <translation>passphrase（8文字以上）</translation>
+        </message>
+        <message id="autodb.users.text">
+            <source>&amp;Add</source>
+            <translation>追加(&amp;a)</translation>
+        </message>
+        <message id="autodb.users.text2">
+            <source>&amp;Role</source>
+            <translation>ロール(&amp;r)</translation>
+        </message>
+        <message id="autodb.users.text3">
+            <source>&amp;Passphrase</source>
+            <translation>passphrase(&amp;p)</translation>
+        </message>
+        <message id="autodb.users.text4">
+            <source>&amp;Toggle</source>
+            <translation>切替(&amp;t)</translation>
+        </message>
+        <message id="autodb.users.text5">
+            <source>Grant &amp;connection</source>
+            <translation>接続を許可(&amp;c)</translation>
+        </message>
+        <message id="autodb.users.text6">
+            <source>&amp;IPs</source>
+            <translation>IP(&amp;i)</translation>
+        </message>
+        <message id="autodb.users.text7">
+            <source>SS&amp;H keys</source>
+            <translation>SSHキー(&amp;h)</translation>
+        </message>
+        <message id="autodb.users.text8">
+            <source>Remo&amp;ve</source>
+            <translation>削除(&amp;v)</translation>
+        </message>
+        <message id="autodb.users.text9">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.users.title">
+            <source>users</source>
+            <translation>ユーザ</translation>
+        </message>
+        <message id="autodb.value.helpText">
+            <source>Tab to Copy · q/Esc close</source>
+            <translation>Tabでコピー · q/Escで閉じる</translation>
+        </message>
+        <message id="autodb.value.text">
+            <source>Cop&amp;y</source>
+            <translation>コピー(&amp;y)</translation>
+        </message>
+        <message id="autodb.value.text2">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.widening.text">
+            <source>&amp;Add and mint</source>
+            <translation>追加して発行(&amp;a)</translation>
+        </message>
+        <message id="autodb.widening.text2">
+            <source>&amp;Cancel</source>
+            <translation>キャンセル(&amp;c)</translation>
+        </message>
+        <message id="autodb.widening.title">
+            <source>allowlist widening</source>
+            <translation>許可リストの拡張</translation>
+        </message>
+        <message id="autodb.workspaceName.text">
+            <source>name</source>
+            <translation>名前</translation>
+        </message>
+        <message id="autodb.workspaces.text">
+            <source>&amp;New</source>
+            <translation>新規(&amp;n)</translation>
+        </message>
+        <message id="autodb.workspaces.text2">
+            <source>&amp;Rename</source>
+            <translation>名前変更(&amp;r)</translation>
+        </message>
+        <message id="autodb.workspaces.text3">
+            <source>&amp;Delete</source>
+            <translation>削除(&amp;d)</translation>
+        </message>
+        <message id="autodb.workspaces.text4">
+            <source>&amp;Attach</source>
+            <translation>接続(&amp;a)</translation>
+        </message>
+        <message id="autodb.workspaces.text5">
+            <source>De&amp;tach</source>
+            <translation>解除(&amp;t)</translation>
+        </message>
+        <message id="autodb.workspaces.text6">
+            <source>Close(&amp;q)</source>
+            <translation>閉じる(&amp;q)</translation>
+        </message>
+        <message id="autodb.workspaces.title">
+            <source>workspaces</source>
+            <translation>ワークスペース</translation>
+        </message>
+        <message id="autodb.workspaces.title2">
+            <source>workspaces</source>
+            <translation>ワークスペース</translation>
+        </message>
+        <message id="autodb.workspaces.title3">
+            <source>connections here</source>
+            <translation>ワークスペース</translation>
+        </message>
     </context>
 </TS>

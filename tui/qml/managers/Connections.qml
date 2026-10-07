@@ -11,7 +11,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "connections"
+    title: qsTrId("autodb.connections.title")
     dim: false
     helpText: App.connectionsStatus
     // A column, as Qt's ColumnLayout in a Dialog: the table sizes to its rows.
@@ -31,11 +31,11 @@ Dialog {
         }
     }
     DialogButtonBox {
-        Button { text: "&Add";    DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionAdd() }
-        Button { text: "&Edit";   DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionEdit(table.currentIndex) }
-        Button { text: "&Test";   DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionTest(table.currentIndex) }
-        Button { text: "&Delete"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionDelete(table.currentIndex) }
-        Button { text: "Attach to &workspace"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionAttach(table.currentIndex) }
-        Button { text: "Close(&q)";  DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: qsTrId("autodb.connections.text");    DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionAdd() }
+        Button { text: qsTrId("autodb.connections.text2");   DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionEdit(table.currentIndex) }
+        Button { text: qsTrId("autodb.connections.text3");   DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionTest(table.currentIndex) }
+        Button { text: qsTrId("autodb.connections.text4"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionDelete(table.currentIndex) }
+        Button { text: qsTrId("autodb.connections.text5"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionAttach(table.currentIndex) }
+        Button { text: qsTrId("autodb.connections.text6");  DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

@@ -7,7 +7,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "connection for this query"
+    title: qsTrId("autodb.connPicker.title")
     dim: false
     standardButtons: Dialog.Cancel
     ListView {

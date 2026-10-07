@@ -5,7 +5,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "filter history"
+    title: qsTrId("autodb.historyFilter.title")
     width: 60
     dim: false
     standardButtons: Dialog.Ok | Dialog.Cancel
@@ -13,17 +13,17 @@ Dialog {
     onRejected: App.historyFilterCancelled()
     Flex {
         direction: Tui.Vertical
-        Text { text: "connection" }
+        Text { text: qsTrId("autodb.historyFilter.text") }
         ComboBox { id: conn; model: App.historyConnChoices; textRole: "label"; valueRole: "id"; currentIndex: App.historyFilterConnIndex }
-        Text { text: "workspace" }
+        Text { text: qsTrId("autodb.historyFilter.text2") }
         ComboBox { id: space; model: App.historySpaceChoices; textRole: "label"; valueRole: "id"; currentIndex: App.historyFilterSpaceIndex }
-        Text { text: "user"; visible: App.historyFilterUsers }
+        Text { text: qsTrId("autodb.historyFilter.text3"); visible: App.historyFilterUsers }
         ComboBox { id: user; visible: App.historyFilterUsers; model: App.historyUserChoices; textRole: "label"; valueRole: "id"; currentIndex: App.historyFilterUserIndex }
-        Text { text: "status" }
+        Text { text: qsTrId("autodb.historyFilter.text4") }
         ComboBox { id: status; model: App.historyStatusChoices; textRole: "label"; valueRole: "id"; currentIndex: App.historyFilterStatusIndex }
-        Text { text: "from (YYYY-MM-DD)" }
+        Text { text: qsTrId("autodb.historyFilter.text5") }
         TextField { id: from }
-        Text { text: "to (YYYY-MM-DD, inclusive)" }
+        Text { text: qsTrId("autodb.historyFilter.text6") }
         TextField { id: to }
     }
     onAccepted: App.historyFilterApply(conn.currentValue, space.currentValue, user.currentValue, status.currentValue, from.text, to.text)

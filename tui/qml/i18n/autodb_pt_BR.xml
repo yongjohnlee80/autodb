@@ -379,5 +379,677 @@
             <source>Português (Brasil) (&amp;6)</source>
             <translation>Português (Brasil) (&amp;6)</translation>
         </message>
+        <message id="autodb.about.helpText">
+            <source>q, Enter or Esc closes</source>
+            <translation>q, Enter ou Esc fecha</translation>
+        </message>
+        <message id="autodb.about.title">
+            <source>About autodb</source>
+            <translation>Sobre o autodb</translation>
+        </message>
+        <message id="autodb.addresses.placeholderText">
+            <source>IP or CIDR (blank = this address for personal list)</source>
+            <translation>IP ou CIDR (vazio = este endereço para a lista pessoal)</translation>
+        </message>
+        <message id="autodb.addresses.placeholderText2">
+            <source>label</source>
+            <translation>rótulo</translation>
+        </message>
+        <message id="autodb.addresses.text">
+            <source>&amp;Save</source>
+            <translation>&amp;Salvar</translation>
+        </message>
+        <message id="autodb.addresses.text2">
+            <source>&amp;Add</source>
+            <translation>&amp;Adicionar</translation>
+        </message>
+        <message id="autodb.addresses.text3">
+            <source>&amp;Remove</source>
+            <translation>&amp;Remover</translation>
+        </message>
+        <message id="autodb.addresses.text4">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.audit.title">
+            <source>audit log</source>
+            <translation>registro de auditoria</translation>
+        </message>
+        <message id="autodb.auditFilter.text">
+            <source>connection</source>
+            <translation>conexão</translation>
+        </message>
+        <message id="autodb.auditFilter.text2">
+            <source>workspace</source>
+            <translation>espaço de trabalho</translation>
+        </message>
+        <message id="autodb.auditFilter.text3">
+            <source>user</source>
+            <translation>usuário</translation>
+        </message>
+        <message id="autodb.auditFilter.text4">
+            <source>actions (comma-separated, e.g. login_failed, connection_archived)</source>
+            <translation>ações (separadas por vírgula, ex.: login_failed, connection_archived)</translation>
+        </message>
+        <message id="autodb.auditFilter.text5">
+            <source>from (YYYY-MM-DD)</source>
+            <translation>de (AAAA-MM-DD)</translation>
+        </message>
+        <message id="autodb.auditFilter.text6">
+            <source>to (YYYY-MM-DD, inclusive)</source>
+            <translation>até (AAAA-MM-DD, inclusivo)</translation>
+        </message>
+        <message id="autodb.auditFilter.title">
+            <source>filter audit log</source>
+            <translation>filtrar o registro de auditoria</translation>
+        </message>
+        <message id="autodb.bootstrap.text">
+            <source>root user (root if empty)</source>
+            <translation>usuário root (root se vazio)</translation>
+        </message>
+        <message id="autodb.bootstrap.text2">
+            <source>passphrase — at least 8 characters</source>
+            <translation>passphrase — pelo menos 8 caracteres</translation>
+        </message>
+        <message id="autodb.bootstrap.text3">
+            <source>again</source>
+            <translation>de novo</translation>
+        </message>
+        <message id="autodb.bootstrap.title">
+            <source>first run — create the root user</source>
+            <translation>primeira execução — criar o usuário root</translation>
+        </message>
+        <message id="autodb.cacert.text">
+            <source>Cop&amp;y certificate</source>
+            <translation>Copamp;iar certificado (&amp;y)</translation>
+        </message>
+        <message id="autodb.cacert.text2">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.confirmQuit.text">
+            <source>&amp;Yes, quit</source>
+            <translation>amp;Sim, sair (&amp;y)</translation>
+        </message>
+        <message id="autodb.confirmQuit.text2">
+            <source>&amp;No, stay</source>
+            <translation>&amp;Não, ficar</translation>
+        </message>
+        <message id="autodb.confirmQuit.title">
+            <source>quit autodb?</source>
+            <translation>sair do autodb?</translation>
+        </message>
+        <message id="autodb.confirmRestart.text">
+            <source>&amp;No, stay</source>
+            <translation>&amp;Não, ficar</translation>
+        </message>
+        <message id="autodb.confirmRestart.text2">
+            <source>&amp;Yes, restart</source>
+            <translation>amp;Sim, reiniciar (&amp;y)</translation>
+        </message>
+        <message id="autodb.confirmRestart.title">
+            <source>restart server</source>
+            <translation>reiniciar servidor</translation>
+        </message>
+        <message id="autodb.connCard.helpText">
+            <source>Select and yank with v/y · Copy all button · q/Esc close</source>
+            <translation>v/y seleciona e copia · botão Copiar tudo · q/Esc fecha</translation>
+        </message>
+        <message id="autodb.connCard.text">
+            <source>Cop&amp;y all</source>
+            <translation>Copamp;iar tudo (&amp;y)</translation>
+        </message>
+        <message id="autodb.connCard.text2">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.connPicker.title">
+            <source>connection for this query</source>
+            <translation>conexão para esta consulta</translation>
+        </message>
+        <message id="autodb.connectionForm.placeholderText">
+            <source>postgres://user@host/db</source>
+            <translation>postgres://user@host/db</translation>
+        </message>
+        <message id="autodb.connectionForm.text">
+            <source>name</source>
+            <translation>nome</translation>
+        </message>
+        <message id="autodb.connectionForm.text2">
+            <source>engine</source>
+            <translation>engine</translation>
+        </message>
+        <message id="autodb.connectionForm.text3">
+            <source>DSN (stored encrypted at rest)</source>
+            <translation>DSN (armazenado criptografado em repouso)</translation>
+        </message>
+        <message id="autodb.connectionForm.text4">
+            <source>proxy — front door reachability</source>
+            <translation>proxy — alcance do front-door</translation>
+        </message>
+        <message id="autodb.connectionForm.text5">
+            <source>capability profile — what SQL clients may send</source>
+            <translation>perfil de capacidades — o que um cliente SQL pode enviar</translation>
+        </message>
+        <message id="autodb.connections.text">
+            <source>&amp;Add</source>
+            <translation>&amp;Adicionar</translation>
+        </message>
+        <message id="autodb.connections.text2">
+            <source>&amp;Edit</source>
+            <translation>&amp;Editar</translation>
+        </message>
+        <message id="autodb.connections.text3">
+            <source>&amp;Test</source>
+            <translation>&amp;Testar</translation>
+        </message>
+        <message id="autodb.connections.text4">
+            <source>&amp;Delete</source>
+            <translation>amp;Excluir (&amp;d)</translation>
+        </message>
+        <message id="autodb.connections.text5">
+            <source>Attach to &amp;workspace</source>
+            <translation>Anexar ao espaço de trabalho(&amp;w)</translation>
+        </message>
+        <message id="autodb.connections.text6">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.connections.title">
+            <source>connections</source>
+            <translation>conexões</translation>
+        </message>
+        <message id="autodb.help.helpText">
+            <source>q, Esc or Enter closes</source>
+            <translation>q, Esc ou Enter fecha</translation>
+        </message>
+        <message id="autodb.help.title">
+            <source>help</source>
+            <translation>ajuda</translation>
+        </message>
+        <message id="autodb.hints.title">
+            <source>keys here</source>
+            <translation>teclas daqui</translation>
+        </message>
+        <message id="autodb.history.title">
+            <source>history</source>
+            <translation>histórico</translation>
+        </message>
+        <message id="autodb.historyFilter.text">
+            <source>connection</source>
+            <translation>conexão</translation>
+        </message>
+        <message id="autodb.historyFilter.text2">
+            <source>workspace</source>
+            <translation>espaço de trabalho</translation>
+        </message>
+        <message id="autodb.historyFilter.text3">
+            <source>user</source>
+            <translation>usuário</translation>
+        </message>
+        <message id="autodb.historyFilter.text4">
+            <source>status</source>
+            <translation>estado</translation>
+        </message>
+        <message id="autodb.historyFilter.text5">
+            <source>from (YYYY-MM-DD)</source>
+            <translation>de (AAAA-MM-DD)</translation>
+        </message>
+        <message id="autodb.historyFilter.text6">
+            <source>to (YYYY-MM-DD, inclusive)</source>
+            <translation>até (AAAA-MM-DD, inclusivo)</translation>
+        </message>
+        <message id="autodb.historyFilter.title">
+            <source>filter history</source>
+            <translation>filtrar o histórico</translation>
+        </message>
+        <message id="autodb.inspect.helpText">
+            <source>j/k move · y copy · Enter open</source>
+            <translation>j/k move · y copia · Enter abre</translation>
+        </message>
+        <message id="autodb.inspect.title">
+            <source>row</source>
+            <translation>linha</translation>
+        </message>
+        <message id="autodb.keyPassphrase.helpText">
+            <source>not your autodb passphrase: the one that protects this key file</source>
+            <translation>não a sua passphrase do autodb: a que protege este arquivo de chave</translation>
+        </message>
+        <message id="autodb.keyPassphrase.title">
+            <source>the SSH key's passphrase</source>
+            <translation>a passphrase da chave SSH</translation>
+        </message>
+        <message id="autodb.keyslot.text">
+            <source>&amp;Enable</source>
+            <translation>Habilitar(&amp;e)</translation>
+        </message>
+        <message id="autodb.keyslot.text2">
+            <source>&amp;Remove</source>
+            <translation>Remove&amp;r</translation>
+        </message>
+        <message id="autodb.keyslot.text3">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.keyslot.title">
+            <source>service keyslot</source>
+            <translation>slot de chave do serviço</translation>
+        </message>
+        <message id="autodb.keyslotConfirm.text">
+            <source>&amp;Proceed</source>
+            <translation>&amp;Prosseguir</translation>
+        </message>
+        <message id="autodb.keyslotConfirm.text2">
+            <source>&amp;Cancel</source>
+            <translation>&amp;Cancelar</translation>
+        </message>
+        <message id="autodb.leader.helpText">
+            <source>a key runs its command · Esc closes</source>
+            <translation>uma tecla executa seu comando · Esc fecha</translation>
+        </message>
+        <message id="autodb.leader.title">
+            <source>SPC — commands</source>
+            <translation>SPC — comandos</translation>
+        </message>
+        <message id="autodb.login.text">
+            <source>user</source>
+            <translation>usuário</translation>
+        </message>
+        <message id="autodb.login.text2">
+            <source>passphrase</source>
+            <translation>passphrase</translation>
+        </message>
+        <message id="autodb.login.title">
+            <source>sign in</source>
+            <translation>entrar</translation>
+        </message>
+        <message id="autodb.main.title">
+            <source>explorer</source>
+            <translation>explorador</translation>
+        </message>
+        <message id="autodb.main.title2">
+            <source>results</source>
+            <translation>resultados</translation>
+        </message>
+        <message id="autodb.noteConflict.text">
+            <source>&amp;Keep</source>
+            <translation>amp;Manter (&amp;k)</translation>
+        </message>
+        <message id="autodb.noteConflict.text2">
+            <source>&amp;Overwrite</source>
+            <translation>S&amp;obrescrever</translation>
+        </message>
+        <message id="autodb.noteConflict.text3">
+            <source>&amp;Save as…</source>
+            <translation>&amp;Salvar como…</translation>
+        </message>
+        <message id="autodb.noteConflict.title">
+            <source>note changed on disk</source>
+            <translation>nota alterada no disco</translation>
+        </message>
+        <message id="autodb.noteName.placeholderText">
+            <source>report.sql</source>
+            <translation>report.sql</translation>
+        </message>
+        <message id="autodb.noteName.text">
+            <source>workspace</source>
+            <translation>espaço de trabalho</translation>
+        </message>
+        <message id="autodb.noteName.text2">
+            <source>name</source>
+            <translation>nome</translation>
+        </message>
+        <message id="autodb.noteOpen.placeholderText">
+            <source>filter by note or workspace</source>
+            <translation>filtrar por nota ou espaço de trabalho</translation>
+        </message>
+        <message id="autodb.noteOpen.title">
+            <source>open a note</source>
+            <translation>abrir uma nota</translation>
+        </message>
+        <message id="autodb.pressure.title">
+            <source>pressure</source>
+            <translation>pressão</translation>
+        </message>
+        <message id="autodb.profile.text">
+            <source>current passphrase</source>
+            <translation>passphrase atual</translation>
+        </message>
+        <message id="autodb.profile.text2">
+            <source>new passphrase</source>
+            <translation>nova passphrase</translation>
+        </message>
+        <message id="autodb.profile.text3">
+            <source>again</source>
+            <translation>de novo</translation>
+        </message>
+        <message id="autodb.profile.text4">
+            <source>&amp;Update passphrase</source>
+            <translation>At&amp;ualizar passphrase</translation>
+        </message>
+        <message id="autodb.profile.text5">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.profile.title">
+            <source>profile</source>
+            <translation>perfil</translation>
+        </message>
+        <message id="autodb.remoteConnect.text">
+            <source>server</source>
+            <translation>servidor</translation>
+        </message>
+        <message id="autodb.remoteConnect.text2">
+            <source>autodb passphrase</source>
+            <translation>passphrase do autodb</translation>
+        </message>
+        <message id="autodb.remoteConnect.text3">
+            <source>the passphrase again</source>
+            <translation>a passphrase de novo</translation>
+        </message>
+        <message id="autodb.remoteConnect.title">
+            <source>connect to a remote server</source>
+            <translation>conectar a um servidor remoto</translation>
+        </message>
+        <message id="autodb.remoteManage.text">
+            <source>section</source>
+            <translation>seção</translation>
+        </message>
+        <message id="autodb.remoteManage.text10">
+            <source>Revoke &amp;device</source>
+            <translation>Revogar &amp;dispositivo</translation>
+        </message>
+        <message id="autodb.remoteManage.text11">
+            <source>&amp;Unblock</source>
+            <translation>Desbloq&amp;uear</translation>
+        </message>
+        <message id="autodb.remoteManage.text12">
+            <source>&amp;Next page</source>
+            <translation>Próxima pági&amp;na</translation>
+        </message>
+        <message id="autodb.remoteManage.text13">
+            <source>&amp;Prev page</source>
+            <translation>&amp;Página aamp;nterior</translation>
+        </message>
+        <message id="autodb.remoteManage.text14">
+            <source>Refre&amp;sh</source>
+            <translation>Refre&amp;scar</translation>
+        </message>
+        <message id="autodb.remoteManage.text15">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.remoteManage.text2">
+            <source>kind</source>
+            <translation>tipo</translation>
+        </message>
+        <message id="autodb.remoteManage.text3">
+            <source>&amp;Add</source>
+            <translation>&amp;Adicionar</translation>
+        </message>
+        <message id="autodb.remoteManage.text4">
+            <source>&amp;Edit</source>
+            <translation>&amp;Editar</translation>
+        </message>
+        <message id="autodb.remoteManage.text5">
+            <source>Re&amp;move</source>
+            <translation>Re&amp;mover</translation>
+        </message>
+        <message id="autodb.remoteManage.text6">
+            <source>Forget &amp;host key</source>
+            <translation>Esquecer chave de &amp;host</translation>
+        </message>
+        <message id="autodb.remoteManage.text7">
+            <source>Add &amp;key</source>
+            <translation>Adicionar camp;have (&amp;k)</translation>
+        </message>
+        <message id="autodb.remoteManage.text8">
+            <source>&amp;Label</source>
+            <translation>amp;Rótu&amp;lo</translation>
+        </message>
+        <message id="autodb.remoteManage.text9">
+            <source>Re&amp;voke key</source>
+            <translation>Re&amp;vogar chave</translation>
+        </message>
+        <message id="autodb.remoteManage.title">
+            <source>manage remote access</source>
+            <translation>gerenciar acesso remoto</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text">
+            <source>name (how the menus show it)</source>
+            <translation>nome (como os menus mostram)</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text2">
+            <source>host (name or address)</source>
+            <translation>host (nome ou endereço)</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text3">
+            <source>port (blank for 7422)</source>
+            <translation>porta (vazio para 7422)</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text4">
+            <source>your autodb user there</source>
+            <translation>seu usuário do autodb lá</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text5">
+            <source>SSH key file (its .pub must be registered on your profile there)</source>
+            <translation>arquivo de chave SSH (seu .pub deve estar registrado no seu perfil lá)</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text6">
+            <source>signing</source>
+            <translation>assinatura</translation>
+        </message>
+        <message id="autodb.remoteServerForm.text7">
+            <source>host key</source>
+            <translation>chave de host</translation>
+        </message>
+        <message id="autodb.results.text">
+            <source>no results — SPC r runs the query</source>
+            <translation>sem resultados — SPC r executa a consulta</translation>
+        </message>
+        <message id="autodb.search.placeholderText">
+            <source>find text</source>
+            <translation>buscar texto</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text">
+            <source>public key (the one line of your .pub file)</source>
+            <translation>chave pública (a única linha do seu arquivo .pub)</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text2">
+            <source>label (which computer or key it is)</source>
+            <translation>rótulo (qual computador ou chave é)</translation>
+        </message>
+        <message id="autodb.sshKeyForm.text3">
+            <source>your autodb passphrase (a wrong one signs you out)</source>
+            <translation>sua passphrase do autodb (uma errada encerra sua sessão)</translation>
+        </message>
+        <message id="autodb.startChoice.helpText">
+            <source>Enter starts there · Esc starts connected to nothing</source>
+            <translation>Enter começa lá · Esc começa sem conexão</translation>
+        </message>
+        <message id="autodb.startChoice.title">
+            <source>start on</source>
+            <translation>começar em</translation>
+        </message>
+        <message id="autodb.tokenForm.placeholderText">
+            <source>no</source>
+            <translation>no</translation>
+        </message>
+        <message id="autodb.tokenForm.text">
+            <source>name</source>
+            <translation>nome</translation>
+        </message>
+        <message id="autodb.tokenForm.text2">
+            <source>expires in days (1–365, blank for default)</source>
+            <translation>expira em dias (1–365, vazio para o padrão)</translation>
+        </message>
+        <message id="autodb.tokenForm.text3">
+            <source>IPs (comma-separated CIDRs, blank inherits your allowlist)</source>
+            <translation>IP (CIDRs separados por vírgula, vazio herda sua lista)</translation>
+        </message>
+        <message id="autodb.tokenForm.text4">
+            <source>connection</source>
+            <translation>conexão</translation>
+        </message>
+        <message id="autodb.tokenForm.text5">
+            <source>allow cleartext debug traffic? (yes/no)</source>
+            <translation>permitir tráfego de depuração em texto claro? (yes/no)</translation>
+        </message>
+        <message id="autodb.tokenForm.title">
+            <source>create access token</source>
+            <translation>criar token de acesso</translation>
+        </message>
+        <message id="autodb.tokens.text">
+            <source>&amp;Create</source>
+            <translation>&amp;Criar</translation>
+        </message>
+        <message id="autodb.tokens.text2">
+            <source>&amp;Revoke</source>
+            <translation>&amp;Revogar</translation>
+        </message>
+        <message id="autodb.tokens.text3">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.tokens.title">
+            <source>my access tokens</source>
+            <translation>meus tokens de acesso</translation>
+        </message>
+        <message id="autodb.unsavedNote.text">
+            <source>&amp;Save</source>
+            <translation>&amp;Salvar</translation>
+        </message>
+        <message id="autodb.unsavedNote.text2">
+            <source>&amp;Discard</source>
+            <translation>&amp;Descartar</translation>
+        </message>
+        <message id="autodb.unsavedNote.text3">
+            <source>S&amp;tay</source>
+            <translation>Ficar(&amp;t)</translation>
+        </message>
+        <message id="autodb.unsavedNote.title">
+            <source>unsaved note</source>
+            <translation>nota não salva</translation>
+        </message>
+        <message id="autodb.userForm.text">
+            <source>name</source>
+            <translation>nome</translation>
+        </message>
+        <message id="autodb.userForm.text2">
+            <source>role</source>
+            <translation>papel</translation>
+        </message>
+        <message id="autodb.userForm.text3">
+            <source>connection</source>
+            <translation>conexão</translation>
+        </message>
+        <message id="autodb.userForm.text4">
+            <source>passphrase (min 8 characters)</source>
+            <translation>passphrase (mínimo 8 caracteres)</translation>
+        </message>
+        <message id="autodb.users.text">
+            <source>&amp;Add</source>
+            <translation>&amp;Adicionar</translation>
+        </message>
+        <message id="autodb.users.text2">
+            <source>&amp;Role</source>
+            <translation>amp;Papel (&amp;r)</translation>
+        </message>
+        <message id="autodb.users.text3">
+            <source>&amp;Passphrase</source>
+            <translation>&amp;Passphrase</translation>
+        </message>
+        <message id="autodb.users.text4">
+            <source>&amp;Toggle</source>
+            <translation>Al&amp;ternar</translation>
+        </message>
+        <message id="autodb.users.text5">
+            <source>Grant &amp;connection</source>
+            <translation>Dar &amp;conexão</translation>
+        </message>
+        <message id="autodb.users.text6">
+            <source>&amp;IPs</source>
+            <translation>&amp;IPs</translation>
+        </message>
+        <message id="autodb.users.text7">
+            <source>SS&amp;H keys</source>
+            <translation>C&amp;haves SSH</translation>
+        </message>
+        <message id="autodb.users.text8">
+            <source>Remo&amp;ve</source>
+            <translation>Remover(&amp;v)</translation>
+        </message>
+        <message id="autodb.users.text9">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.users.title">
+            <source>users</source>
+            <translation>usuários</translation>
+        </message>
+        <message id="autodb.value.helpText">
+            <source>Tab to Copy · q/Esc close</source>
+            <translation>Tab copia · q/Esc fecha</translation>
+        </message>
+        <message id="autodb.value.text">
+            <source>Cop&amp;y</source>
+            <translation>Copamp;iar (&amp;y)</translation>
+        </message>
+        <message id="autodb.value.text2">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.widening.text">
+            <source>&amp;Add and mint</source>
+            <translation>&amp;Adicionar e emitir</translation>
+        </message>
+        <message id="autodb.widening.text2">
+            <source>&amp;Cancel</source>
+            <translation>&amp;Cancelar</translation>
+        </message>
+        <message id="autodb.widening.title">
+            <source>allowlist widening</source>
+            <translation>ampliação da lista de IPs</translation>
+        </message>
+        <message id="autodb.workspaceName.text">
+            <source>name</source>
+            <translation>nome</translation>
+        </message>
+        <message id="autodb.workspaces.text">
+            <source>&amp;New</source>
+            <translation>&amp;Novo</translation>
+        </message>
+        <message id="autodb.workspaces.text2">
+            <source>&amp;Rename</source>
+            <translation>&amp;Renomear</translation>
+        </message>
+        <message id="autodb.workspaces.text3">
+            <source>&amp;Delete</source>
+            <translation>amp;Excluir (&amp;d)</translation>
+        </message>
+        <message id="autodb.workspaces.text4">
+            <source>&amp;Attach</source>
+            <translation>&amp;Anexar</translation>
+        </message>
+        <message id="autodb.workspaces.text5">
+            <source>De&amp;tach</source>
+            <translation>De&amp;taxar</translation>
+        </message>
+        <message id="autodb.workspaces.text6">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.workspaces.title">
+            <source>workspaces</source>
+            <translation>espaços de trabalho</translation>
+        </message>
+        <message id="autodb.workspaces.title2">
+            <source>workspaces</source>
+            <translation>espaços de trabalho</translation>
+        </message>
+        <message id="autodb.workspaces.title3">
+            <source>connections here</source>
+            <translation>espaços de trabalho</translation>
+        </message>
     </context>
 </TS>

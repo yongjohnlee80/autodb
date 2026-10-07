@@ -6,11 +6,11 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "unsaved note"
+    title: qsTrId("autodb.unsavedNote.title")
     Text { wrapMode: Tui.WordWrap; text: App.unsavedQuestion }
     DialogButtonBox {
-        Button { text: "&Save";    DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: App.unsaved("save") }
-        Button { text: "&Discard"; DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole; onClicked: App.unsaved("discard") }
-        Button { text: "S&tay";    DialogButtonBox.buttonRole: DialogButtonBox.RejectRole; onClicked: App.unsaved("stay") }
+        Button { text: qsTrId("autodb.unsavedNote.text");    DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: App.unsaved("save") }
+        Button { text: qsTrId("autodb.unsavedNote.text2"); DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole; onClicked: App.unsaved("discard") }
+        Button { text: qsTrId("autodb.unsavedNote.text3");    DialogButtonBox.buttonRole: DialogButtonBox.RejectRole; onClicked: App.unsaved("stay") }
     }
 }

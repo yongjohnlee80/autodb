@@ -6,10 +6,10 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "start on"
+    title: qsTrId("autodb.startChoice.title")
     width: 80
     dim: true
-    helpText: "Enter starts there · Esc starts connected to nothing"
+    helpText: qsTrId("autodb.startChoice.helpText")
     ListView {
         id: choices
         model: App.startChoices

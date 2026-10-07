@@ -8,8 +8,8 @@ Dialog {
     onRejected: App.keyslotConfirmCancelled()
     Editor { palette.highlight: Theme.document.highlight; palette.highlightedText: Theme.document.highlightedText; readOnly: true; text: App.keyslotQuestion }
     DialogButtonBox {
-        Button { text: "&Proceed"; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
-        Button { text: "&Cancel"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: qsTrId("autodb.keyslotConfirm.text"); DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
+        Button { text: qsTrId("autodb.keyslotConfirm.text2"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
     onAccepted: App.keyslotConfirmed()
 }

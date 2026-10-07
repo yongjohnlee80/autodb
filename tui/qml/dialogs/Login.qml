@@ -9,7 +9,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "sign in"
+    title: qsTrId("autodb.login.title")
     width: 72
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok          // Enter signs in, from the last field too
@@ -17,9 +17,9 @@ Dialog {
     helpText: App.loginError
     Flex {
         direction: Tui.Vertical
-        Text { text: "user" }
+        Text { text: qsTrId("autodb.login.text") }
         TextField { id: user; text: App.lastUser }
-        Text { text: "passphrase" }
+        Text { text: qsTrId("autodb.login.text2") }
         TextField { id: passphrase; echoMode: TextInput.Password }
     }
     onOpened: passphrase.clear()

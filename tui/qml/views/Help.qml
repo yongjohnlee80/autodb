@@ -5,11 +5,11 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "help"
+    title: qsTrId("autodb.help.title")
     dim: false        // the backdrop fades only for sign-in and quitting
     standardButtons: Dialog.Close
     defaultButton: Dialog.Close       // Enter closes it, as its help line says
-    helpText: "q, Esc or Enter closes"
+    helpText: qsTrId("autodb.help.helpText")
     Editor {
         palette.highlight: Theme.document.highlight
         palette.highlightedText: Theme.document.highlightedText

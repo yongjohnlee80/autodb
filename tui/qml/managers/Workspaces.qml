@@ -1,7 +1,7 @@
 // A workspace and its attached connections are two views over one server list.
 Dialog {
     closeOnQ: true
-    title: "workspaces"
+    title: qsTrId("autodb.workspaces.title")
     dim: false
     maxWidthPercent: 75
     maxHeightPercent: 75
@@ -13,7 +13,7 @@ Dialog {
             orientation: Tui.Horizontal
             ratio: 0.55
             Frame {
-                title: "workspaces"
+                title: qsTrId("autodb.workspaces.title2")
                 TableView {
                     palette.highlight: Theme.document.highlight
                     palette.highlightedText: Theme.document.highlightedText
@@ -27,7 +27,7 @@ Dialog {
                 }
             }
             Frame {
-                title: "connections here"
+                title: qsTrId("autodb.workspaces.title3")
                 TableView {
                     palette.highlight: Theme.document.highlight
                     palette.highlightedText: Theme.document.highlightedText
@@ -40,11 +40,11 @@ Dialog {
         }
     }
     DialogButtonBox {
-        Button { id: newWorkspaceButton; text: "&New"; enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceNew() }
-        Button { text: "&Rename"; enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceRename(spaces.currentIndex) }
-        Button { text: "&Delete"; enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceDelete(spaces.currentIndex) }
-        Button { text: "&Attach"; enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceAttach(spaces.currentIndex) }
-        Button { text: "De&tach"; enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceDetach(spaces.currentIndex, attached.currentIndex) }
-        Button { id: closeWorkspaceButton; text: "Close(&q)"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { id: newWorkspaceButton; text: qsTrId("autodb.workspaces.text"); enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceNew() }
+        Button { text: qsTrId("autodb.workspaces.text2"); enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceRename(spaces.currentIndex) }
+        Button { text: qsTrId("autodb.workspaces.text3"); enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceDelete(spaces.currentIndex) }
+        Button { text: qsTrId("autodb.workspaces.text4"); enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceAttach(spaces.currentIndex) }
+        Button { text: qsTrId("autodb.workspaces.text5"); enabled: App.workspaceCanManage; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.workspaceDetach(spaces.currentIndex, attached.currentIndex) }
+        Button { id: closeWorkspaceButton; text: qsTrId("autodb.workspaces.text6"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

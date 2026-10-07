@@ -3,10 +3,10 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "row"
+    title: qsTrId("autodb.inspect.title")
     dim: false
     standardButtons: Dialog.Close
-    helpText: "j/k move · y copy · Enter open"
+    helpText: qsTrId("autodb.inspect.helpText")
     ListView {
         palette.highlight: Theme.document.highlight
         palette.highlightedText: Theme.document.highlightedText

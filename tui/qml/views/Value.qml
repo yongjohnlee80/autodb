@@ -5,7 +5,7 @@ Dialog {
     maxHeightPercent: 80
     title: App.valueTitle
     dim: false
-    helpText: "Tab to Copy · q/Esc close"
+    helpText: qsTrId("autodb.value.helpText")
     Editor {
         palette.highlight: Theme.document.highlight; palette.highlightedText: Theme.document.highlightedText
         readOnly: true; wrap: true; text: App.valueText
@@ -13,7 +13,7 @@ Dialog {
         SyntaxHighlighter { definition: App.valueSyntax }
     }
     DialogButtonBox {
-        Button { text: "Cop&y"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.copyValue() }
-        Button { text: "Close(&q)"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: qsTrId("autodb.value.text"); DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.copyValue() }
+        Button { text: qsTrId("autodb.value.text2"); DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

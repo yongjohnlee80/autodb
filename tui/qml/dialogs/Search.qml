@@ -9,7 +9,7 @@ Dialog {
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok
     helpText: App.searchError
-    TextField { id: pattern; text: App.lastSearch; placeholderText: "find text" }
+    TextField { id: pattern; text: App.lastSearch; placeholderText: qsTrId("autodb.search.placeholderText") }
     onAccepted: App.search(pattern.text)
     onRejected: App.searchCancelled()
 }

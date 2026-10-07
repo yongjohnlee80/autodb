@@ -3,7 +3,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "open a note"
+    title: qsTrId("autodb.noteOpen.title")
     dim: false
     standardButtons: Dialog.Close
     helpText: App.noteOpenStatus
@@ -11,7 +11,7 @@ Dialog {
     onRejected: App.noteOpenClosed()
     Flex {
         direction: Tui.Vertical
-        TextField { id: filter; placeholderText: "filter by note or workspace"; onTextEdited: App.noteOpenFilter(filter.text) }
+        TextField { id: filter; placeholderText: qsTrId("autodb.noteOpen.placeholderText"); onTextEdited: App.noteOpenFilter(filter.text) }
         TableView {
             palette.highlight: Theme.document.highlight
             palette.highlightedText: Theme.document.highlightedText

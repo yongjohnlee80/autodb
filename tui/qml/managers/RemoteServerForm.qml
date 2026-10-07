@@ -13,19 +13,19 @@ Dialog {
     onRejected: App.serverFormClosed()
     Flex {
         direction: Tui.Vertical
-        Text { text: "name (how the menus show it)" }
+        Text { text: qsTrId("autodb.remoteServerForm.text") }
         TextField { id: name; text: App.serverFormName }
-        Text { text: "host (name or address)" }
+        Text { text: qsTrId("autodb.remoteServerForm.text2") }
         TextField { id: host; text: App.serverFormHost }
-        Text { text: "port (blank for 7422)" }
+        Text { text: qsTrId("autodb.remoteServerForm.text3") }
         TextField { id: port; text: App.serverFormPort }
-        Text { text: "your autodb user there" }
+        Text { text: qsTrId("autodb.remoteServerForm.text4") }
         TextField { id: user; text: App.serverFormUser }
-        Text { text: "SSH key file (its .pub must be registered on your profile there)" }
+        Text { text: qsTrId("autodb.remoteServerForm.text5") }
         TextField { id: keyFile; text: App.serverFormKeyFile }
-        Text { text: "signing" }
+        Text { text: qsTrId("autodb.remoteServerForm.text6") }
         ComboBox { id: auth; model: App.serverAuthChoices; textRole: "label"; valueRole: "id"; currentIndex: App.serverFormAuth }
-        Text { text: "host key" }
+        Text { text: qsTrId("autodb.remoteServerForm.text7") }
         Text { text: App.serverFormPin }
     }
     onAccepted: App.saveServer(name.text, host.text, port.text, user.text, keyFile.text, auth.currentValue)

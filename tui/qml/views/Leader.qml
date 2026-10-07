@@ -12,9 +12,9 @@
 
 Dialog {
     id: leader
-    title: "SPC — commands"
+    title: qsTrId("autodb.leader.title")
     dim: false        // the backdrop fades only for sign-in and quitting
-    helpText: "a key runs its command · Esc closes"
+    helpText: qsTrId("autodb.leader.helpText")
     Text { wrapMode: Tui.WordWrap; text: App.leaderText }
     Repeater {
         model: App.leader

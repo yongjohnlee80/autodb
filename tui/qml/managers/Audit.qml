@@ -3,7 +3,7 @@ Dialog {
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
-    title: "audit log"
+    title: qsTrId("autodb.audit.title")
     dim: false
     standardButtons: Dialog.Close
     helpText: App.auditStatus
