@@ -203,6 +203,9 @@ var publicErrs = []struct {
 	{exec.ErrReadOnlyUnenforceable, CodeStatementRejected},
 	{exec.ErrGrammarDrifted, CodeStatementRejected},
 	{exec.ErrConnectionNameTaken, golibrpc.CodeInvalidParams},
+	// conn.create's engine argument outside engine.All(). The sentinel's text
+	// does not repeat the caller's string, so it is safe on any surface.
+	{engine.ErrUnknown, golibrpc.CodeInvalidParams},
 	// An archived connection refuses use and change. Its constant text names
 	// no connection — the caller named it — so publishing it discloses nothing.
 	{exec.ErrConnectionArchived, golibrpc.CodeInvalidParams},
@@ -375,23 +378,26 @@ func causeOrShape(disclose bool, shaped, cause error) string {
 //
 // THE TRANSPORT NO LONGER LOGS IT. golib logs only the untyped errors it
 // withholds, and a refusal that became a ConfigFailure reaches it as a typed
-// *Error. Without this line the cause would reach the caller's screen and
+// *Error. Without this line the refusal would reach the caller's screen and
 // nowhere else.
 //
-// The log is this host's own, the same audience a host-local socket discloses
-// to, so it carries the cause under the same rule: scrubbed, and only when the
-// scrub is confident. Otherwise it carries the cause-free shape. An audit fault
-// joined to the refusal is the server's problem, not the caller's, and is
-// logged here whole: it names no DSN.
+// THE LOG CARRIES SafeLog, NEVER THE CAUSE, whatever surface asked. A log is
+// copied into tickets and shipped to aggregators, and a DSN's cause can carry
+// option values no scrubber knows to mask: ValidateDSN quotes a caller's
+// sql_mode back in its error. The exact cause goes to the host-local caller
+// through wireErrFor and nowhere else; the log says which check failed.
+//
+// An audit fault joined to the refusal is reported as one fixed field. Its
+// text comes from the meta store's driver, which is not this function's to
+// vouch for.
 func (s *Server) logCreateRefused(req *golibrpc.Request, name string, eng engine.Name, cf *exec.ConfigFailure, err error) {
 	fields := map[string]any{
 		"server": "rpc", "event": "connection refused before it was stored",
 		"method": req.Method, "remote": req.Peer.String(),
-		"name": name, "engine": eng.String(), "audit": cf.AuditDetail(),
-		"cause": causeOrShape(true, cf, cf.Cause()),
+		"name": name, "engine": eng.String(), "refusal": cf.SafeLog(),
 	}
-	if err != error(cf) {
-		fields["err"] = err.Error()
+	if errors.Is(err, exec.ErrRefusalNotAudited) {
+		fields["audit_write"] = "failed"
 	}
 	s.logger.Log(logger.SeverityWarning, fields)
 }

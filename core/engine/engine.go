@@ -28,6 +28,7 @@ package engine
 
 import (
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -115,9 +116,14 @@ func Parse(s string) (Name, error) {
 	for _, n := range All() {
 		accepted = append(accepted, string(n))
 	}
-	return "", fmt.Errorf("engine: unknown engine %q (accepted: %s)",
-		s, strings.Join(accepted, ", "))
+	return "", fmt.Errorf("%w %q (accepted: %s)",
+		ErrUnknown, s, strings.Join(accepted, ", "))
 }
+
+// ErrUnknown is what Parse wraps for a name outside All(). Its own text names
+// nothing the caller sent, so a surface that must not echo untrusted input
+// can publish the sentinel alone.
+var ErrUnknown = errors.New("engine: unknown engine")
 
 // String returns the engine's persisted spelling.
 func (n Name) String() string { return string(n) }

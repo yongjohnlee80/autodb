@@ -126,6 +126,11 @@ var gateMatrixWalkExempt = map[string]string{
 		"raised by the outcome recorder after admission, not by an admission stage — the gate never sees it",
 	"ErrNoAttempt": "a terminal for an attempt with no history row (a writer bug); raised by the outcome " +
 		"recorder after admission, not by an admission stage — the gate never sees it",
+	// A refused conn.create whose audit row could not be written: an admin
+	// operation's bookkeeping, joined to a ConfigFailure the caller is shown.
+	"ErrRefusalNotAudited": "a refused connection creation whose connection_create_failed row could " +
+		"not be written; raised on the RPC admin surface before anything is stored, never on a " +
+		"statement path — the gate never sees it",
 	// A history search naming a status that does not exist: the read side's
 	// own request validation, on a listing, never on a statement.
 	"ErrUnknownStatus": "a history search's status filter names no history status; request validation " +
