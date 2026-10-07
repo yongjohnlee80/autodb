@@ -14,14 +14,18 @@ jobs:
     # Wayland/X11 headers and macOS builds on a mac runner. A cgo-less build
     # still exists (`make build`): the gui flag then refuses with the reason
     # instead of the binary failing to build.
+    #
+    # Runner labels: macos-13 was retired 2025-12-04 and macos-14 follows
+    # 2026-11-02, so Intel builds on macos-15-intel (the x86_64 label
+    # GitHub's retirement notice names) and arm64 on macos-15.
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
           - { goos: linux,  goarch: amd64, runner: ubuntu-latest }
           - { goos: linux,  goarch: arm64, runner: ubuntu-24.04-arm }
-          - { goos: darwin, goarch: amd64, runner: macos-13 }
-          - { goos: darwin, goarch: arm64, runner: macos-14 }
+          - { goos: darwin, goarch: amd64, runner: macos-15-intel }
+          - { goos: darwin, goarch: arm64, runner: macos-15 }
     steps:
       - uses: actions/checkout@v4
         with:

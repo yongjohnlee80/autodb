@@ -1275,5 +1275,13 @@
             <source>role changed to %1; permissions refreshed</source>
             <translation>角色已改为 %1；权限已刷新</translation>
         </message>
+        <message id="autodb.help.leader">
+            <source>SPC — the leader menu:</source>
+            <translation>SPC — 前导键菜单：</translation>
+        </message>
+        <message id="autodb.help.search">
+            <source>Pane search: / finds in the focused query or results view; n/N move to the next/previous matching row.</source>
+            <translation>搜索：/ 在聚焦的查询或结果中查找；n/N 移到下一个/上一个匹配行。</translation>
+        </message>
     </context>
 </TS>

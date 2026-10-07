@@ -42,7 +42,8 @@ func parseCatalog(t *testing.T, fsys fs.FS, name string) map[string]string {
 }
 
 // inventory is every id the program can show: every projected bar row, every
-// leader label, and every qsTrId the QML holds.
+// leader label, every qsTrId the QML holds, and every message id the Go
+// source names for a composed line.
 func inventory(t *testing.T) map[string]bool {
 	t.Helper()
 	ids := map[string]bool{}
@@ -52,6 +53,9 @@ func inventory(t *testing.T) map[string]bool {
 	for _, id := range tuiapp.QMLMessageIDsForTest() {
 		ids[id] = true
 	}
+	for _, id := range tuiapp.GoMessageIDsForTest() {
+		ids[id] = true
+	}
 	return ids
 }
 
@@ -59,8 +63,8 @@ func inventory(t *testing.T) map[string]bool {
 // program can show exists in autodb_en.xml, or a screen would show the raw id.
 func TestTheEnglishCatalogHoldsEveryID(t *testing.T) {
 	en := parseCatalog(t, tuiapp.CatalogFiles(), "i18n/autodb_en.xml")
-	for id := range inventory(t) {
-		if _, ok := en[id]; !ok {
+	if missing := missingFrom(en, inventory(t)); len(missing) > 0 {
+		for _, id := range missing {
 			t.Errorf("autodb_en.xml lacks %q — the screen would show the raw id", id)
 		}
 	}
@@ -76,13 +80,7 @@ func TestEveryShippedLanguageCoversEveryID(t *testing.T) {
 			continue
 		}
 		cat := parseCatalog(t, tuiapp.CatalogFiles(), "i18n/autodb_"+tag+".xml")
-		var missing []string
-		for id := range inv {
-			if _, ok := cat[id]; !ok {
-				missing = append(missing, id)
-			}
-		}
-		if len(missing) > 0 {
+		if missing := missingFrom(cat, inv); len(missing) > 0 {
 			t.Errorf("%s lacks %d ids: %s", tag, len(missing), strings.Join(missing, ", "))
 		}
 	}
@@ -108,6 +106,42 @@ func TestTheCatalogsMatchTheShippedLanguages(t *testing.T) {
 	}
 	for tag := range files {
 		t.Errorf("catalog %q is not a language the product offers", tag)
+	}
+}
+
+// missingFrom returns the inventoried ids that catalog lacks: the check both
+// inventory gates run, named so the mutation cell below can exercise the
+// gate itself rather than a copy of it.
+func missingFrom(catalog map[string]string, inv map[string]bool) []string {
+	var missing []string
+	for id := range inv {
+		if _, ok := catalog[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	return missing
+}
+
+// TestTheInventoryGateCatchesAnOmittedStatusMessage — the mutation cell: an
+// id the Go source names, removed from the English catalog, must redden the
+// inventory gate. The gate exists precisely so a composed line's id cannot
+// fall back to its raw text at run time unnoticed; this proves the gate
+// observes that class of omission.
+func TestTheInventoryGateCatchesAnOmittedStatusMessage(t *testing.T) {
+	inv := inventory(t)
+	// A status id the Go source names — one of the D5c sites.
+	const id = "autodb.session.status.status5" // "disconnected — SPC x reconnects"
+	if !inv[id] {
+		t.Fatalf("%q is not in the inventory; the Go-id walk misses composed status ids", id)
+	}
+	en := parseCatalog(t, tuiapp.CatalogFiles(), "i18n/autodb_en.xml")
+	if got := missingFrom(en, inv); len(got) != 0 {
+		t.Fatalf("the unmutated gate already reports missing ids: %v", got)
+	}
+	// The mutation: the id drops out of the catalog.
+	delete(en, id)
+	if got := missingFrom(en, inv); len(got) == 0 || got[0] != id {
+		t.Fatalf("the gate stayed green with %q removed from the catalog; it does not observe composed status ids", id)
 	}
 }
 
@@ -150,6 +184,47 @@ func TestTheMenuMnemonicSurvivesTheMessageConversion(t *testing.T) {
 			s.Keys(t, escKey, escKey, escKey)
 		})
 	}
+}
+
+// TestSwitchingLanguageRelabelsTheComposedSurfacesToo — the leader card and
+// the help screen are text the host composes at projection, so a switch must
+// reproject them in the same turn: their lines cannot hold the old language
+// while the bar shows the new one. Checked IN the new language, before any
+// switch back (the earlier switch test returned to English first, which is
+// how this gap stayed hidden).
+func TestSwitchingLanguageRelabelsTheComposedSurfacesToo(t *testing.T) {
+	h, s := tuiapp.RunHost(t, tuiapp.NewSession("127.0.0.1:1", logger.Nop{}, nil), nil,
+		tuiapp.Options{}, 100, 40)
+	s.WaitForText(t, "Home")
+
+	// The leader card, before and after: SPC opens it; the rows are
+	// composed text, so the switch must reproject them.
+	s.Keys(t, key(' '))
+	s.WaitForText(t, "SPC — commands")
+	s.Keys(t, tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEscape})
+	h.RunCommand("options.language.ko_KR")
+	s.WaitFor(t, "the bar in Korean", func(sc string) bool { return strings.Contains(sc, "옵션") })
+	s.Keys(t, key(' '))
+	s.WaitFor(t, "the leader card in Korean", func(sc string) bool {
+		return strings.Contains(sc, "SPC — 명령")
+	})
+	s.Keys(t, tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEscape})
+	s.WaitFor(t, "the leader card closed", func(sc string) bool {
+		return !strings.Contains(sc, "SPC — 명령")
+	})
+
+	// The help screen: composed the same way, same turn.
+	h.RunCommand("app.help")
+	s.WaitFor(t, "the help screen in Korean", func(sc string) bool {
+		return strings.Contains(sc, "SPC — 리더 메뉴:")
+	})
+
+	// Back to English, and both composed surfaces follow again.
+	h.RunCommand("options.language.en")
+	h.RunCommand("app.help")
+	s.WaitFor(t, "the help screen back in English", func(sc string) bool {
+		return strings.Contains(sc, "SPC — the leader menu:")
+	})
 }
 
 // TestSwitchingLanguageRelabelsTheOpenScreen — the live switch: Options ›

@@ -1275,5 +1275,13 @@
             <source>role changed to %1; permissions refreshed</source>
             <translation>役割を%1に変更しました; 権限を更新しました</translation>
         </message>
+        <message id="autodb.help.leader">
+            <source>SPC — the leader menu:</source>
+            <translation>SPC — リーダーメニュー：</translation>
+        </message>
+        <message id="autodb.help.search">
+            <source>Pane search: / finds in the focused query or results view; n/N move to the next/previous matching row.</source>
+            <translation>検索： / はフォーカスされたクエリまたは結果から探します; n/Nで次/前の一致行へ。</translation>
+        </message>
     </context>
 </TS>

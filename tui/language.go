@@ -55,6 +55,11 @@ func (h *Host) useLanguage(tag string) {
 	for k, v := range languageState(tag) {
 		h.set(k, v)
 	}
+	// The leader card and the help screen are COMPOSED — their lines are
+	// strings built here, resolved once at projection — so they hold the old
+	// language until the next reproject. This is that reproject, in the same
+	// turn: every composed surface reads the new language in this frame.
+	h.reproject()
 }
 
 // languageOf is the language a stored preference resolves to: the tag when
