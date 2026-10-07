@@ -104,6 +104,21 @@ type Hello struct {
 	StorePath       string
 }
 
+// Describe names the store a hello says its daemon serves, for a refusal: the
+// path when there is one, and otherwise what an empty id means.
+func (h Hello) Describe() string {
+	switch {
+	case h.StorePath != "":
+		return h.StorePath
+	case h.StoreIDReported && h.StoreID == "":
+		return "a store with no file identity (postgres or :memory:)"
+	case !h.StoreIDReported:
+		return "a store it does not name (an older autodb)"
+	default:
+		return "store " + h.StoreID
+	}
+}
+
 // ProbeHello is ProbeOn returning the whole answer, for an autodb of ANY
 // protocol: a holder of another protocol is still the holder, and a
 // frontend that finds it can say "rebuild" instead of spawning into its

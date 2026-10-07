@@ -483,7 +483,7 @@ func runServe(configPath string) error {
 			// identity, which is another store.
 			if want, _, _ := meta.StoreID(cfg.Meta); want != "" && occupant.StoreIDReported && occupant.StoreID != want {
 				return fmt.Errorf("%w: %s is held by an autodb serving %s, not this config's store; "+
-					"point one of them at another [server] socket", errAlreadyServing, addr, occupant.StorePath)
+					"point one of them at another [server] socket", errAlreadyServing, addr, occupant.Describe())
 			}
 			return fmt.Errorf("%w on %s (version %s); this process is not serving",
 				errAlreadyServing, addr, occupant.Version)

@@ -246,8 +246,13 @@ func TestLocate_ACurrentDaemonWithNoStoreIDIsAnotherStore(t *testing.T) {
 	mc, _, _ := aStore(t, dir, "m.db")
 	sock := filepath.Join(dir, "c.sock")
 	daemonAt(t, sock, "", "")
-	if _, err := rpc.Locate(context.Background(), unixEP(sock), mc); !errors.Is(err, rpc.ErrOtherStore) {
+	_, err := rpc.Locate(context.Background(), unixEP(sock), mc)
+	if !errors.Is(err, rpc.ErrOtherStore) {
 		t.Fatalf("err = %v, want ErrOtherStore", err)
+	}
+	// The refusal says what an empty id means, rather than naming nothing.
+	if !strings.Contains(err.Error(), "no file identity") {
+		t.Errorf("the refusal does not say which store answers: %v", err)
 	}
 }
 
