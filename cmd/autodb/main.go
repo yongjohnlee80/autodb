@@ -1247,8 +1247,14 @@ func runUI(configPath, remoteProfile string) error {
 			ConfigPath: activeConfig,
 		},
 		// The framework's tracer writes to the AUTODB_FOCUS_TRACE file; nil
-		// when the variable is unset, which disables it.
-		App: []tuicore.AppOption{tuicore.WithBackend(backend), tuicore.WithTrace(tuiapp.RuntimeTrace())},
+		// when the variable is unset, which disables it. The language starts
+		// English; a signed-in account's stored preference switches it
+		// (ADR-0219 D2/D4).
+		App: []tuicore.AppOption{
+			tuicore.WithBackend(backend),
+			tuicore.WithTrace(tuiapp.RuntimeTrace()),
+			tuicore.WithLanguage("en"),
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("terminal: %w", err)

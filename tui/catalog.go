@@ -32,6 +32,7 @@ const (
 	nodeOptions MenuNodeID = "options"
 	nodeEditor  MenuNodeID = "options.editor"
 	nodeTheme   MenuNodeID = "options.theme"
+	nodeLang    MenuNodeID = "options.language"
 	nodeSystem  MenuNodeID = "system"
 	nodeRemote  MenuNodeID = "remote"
 )
@@ -79,6 +80,9 @@ const (
 
 	// cmdThemePrefix + a theme's name is Options › Theme › <it>.
 	cmdThemePrefix = "options.theme."
+
+	// cmdLanguagePrefix + a language's tag is Options › Language › <it>.
+	cmdLanguagePrefix = "options.language."
 )
 
 // menuNodes is the bar's structure. Behaviour-free by construction: there is
@@ -97,6 +101,8 @@ func menuNodes() []MenuNode {
 		{ID: nodeOptions, Label: "Options", Hotkey: 'O', Order: 60},
 		{ID: nodeEditor, Parent: nodeOptions, Label: "Editor", Hotkey: 'E', Order: 10},
 		{ID: nodeTheme, Parent: nodeOptions, Label: "Theme", Hotkey: 'T', Order: 20},
+		// L, not E: the Editor submenu has E.
+		{ID: nodeLang, Parent: nodeOptions, Label: "Language", Hotkey: 'L', Order: 30},
 		{ID: nodeSystem, Label: "System", Hotkey: 'S', Order: 70},
 	}
 }
@@ -526,6 +532,29 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 			Menu: []MenuProjection{{Parent: nodeTheme, Label: themeLabel(theme),
 				Hotkey: rune(theme[0]), Order: 10 + i}},
+		})
+	}
+	// One command per language the program ships catalogs for. Each row says
+	// the language's own name — a literal, never translated: the one row every
+	// locale reads the same way (ADR-0219 D4). Hotkeys are digits 1..6: the
+	// rows are named in their own scripts (한국어, 日本語), where a shared
+	// alphabet makes letter keys meaningless, and the tag initials collide
+	// (en/es share E).
+	for i, tag := range auth.Languages {
+		tag := tag
+		cmds = append(cmds, CommandOf[*Host]{
+			ID: CommandID(cmdLanguagePrefix + tag),
+			// The theme's rule: stored on the account when there is one,
+			// switched and not written before a sign-in.
+			Run: func(h *Host) {
+				if signedIn(h) {
+					h.choosePref(h.languagePref, tag)
+				} else {
+					h.useLanguage(tag)
+				}
+			},
+			Menu: []MenuProjection{{Parent: nodeLang, Label: languageNames[tag],
+				Hotkey: rune('1' + i), Order: 10 + i}},
 		})
 	}
 	return cmds
