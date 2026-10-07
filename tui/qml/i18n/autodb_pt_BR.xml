@@ -1275,5 +1275,13 @@
             <source>role changed to %1; permissions refreshed</source>
             <translation>papel mudou para %1; permissões atualizadas</translation>
         </message>
+        <message id="autodb.help.leader">
+            <source>SPC — the leader menu:</source>
+            <translation>SPC — o menu líder:</translation>
+        </message>
+        <message id="autodb.help.search">
+            <source>Pane search: / finds in the focused query or results view; n/N move to the next/previous matching row.</source>
+            <translation>Busca: / encontra na consulta ou resultados com foco; n/N vão à linha correspondente seguinte/anterior.</translation>
+        </message>
     </context>
 </TS>

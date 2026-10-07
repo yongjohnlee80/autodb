@@ -5,8 +5,10 @@ import (
 	"errors"
 	"github.com/yongjohnlee80/autodb/core/notes"
 	"io/fs"
+	"os"
 	"path"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -618,8 +620,57 @@ func QMLMessageIDsForTest() []string {
 	return ids
 }
 
+// GoMessageIDsForTest is every literal message id the Go source names: the
+// status lines (statusMessage / statusMessageAround), the composed help and
+// leader text (tr), and the connect/disconnect pair the projection reads. A
+// composed line falls back to its source text when the catalogs lack its id,
+// so a typo or an omission would otherwise surface at run time as the wrong
+// language — the inventory gate holds every one of them against the
+// catalogs instead.
+func GoMessageIDsForTest() []string {
+	var ids []string
+	for _, src := range goSourceFiles() {
+		for _, m := range goMsgCall.FindAllStringSubmatch(src, -1) {
+			ids = append(ids, m[1])
+		}
+	}
+	// The one composed id the catalog projection reads by construction:
+	// the connect/disconnect pair's state-dependent labels.
+	ids = append(ids, "autodb.leader.session.connect", "autodb.leader.session.disconnect")
+	return ids
+}
+
+// goSourceFiles reads this package's own .go files, as the build ships them.
+// Tests always run with the package's sources on disk beside them, so this
+// reads exactly what the build compiles.
+func goSourceFiles() []string {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		panic("tui: catalog inventory: " + err.Error())
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		b, err := os.ReadFile(e.Name())
+		if err != nil {
+			panic("tui: catalog inventory: " + err.Error())
+		}
+		out = append(out, string(b))
+	}
+	return out
+}
+
 // qmlTrID matches qsTrId("id") in a QML file.
 var qmlTrID = regexp.MustCompile(`qsTrId\("([^"]+)"\)`)
+
+// goMsgCall matches the message-id argument of a host call that names a
+// catalog message by its whole id: statusMessage("…"), statusMessageAround("…"),
+// tr("…"). A concatenated prefix ("autodb.leader." + the command id) ends in
+// a dot and is derived, not literal — the catalog inventory derives those
+// from the command table instead, so a trailing dot is skipped here.
+var goMsgCall = regexp.MustCompile(`\b(?:statusMessage|statusMessageAround|tr)\("((?:autodb\.)[^"]*[^".])"`)
 
 // SetHistoryPageSize makes the history listing page by n rows.
 func (h *Host) SetHistoryPageSize(n int64) {

@@ -1275,5 +1275,13 @@
             <source>role changed to %1; permissions refreshed</source>
             <translation>역할이 %1(으)로 바뀌었습니다; 권한이 새로 고쳐졌습니다</translation>
         </message>
+        <message id="autodb.help.leader">
+            <source>SPC — the leader menu:</source>
+            <translation>SPC — 리더 메뉴:</translation>
+        </message>
+        <message id="autodb.help.search">
+            <source>Pane search: / finds in the focused query or results view; n/N move to the next/previous matching row.</source>
+            <translation>찾기: / 는 포커스된 쿼리 또는 결과에서 찾습니다; n/N은 다음/이전 일치 행으로 이동합니다.</translation>
+        </message>
     </context>
 </TS>
