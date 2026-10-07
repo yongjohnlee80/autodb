@@ -1211,7 +1211,7 @@ func runUI(configPath, remoteProfile string) error {
 // runUIOn runs the standalone UI on the backend it is handed: a terminal's
 // (--ui) or a native window's (--gui). Everything else is the one program —
 // the session, the host, the catalog — exactly as golib's Backend seam
-// promises (golib/gui, ADR 1791330692).
+// promises (golib/gui).
 func runUIOn(backend tuicore.Backend, network string, cfg config.Config, start tuiapp.Start, configPath, addr, notesRoot string) error {
 	// The terminal no longer builds a store at startup. It CANNOT: the personal
 	// root is `<base>/u-<subject>`, and the subject is the daemon's canonical
@@ -1260,7 +1260,7 @@ func runUIOn(backend tuicore.Backend, network string, cfg config.Config, start t
 		// The framework's tracer writes to the AUTODB_FOCUS_TRACE file; nil
 		// when the variable is unset, which disables it. The language starts
 		// English; a signed-in account's stored preference switches it
-		// (ADR-0219 D2/D4).
+		// (a signed-in account's stored language preference).
 		App: []tuicore.AppOption{
 			tuicore.WithBackend(backend),
 			tuicore.WithTrace(tuiapp.RuntimeTrace()),

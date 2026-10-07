@@ -1,5 +1,5 @@
 // sepia_test.go — the copied theme must not drift from the pinned golib's
-// (ADR-0219 D6): the constants compare against the toolkit's own file, so a
+//: the constants compare against the toolkit's own file, so a
 // golib re-tune surfaces as a diff here, not as silent divergence.
 
 package tui_test

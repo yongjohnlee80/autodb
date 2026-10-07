@@ -93,7 +93,7 @@ func (h *Host) projectBar() {
 		for _, mp := range cmd.Menu {
 			// The label a row holds is its catalog MESSAGE: the widget the
 			// QML binds resolves it in the App's language, so a switch
-			// relabels the bar without a reproject (ADR-0219 D5a). The
+			// relabels the bar without a reproject. The
 			// English catalog holds the RENDERED label — withMnemonic's
 			// output, marker and all — so the marker survives where the
 			// hotkey used to be baked in here.
@@ -207,7 +207,7 @@ func (h *Host) projectLeader() {
 
 // tr is text resolved through the App's language when id names it in the
 // catalogs, else the source text as it stands: a composed line's one
-// translation point (ADR-0219 D5c). Translate returns the id itself when no
+// translation point. Translate returns the id itself when no
 // catalog holds it — the source label is the better answer there, and the
 // inventory check (D7) keeps that from shipping unnoticed.
 func (h *Host) tr(id, text string) string {

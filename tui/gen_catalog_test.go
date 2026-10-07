@@ -14,7 +14,7 @@ import (
 
 // TestGenerateEnglishCatalog prints autodb_en.xml to stdout when
 // AUTODB_GEN_EN_CATALOG=1: the source of truth is the live catalog.
-// Not a gate; a one-shot generator (ADR-0219 D5a), kept for regeneration.
+// Not a gate; a one-shot generator, kept for regeneration.
 func TestGenerateEnglishCatalog(t *testing.T) {
 	if os.Getenv("AUTODB_GEN_EN_CATALOG") == "" {
 		t.Skip("set AUTODB_GEN_EN_CATALOG=1 to regenerate qml/i18n/autodb_en.xml")
@@ -50,7 +50,7 @@ func TestGenerateEnglishCatalog(t *testing.T) {
 			}
 			if cmd.Leader.LabelFor != nil {
 				// The state-dependent label: both states in the catalog, the
-				// ids the projection reads (ADR-0219 D5a).
+				// ids the projection reads.
 				write("autodb.leader.session.connect", "connect")
 				write("autodb.leader.session.disconnect", "disconnect")
 			}

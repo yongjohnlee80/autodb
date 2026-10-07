@@ -29,7 +29,7 @@ func guiDispatch(configPath, remoteProfile string) error {
 
 // runGUI starts the standalone TUI in a native window: the same program as
 // --ui on golib/gui's Backend — a tui.Backend that is a Gio window
-// (golib/gui, ADR 1791330692). The window shows the terminal program's every
+// (golib/gui). The window shows the terminal program's every
 // cell drawn natively; the program itself is unchanged.
 //
 // Called INSIDE gui.Main, which owns the platform's main thread.

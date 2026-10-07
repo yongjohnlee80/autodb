@@ -536,7 +536,7 @@ func catalogCommands() []CommandOf[*Host] {
 	}
 	// One command per language the program ships catalogs for. Each row says
 	// the language's own name — a literal, never translated: the one row every
-	// locale reads the same way (ADR-0219 D4). Hotkeys are digits 1..6: the
+	// locale reads the same way. Hotkeys are digits 1..6: the
 	// rows are named in their own scripts (한국어, 日本語), where a shared
 	// alphabet makes letter keys meaningless, and the tag initials collide
 	// (en/es share E).

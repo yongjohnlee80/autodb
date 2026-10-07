@@ -564,7 +564,7 @@ func CatalogFiles() fs.FS { return qmlFiles }
 
 // CatalogInventoryForTest is every id the program can show: every projected
 // bar row (node and command) and every leader label, derived exactly as
-// projectBar and projectLeader derive theirs (ADR-0219 D7).
+// projectBar and projectLeader derive theirs.
 func CatalogInventoryForTest() []string {
 	var ids []string
 	seen := map[string]bool{}
