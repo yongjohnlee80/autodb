@@ -478,8 +478,10 @@ func runServe(configPath string) error {
 			// And which store it serves: an occupant serving ANOTHER store is
 			// not "already running" for this config, and saying so sent the
 			// operator looking for a daemon that does not exist. An occupant
-			// that names no store predates the check and is reported as before.
-			if want, _, _ := meta.StoreID(cfg.Meta); want != "" && occupant.StoreID != "" && occupant.StoreID != want {
+			// whose hello has no store_id predates the check and is reported as
+			// before; one that reports an EMPTY id serves a store with no file
+			// identity, which is another store.
+			if want, _, _ := meta.StoreID(cfg.Meta); want != "" && occupant.StoreIDReported && occupant.StoreID != want {
 				return fmt.Errorf("%w: %s is held by an autodb serving %s, not this config's store; "+
 					"point one of them at another [server] socket", errAlreadyServing, addr, occupant.StorePath)
 			}

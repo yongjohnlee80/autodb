@@ -93,10 +93,15 @@ type Hello struct {
 	// process, so it is the one a lease record can be matched against.
 	PID      int64
 	Instance string
-	// StoreID and StorePath name the meta store it serves. Empty StoreID: the
-	// daemon predates store identity, or serves a store with no file identity.
-	StoreID   string
-	StorePath string
+	// StoreID and StorePath name the meta store it serves. StoreIDReported
+	// says whether the hello carried store_id at all, and the two cases are
+	// different answers: a daemon from before store identity sends no field
+	// and cannot be checked; a current daemon over a store with no file
+	// identity (postgres, :memory:) sends an empty one, and is not serving any
+	// local sqlite store.
+	StoreID         string
+	StoreIDReported bool
+	StorePath       string
 }
 
 // ProbeHello is ProbeOn returning the whole answer, for an autodb of ANY
@@ -160,7 +165,10 @@ func ProbeHello(ctx context.Context, network, addr string) (Hello, error) {
 	h := Hello{Version: ver, Protocol: proto}
 	h.PID, _ = result["pid"].(int64)
 	h.Instance, _ = result["instance"].(string)
-	h.StoreID, _ = result["store_id"].(string)
+	if v, ok := result["store_id"]; ok {
+		h.StoreIDReported = true
+		h.StoreID, _ = v.(string)
+	}
 	h.StorePath, _ = result["store_path"].(string)
 	return h, nil
 }
