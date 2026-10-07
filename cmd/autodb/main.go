@@ -140,7 +140,7 @@ func main() {
 			"refused while a daemon serves the store")
 	flag.Parse()
 
-	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *createCert, *initRun,
+	if err := checkFlags(*serve, *ui, *guiLaunch, *webUI, *printEndpoint, *migrateToPG, *createCert, *initRun,
 		*checkConfig, *applyScripts, *revertScript != "", *port); err != nil {
 		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 		flag.Usage()
@@ -205,6 +205,10 @@ func main() {
 		}
 	case *ui:
 		if err := runUI(*configPath, *remoteProfile); err != nil {
+			reportAndExit(err)
+		}
+	case *guiLaunch:
+		if err := guiDispatch(*configPath, *remoteProfile); err != nil {
 			reportAndExit(err)
 		}
 	case *webUI:
@@ -311,7 +315,7 @@ const defaultWebPort = 7010
 //	|               | --print-endpoint, --migrate-to-postgres, |
 //	|               | --create-cert, --init                    |
 //	+---------------+------------------------------------------+
-func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig,
+func checkFlags(serve, ui, guiLaunch, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig,
 	applyScripts, revertScript bool, port int) error {
 	portSet := false
 	flag.CommandLine.Visit(func(f *flag.Flag) {
@@ -328,8 +332,8 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRu
 			remoteSet = true
 		}
 	})
-	if remoteSet && !ui {
-		return errors.New("--remote applies to --ui only")
+	if remoteSet && !ui && !guiLaunch {
+		return errors.New("--remote applies to --ui or --gui only")
 	}
 	// The migration flags belong to their mode, for the same reason --port
 	// belongs to --web-ui: a flag that is silently ignored outside its mode
@@ -381,8 +385,8 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRu
 				"the existing CA; pass one")
 		}
 	}
-	// EXACTLY ONE mode. The dispatch switch tries printEndpoint, serve, ui, web-ui
-	// in that order, so any pairing silently runs whichever comes first — and
+	// EXACTLY ONE mode. The dispatch switch tries printEndpoint, serve, ui, gui,
+	// web-ui in that order, so any pairing silently runs whichever comes first — and
 	// --web-ui --print-endpoint printed the endpoint and never served the UI
 	// (raised in review). --print-endpoint is a dispatch mode and must be
 	// counted like the others; --version is a query handled before the switch and
@@ -391,14 +395,14 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRu
 	// --migrate-to-postgres is counted too, and it matters more than the
 	// others: it is FIRST in the dispatch switch, so an unnoticed
 	// `--migrate-to-postgres --serve` would migrate and never serve.
-	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig,
+	for _, on := range []bool{serve, ui, guiLaunch, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig,
 		applyScripts, revertScript} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return errors.New("--serve, --ui, --web-ui, --print-endpoint, --migrate-to-postgres, " +
+		return errors.New("--serve, --ui, --gui, --web-ui, --print-endpoint, --migrate-to-postgres, " +
 			"--create-cert, --init, --check-config, --apply-migration-scripts and " +
 			"--revert-migration-script are mutually exclusive; pass exactly one")
 	}
@@ -1197,6 +1201,19 @@ func runUI(configPath, remoteProfile string) error {
 	if err != nil {
 		return err
 	}
+	backend, err := tuiterm.Open()
+	if err != nil {
+		return fmt.Errorf("terminal: %w", err)
+	}
+	return runUIOn(backend, ep.Network, cfg, start, configPath, addr, notesRoot)
+}
+
+
+// runUIOn runs the standalone UI on the backend it is handed: a terminal's
+// (--ui) or a native window's (--gui). Everything else is the one program —
+// the session, the host, the catalog — exactly as golib's Backend seam
+// promises (golib/gui, ADR 1791330692).
+func runUIOn(backend tuicore.Backend, network string, cfg config.Config, start tuiapp.Start, configPath, addr, notesRoot string) error {
 	// The terminal no longer builds a store at startup. It CANNOT: the personal
 	// root is `<base>/u-<subject>`, and the subject is the daemon's canonical
 	// identity, which does not exist until afterLogin. Constructing here is what
@@ -1214,13 +1231,8 @@ func runUI(configPath, remoteProfile string) error {
 	//
 	// nil spawn means Session.Connect reports that nothing is listening rather
 	// than becoming what listens.
-	session := tuiapp.NewSessionOn(ep.Network, addr, logger.Nop{}, spawnFor(cfg, configPath))
+	session := tuiapp.NewSessionOn(network, addr, logger.Nop{}, spawnFor(cfg, configPath))
 	defer session.Close()
-
-	backend, err := tuiterm.Open()
-	if err != nil {
-		return fmt.Errorf("terminal: %w", err)
-	}
 
 	// The About modal reports what THIS frontend resolved — the paths it
 	// would actually use — rather than asking the server, so the splash

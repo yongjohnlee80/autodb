@@ -14,14 +14,14 @@ func TestCheckFlags(t *testing.T) {
 	const goodPort = 7010
 
 	type args struct {
-		serve, ui, webUI, printEndpoint bool
-		migrateToPG                     bool
-		createCert                      bool
-		initRun                         bool
-		checkConfig                     bool
-		applyScripts, revertScript      bool
-		port                            int
-		portSet                         bool
+		serve, ui, gui, webUI, printEndpoint bool
+		migrateToPG                          bool
+		createCert                           bool
+		initRun                              bool
+		checkConfig                          bool
+		applyScripts, revertScript           bool
+		port                                 int
+		portSet                              bool
 		// certFlags are --create-cert's own flags, given by NAME so the cell
 		// exercises the same presence check checkFlags reads.
 		certFlags []string
@@ -37,6 +37,8 @@ func TestCheckFlags(t *testing.T) {
 		"migrate alone":           {migrateToPG: true, port: goodPort},
 		"ui alone":                {ui: true, port: goodPort},
 		"ui --remote":             {ui: true, port: goodPort, certFlags: []string{"--remote=prod"}},
+		"gui alone":               {gui: true, port: goodPort},
+		"gui --remote":            {gui: true, port: goodPort, certFlags: []string{"--remote=prod"}},
 		"web-ui alone":            {webUI: true, port: goodPort},
 		"print-endpoint alone":    {printEndpoint: true, port: goodPort},
 		"web-ui with a port":      {webUI: true, port: 9999, portSet: true},
@@ -54,7 +56,12 @@ func TestCheckFlags(t *testing.T) {
 		"serve + ui":              {serve: true, ui: true, port: goodPort},
 		"serve + print-endpoint":  {serve: true, printEndpoint: true, port: goodPort},
 		"ui + print-endpoint":     {ui: true, printEndpoint: true, port: goodPort},
-		"three at once":           {serve: true, ui: true, webUI: true, port: goodPort},
+		// --gui is a mode beside --ui: the two would race for the screen.
+		"ui + gui":              {ui: true, gui: true, port: goodPort},
+		"gui + serve":           {gui: true, serve: true, port: goodPort},
+		"gui + web-ui":          {gui: true, webUI: true, port: goodPort},
+		"gui + print-endpoint":  {gui: true, printEndpoint: true, port: goodPort},
+		"three at once":         {serve: true, ui: true, webUI: true, port: goodPort},
 		// --migrate-to-postgres is FIRST in the dispatch switch, so an
 		// uncounted pairing would migrate and never serve — the same class of
 		// bug as the web-ui/print-endpoint pairing this table was built for.
@@ -113,7 +120,7 @@ func TestCheckFlags(t *testing.T) {
 		// checkFlags reads --port's PRESENCE from flag.CommandLine, so a fresh
 		// FlagSet is set up per case to reflect portSet.
 		reset(t, a.portSet, a.certFlags...)
-		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.migrateToPG, a.createCert, a.initRun,
+		return checkFlags(a.serve, a.ui, a.gui, a.webUI, a.printEndpoint, a.migrateToPG, a.createCert, a.initRun,
 			a.checkConfig, a.applyScripts, a.revertScript, a.port)
 	}
 	for name, a := range ok {

@@ -13,10 +13,18 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.bui
 # normally and is unaffected.
 export GOFLAGS := -buildvcs=false
 
-.PHONY: build test test-go test-lua vet clean
+.PHONY: build build-gui test test-go test-lua vet clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/autodb ./cmd/autodb
+
+# build-gui builds the windowed binary (golib/gui needs cgo and, on Linux,
+# the Wayland/X11 headers — see golib/gui/README). The released binaries are
+# built this way, so a brew install's --gui opens a native window; the dev
+# `build` above stays cgo-less so a checkout with no window headers still
+# builds the whole program.
+build-gui:
+	CGO_ENABLED=1 go build -tags gui -trimpath -ldflags "$(LDFLAGS)" -o bin/autodb ./cmd/autodb
 
 # `test` is the honest signal: BOTH sides. The Lua suite drives a real daemon and
 # the neovim UI, and was previously in neither this target nor CI — so a whole
