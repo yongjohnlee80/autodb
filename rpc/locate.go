@@ -98,7 +98,7 @@ func Locate(ctx context.Context, ep config.Endpoint, mcfg meta.StoreConfig) (Loc
 			mine = "a store that does not exist yet"
 		}
 		return Located{}, fmt.Errorf("%w: %s serves %s; this config's store is %s",
-			ErrOtherStore, ep.Address, other.StorePath, mine)
+			ErrOtherStore, ep.Address, other.Describe(), mine)
 	}
 	return Located{}, fmt.Errorf("%w%s", ErrDaemonNotFound, recordSaid(h, rerr))
 }
