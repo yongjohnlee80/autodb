@@ -61,14 +61,13 @@ function M.ensure_connected(cb)
   local bin, berr = lifecycle.resolve_binary(M.config.bin)
   if not bin then return _settle(false, berr) end
 
-  local ep, eerr = lifecycle.resolve_endpoint(bin, M.config.config)
-  if not ep then return _settle(false, eerr) end
-
-  local function connect()
+  local function connect(ep)
     local client = require("autodb.client")
     client.connect({
       addr = ep.addr,
       mode = ep.mode,
+      store = ep.store,
+      store_id = ep.store_id,
       on_lost = function(reason)
         session.detach(reason)
       end,
@@ -100,15 +99,13 @@ function M.ensure_connected(cb)
     end)
   end
 
-  if lifecycle.is_listening(ep) then return connect() end
-  if not M.config.auto_spawn then
-    return _settle(false, lifecycle.describe_manual(
-      "nothing is listening on " .. ep.addr .. " and auto_spawn is off"))
-  end
-  lifecycle.spawn({ bin = bin, config_path = M.config.config, endpoint = ep },
-    function(sok, serr)
-      if not sok then return _settle(false, serr) end
-      connect()
+  -- lifecycle.ensure is the one path to an address that answers: it finds
+  -- this store's daemon wherever it listens, spawns one when none does
+  -- (unless auto_spawn is off), and hands on the store check to make.
+  lifecycle.ensure({ bin = bin, config_path = M.config.config, auto_spawn = M.config.auto_spawn },
+    function(ep, eerr)
+      if not ep then return _settle(false, eerr) end
+      connect(ep)
     end)
 end
 

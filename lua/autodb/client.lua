@@ -52,6 +52,8 @@ M.PROTOCOL = 13
 ---@field on_lost fun(reason: string)? -- epoch ended
 ---@field protocol integer?           -- declare this protocol instead of M.PROTOCOL:
 ---                                      the LIFECYCLE connection to an older daemon
+---@field store string                 -- "check" or "none", from lifecycle.resolve_endpoint
+---@field store_id string?             -- with "check": the store the daemon's hello must name
 
 ---@class AutodbClient
 local Client = {}
@@ -131,8 +133,20 @@ function M.connect(opts, cb)
     end
   end
 
+  -- THE STORE CHECK IS EXPLICIT OR THE CONNECTION IS REFUSED. "none" is the
+  -- binary's own no-check answer; anything that is not "check" with an id
+  -- or "none" — "pending", a missing mode, a check without an id — would
+  -- connect without knowing whose daemon this is.
+  if opts.store == "pending" or (opts.store == "check" and not opts.store_id)
+    or (opts.store ~= "check" and opts.store ~= "none") then
+    return cb(nil, string.format(
+      "autodb: no store identity to check the connection to %s against (store %s)",
+      tostring(opts.addr), tostring(opts.store)))
+  end
+
   local self = setmetatable({}, Client)
   self._addr = opts.addr
+  self._store_id = opts.store == "check" and opts.store_id or nil
   self._mode = mode
   self._on_lost = opts.on_lost
   self._token = nil
@@ -199,6 +213,16 @@ function Client:_declare(conn, cb)
       if not ok then
         conn:close()
         return cb(nil, err, { server_protocol = tonumber(hello.protocol) })
+      end
+
+      -- THE STORE, ON THIS CONNECTION'S OWN HELLO. is_listening only proved a
+      -- connect, and the address can change hands after --print-endpoint
+      -- answered. Nothing carrying a credential has been sent yet.
+      if self._store_id and hello.store_id ~= self._store_id then
+        conn:close()
+        return cb(nil, string.format(
+          "autodb: %s answers for another store (%s), not this config's; nothing was sent",
+          tostring(self._addr), tostring(hello.store_path or hello.store_id)))
       end
 
       self._hello = hello

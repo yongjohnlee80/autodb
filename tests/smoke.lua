@@ -99,7 +99,7 @@ local function eq(a, b) return vim.deep_equal(a, b) end
 -- some — a mis-scoped skip, a section that stops executing — the total falls below
 -- this and the run fails, even when nothing that DID run failed. Raise it when the
 -- suite legitimately grows; never lower it to make a run pass.
-local EXPECTED_MIN_ASSERTIONS = 335
+local EXPECTED_MIN_ASSERTIONS = 351
 local missing_prereqs = {}
 local function require_bin(section)
   missing_prereqs[#missing_prereqs + 1] = section
@@ -228,6 +228,27 @@ print("\n[3] lifecycle.resolve_endpoint — the binary owns the answer")
   ok("p3: a missing binary is reported, not guessed",
     select(2, lc.resolve_endpoint(tmp .. "/nope", nil)) ~= nil)
 
+  -- Line 2 is the store check; only its ABSENCE means none. A fake binary
+  -- prints each shape --print-endpoint could.
+  local function printing(lines)
+    local f = tmp .. "/autodb-prints"
+    local body = { "#!/bin/sh" }
+    for _, l in ipairs(lines) do body[#body + 1] = "printf '%s\\n' '" .. l .. "'" end
+    vim.fn.writefile(body, f)
+    vim.fn.setfperm(f, "rwxr-xr-x")
+    return lc.resolve_endpoint(f, nil)
+  end
+  local p1 = printing({ "unix\t/x.sock" })
+  ok("p3: one line is the no-check mode", p1 and p1.store == "none" and p1.store_id == nil, vim.inspect(p1))
+  local p2 = printing({ "unix\t/x.sock", "store\tsqlite:1-2" })
+  ok("p3: a store line is a check of that id", p2 and p2.store == "check" and p2.store_id == "sqlite:1-2", vim.inspect(p2))
+  local p3 = printing({ "unix\t/x.sock", "store\tpending" })
+  ok("p3: pending is pending", p3 and p3.store == "pending", vim.inspect(p3))
+  local m1, me1 = printing({ "unix\t/x.sock", "stor sqlite:1-2" })
+  ok("p3: a malformed store line is an error, not none", m1 == nil and me1 ~= nil, vim.inspect(m1))
+  local m2, me2 = printing({ "unix\t/x.sock", "store\tsqlite:1-2", "extra" })
+  ok("p3: a third line is an error, not none", m2 == nil and me2 ~= nil, vim.inspect(m2))
+
   -- describe_manual always names the one command that always works.
   local msg = lc.describe_manual("nothing answered", { "bind: permission denied" })
   ok("p3: giving up names the manual fallback",
@@ -337,7 +358,7 @@ print("\n[4] client.connect — handshake over a REAL daemon on a socket")
 
   local c, cerr
   vim.wait(8000, function()
-    c, cerr = connect({ addr = sock, mode = "pipe" }, 700)
+    c, cerr = connect({ addr = sock, mode = "pipe", store = "none" }, 700)
     return c ~= nil
   end, 250)
 
@@ -357,9 +378,32 @@ print("\n[4] client.connect — handshake over a REAL daemon on a socket")
     ok("p4: close is reflected in is_ready", c:is_ready() == false)
   end
 
+  -- THE STORE ON THE CONNECTION'S OWN HELLO. With the daemon up, the binary's
+  -- answer names the store; a connection checks it before anything else.
+  local sep = lc.resolve_endpoint(bin, cfg)
+  ok("p4: with the store created, --print-endpoint names it for the check",
+    sep and sep.store == "check" and type(sep.store_id) == "string" and sep.store_id ~= "", vim.inspect(sep))
+  if sep and sep.store_id then
+    local good, gerr = connect({ addr = sock, mode = "pipe", store = "check", store_id = sep.store_id })
+    ok("p4: the right store id connects", good ~= nil, tostring(gerr))
+    if good then good:close() end
+    local bad, berr = connect({ addr = sock, mode = "pipe", store = "check", store_id = "sqlite:0-0" })
+    ok("p4: a daemon of another store is refused on its hello",
+      bad == nil and tostring(berr):find("another store", 1, true) ~= nil, tostring(berr))
+  end
+  for _, opts in ipairs({
+    { addr = sock, mode = "pipe" },
+    { addr = sock, mode = "pipe", store = "pending" },
+    { addr = sock, mode = "pipe", store = "check" },
+  }) do
+    local nc, nerr = connect(opts, 500)
+    ok("p4: no store check to make is refused before dialling (store " .. tostring(opts.store) .. ")",
+      nc == nil and tostring(nerr):find("no store identity", 1, true) ~= nil, tostring(nerr))
+  end
+
   -- A second frontend connects to the SAME daemon with no ceremony —
   -- which is the whole point of dropping the nonce.
-  local c2 = connect({ addr = sock, mode = "pipe" })
+  local c2 = connect({ addr = sock, mode = "pipe", store = "none" })
   ok("p4: a second frontend connects to the same daemon freely", c2 ~= nil)
   if c2 then
     ok("p4: and sees the same server instance",
@@ -380,14 +424,14 @@ print("\n[4] client.connect — handshake over a REAL daemon on a socket")
       hello ~= nil and type(hello.schema) == "table" and type(hello.schema.applied_at_start) == "table",
       vim.inspect(hello and hello.schema))
     local mdone, mc, merr, minfo = false, nil, nil, nil
-    client.connect({ addr = sock, mode = "pipe", protocol = client.PROTOCOL - 1 },
+    client.connect({ addr = sock, mode = "pipe", protocol = client.PROTOCOL - 1, store = "none" },
       function(c3, e, info) mdone, mc, merr, minfo = true, c3, e, info end)
     vim.wait(4000, function() return mdone end, 20)
     ok("p4: a connection declaring another protocol is refused, carrying the daemon's number",
       mc == nil and minfo ~= nil and minfo.server_protocol == client.PROTOCOL
         and tostring(merr):find("PLUGIN is older", 1, true) ~= nil,
       tostring(merr) .. " " .. vim.inspect(minfo))
-    local lc4 = connect({ addr = sock, mode = "pipe", protocol = client.PROTOCOL })
+    local lc4 = connect({ addr = sock, mode = "pipe", protocol = client.PROTOCOL, store = "none" })
     ok("p4: a lifecycle connection declaring the daemon's own number is admitted", lc4 ~= nil)
     if lc4 then lc4:close() end
   end
@@ -685,7 +729,7 @@ print("\n[8] a real query through the whole stack")
   local c
   vim.wait(8000, function()
     local done = false
-    client.connect({ addr = sock, mode = "pipe" }, function(cl) c = cl; done = true end)
+    client.connect({ addr = sock, mode = "pipe", store = "none" }, function(cl) c = cl; done = true end)
     vim.wait(700, function() return done end, 20)
     return c ~= nil
   end, 250)
@@ -2449,6 +2493,70 @@ print("\n[21] autorestart — a stale backend restarts itself when idle (ADR-020
   lc.resolve_binary, lc.resolve_endpoint, lc.is_listening, cl.connect,
     ar.older_daemon, ar.after_login, autodb._login = unpack(saved)
   session.reset_for_tests()
+end)()
+
+print("\n[ensure] lifecycle.ensure — the address can change under it")
+;(function()
+  local lc = require("autodb.lifecycle")
+  local saved = { lc.resolve_endpoint, lc.is_listening, lc.spawn }
+  local function run(answers, listening, spawn_answer)
+    local i, spawned_at = 0, nil
+    lc.resolve_endpoint = function()
+      i = i + 1
+      local a = answers[math.min(i, #answers)]
+      if type(a) == "string" then return nil, a end
+      return a
+    end
+    lc.is_listening = function(ep) return listening[ep.addr] == true end
+    lc.spawn = function(o, cb)
+      spawned_at = o.endpoint.addr
+      cb(spawn_answer ~= false, spawn_answer == false and "spawn failed" or nil, o.endpoint)
+    end
+    local done, got, err = false, nil, nil
+    lc.ensure({ bin = "/bin/autodb", auto_spawn = true }, function(e, x) done, got, err = true, e, x end)
+    vim.wait(500, function() return done end, 5)
+    return got, err, spawned_at
+  end
+  local A = { mode = "pipe", addr = "/run/a.sock", store = "check", store_id = "sqlite:1-1" }
+  local B = { mode = "pipe", addr = "/run/b.sock", store = "check", store_id = "sqlite:1-1" }
+
+  -- The holder at A exits between --print-endpoint and the dial: asked again,
+  -- the binary answers the configured B, where the spawn binds.
+  local got, err, at = run({ A, B, B }, {}, true)
+  ok("ensure: a recorded address gone silent is asked again, and the spawn's address is used",
+    got ~= nil and got.addr == B.addr and at == B.addr, vim.inspect({ got, err, at }))
+
+  -- A pending store has no daemon: something answering there is not taken,
+  -- the spawn runs, and when the binary then refuses (another store's daemon
+  -- holds the address) nothing is handed on.
+  local P = { mode = "pipe", addr = "/run/p.sock", store = "pending" }
+  got, err, at = run({ P, P, "the daemon at this address serves a different store" }, { [P.addr] = true }, true)
+  ok("ensure: a listener at a pending store's address is never taken as its daemon",
+    got == nil and at == P.addr and tostring(err):find("different store", 1, true) ~= nil, vim.inspect({ got, err, at }))
+
+  -- Post-spawn: still pending, or the binary failing, fails closed.
+  got, err = run({ P, P, P }, {}, true)
+  ok("ensure: still pending after the spawn fails closed",
+    got == nil and tostring(err):find("no identity yet", 1, true) ~= nil, vim.inspect({ got, err }))
+  got, err = run({ P, P, "boom" }, {}, true)
+  ok("ensure: a post-spawn resolve that fails fails closed", got == nil and err == "boom", vim.inspect({ got, err }))
+
+  lc.resolve_endpoint, lc.is_listening, lc.spawn = unpack(saved)
+
+  -- spawn's exit path: the serve exited (69: this store's daemon answers
+  -- elsewhere), and asking the binary again finds where.
+  local real_jobstart = vim.fn.jobstart
+  local saved2 = { lc.resolve_endpoint, lc.is_listening }
+  lc.is_listening = function(ep) return ep.addr == B.addr end
+  lc.resolve_endpoint = function() return B end
+  vim.fn.jobstart = function(_, o) vim.schedule(function() o.on_exit(7, 69, "exit") end); return 7 end
+  local sdone, sok, sfound = false, nil, nil
+  lc.spawn({ bin = "/bin/autodb", endpoint = A }, function(o, _, f) sdone, sok, sfound = true, o, f end)
+  vim.wait(500, function() return sdone end, 5)
+  vim.fn.jobstart = real_jobstart
+  lc.resolve_endpoint, lc.is_listening = unpack(saved2)
+  ok("ensure: a serve that exits because its store answers elsewhere settles on that address",
+    sok == true and sfound ~= nil and sfound.addr == B.addr, vim.inspect({ sok, sfound }))
 end)()
 
 print(string.format("\n%d passed, %d failed, %d missing (of >= %d expected)",
