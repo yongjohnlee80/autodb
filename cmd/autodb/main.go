@@ -1208,7 +1208,6 @@ func runUI(configPath, remoteProfile string) error {
 	return runUIOn(backend, ep.Network, cfg, start, configPath, addr, notesRoot)
 }
 
-
 // runUIOn runs the standalone UI on the backend it is handed: a terminal's
 // (--ui) or a native window's (--gui). Everything else is the one program —
 // the session, the host, the catalog — exactly as golib's Backend seam

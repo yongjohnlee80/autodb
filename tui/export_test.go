@@ -3,19 +3,19 @@ package tui
 import (
 	"context"
 	"errors"
+	"github.com/yongjohnlee80/autodb/core/notes"
 	"io/fs"
 	"path"
 	"regexp"
-	"github.com/yongjohnlee80/autodb/core/notes"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/yongjohnlee80/golib/parse/qml"
+	tuicore "github.com/yongjohnlee80/golib/tui"
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
-	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/widget"
-	"github.com/yongjohnlee80/golib/parse/qml"
 )
 
 // export_test.go opens the QML host to the external tests: the same options
