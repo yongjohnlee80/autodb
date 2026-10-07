@@ -546,7 +546,7 @@ func runServe(configPath string) error {
 	// nothing about the store, so two endpoints could share one meta store
 	// and each keep its own in-memory session registry and transaction
 	// reservation, both believing they enforced a limit neither held.
-	lease, err := meta.AcquireLease(ctx, store, cfg.Meta)
+	lease, err := meta.AcquireLease(ctx, store, cfg.Meta, meta.LeaseHolder{Role: "serve", Version: version})
 	if err != nil {
 		ln.Close()
 		if errors.Is(err, meta.ErrLeaseHeld) {

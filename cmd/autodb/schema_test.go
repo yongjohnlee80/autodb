@@ -112,7 +112,7 @@ func TestTheSchemaVerbsRefuseAServedStoreBeforeChangingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = daemon.Close() })
-	lease, err := meta.AcquireLease(ctx, daemon, mc)
+	lease, err := meta.AcquireLease(ctx, daemon, mc, meta.LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatal(err)
 	}

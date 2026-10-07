@@ -86,7 +86,7 @@ func TestMigrateCLI_RefusesAServedDestinationWithoutTouchingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = held.Close() })
-	lease, err := meta.AcquireLease(ctx, held, dstCfg)
+	lease, err := meta.AcquireLease(ctx, held, dstCfg, meta.LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatalf("the stand-in daemon could not take the lease: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestMigrateCLI_RefusesAServedSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = held.Close() })
-	lease, err := meta.AcquireLease(ctx, held, srcCfg)
+	lease, err := meta.AcquireLease(ctx, held, srcCfg, meta.LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatal(err)
 	}

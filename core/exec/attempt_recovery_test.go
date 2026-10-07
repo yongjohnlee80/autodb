@@ -239,7 +239,7 @@ func runAttemptChild() {
 	if err != nil {
 		fail("meta.Open: %v", err)
 	}
-	lease, err := meta.AcquireLease(ctx, store, config.Meta{Engine: "sqlite", Path: os.Getenv(crashMetaEnv)})
+	lease, err := meta.AcquireLease(ctx, store, config.Meta{Engine: "sqlite", Path: os.Getenv(crashMetaEnv)}, meta.LeaseHolder{Role: "serve"})
 	if err != nil {
 		fail("AcquireLease: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestAKilledDaemonsAttemptIsSettledByTheNextOne(t *testing.T) {
 
 	// The next daemon: its lease is granted because the dead one's went with
 	// it, and its startup settles the attempt.
-	lease, err := meta.AcquireLease(ctx, store, cfg)
+	lease, err := meta.AcquireLease(ctx, store, cfg, meta.LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatalf("the next daemon's lease: %v", err)
 	}

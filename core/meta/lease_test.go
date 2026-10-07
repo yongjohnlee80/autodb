@@ -30,7 +30,7 @@ const leaseHolderEnv = "AUTODB_TEST_LEASE_HOLDER"
 // rather than a second call in the same address space.
 func TestMain(m *testing.M) {
 	if path := os.Getenv(leaseHolderEnv); path != "" {
-		if _, err := acquireFileLease(path); err != nil {
+		if _, err := acquireFileLease(path, LeaseHolder{}); err != nil {
 			// The parent reads this to distinguish "refused" from "broken".
 			os.Stdout.WriteString("REFUSED: " + err.Error() + "\n")
 			os.Exit(3)
@@ -46,13 +46,13 @@ func TestInstanceLease_SecondAcquireIsRefused(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "meta.db")
-	first, err := acquireFileLease(path)
+	first, err := acquireFileLease(path, LeaseHolder{})
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 	t.Cleanup(func() { _ = first.Release() })
 
-	second, err := acquireFileLease(path)
+	second, err := acquireFileLease(path, LeaseHolder{})
 	if err == nil {
 		_ = second.Release()
 		t.Fatal("a second lease was granted on a store already held")
@@ -71,7 +71,7 @@ func TestInstanceLease_ReleaseAllowsReacquire(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "meta.db")
-	first, err := acquireFileLease(path)
+	first, err := acquireFileLease(path, LeaseHolder{})
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestInstanceLease_ReleaseAllowsReacquire(t *testing.T) {
 	if err := first.Release(); err != nil {
 		t.Errorf("second release: %v", err)
 	}
-	second, err := acquireFileLease(path)
+	second, err := acquireFileLease(path, LeaseHolder{})
 	if err != nil {
 		t.Fatalf("reacquire after release: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestInstanceLease_SecondProcessIsRefused(t *testing.T) {
 	waitFor(t, out, "HELD")
 
 	// This process now plays the second engine.
-	second, err := acquireFileLease(path)
+	second, err := acquireFileLease(path, LeaseHolder{})
 	if err == nil {
 		_ = second.Release()
 		t.Fatal("a second PROCESS took a lease already held — the one-engine-per-store " +
@@ -135,7 +135,7 @@ func TestInstanceLease_SurvivesAHolderThatDiesUncleanly(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		l, err := acquireFileLease(path)
+		l, err := acquireFileLease(path, LeaseHolder{})
 		if err == nil {
 			_ = l.Release()
 			return
@@ -154,11 +154,11 @@ func TestInstanceLease_SurvivesAHolderThatDiesUncleanly(t *testing.T) {
 func TestInstanceLease_MemoryStoreNeedsNoLease(t *testing.T) {
 	t.Parallel()
 
-	a, err := acquireFileLease(":memory:")
+	a, err := acquireFileLease(":memory:", LeaseHolder{})
 	if err != nil {
 		t.Fatalf("in-memory acquire: %v", err)
 	}
-	b, err := acquireFileLease(":memory:")
+	b, err := acquireFileLease(":memory:", LeaseHolder{})
 	if err != nil {
 		t.Fatalf("a second in-memory store must not be excluded by the first: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestAcquireLease_UnknownEngineRefuses(t *testing.T) {
 	t.Parallel()
 
 	s := &Store{engine: "cassandra"}
-	if _, err := AcquireLease(context.Background(), s, config.Meta{}); err == nil {
+	if _, err := AcquireLease(context.Background(), s, config.Meta{}, LeaseHolder{Role: "serve"}); err == nil {
 		t.Fatal("an unleasable engine must refuse to serve, not serve unprotected")
 	}
 }
@@ -247,7 +247,7 @@ func TestInstanceLease_Postgres(t *testing.T) {
 	// missing one.
 	t.Cleanup(func() { _ = first.Close() })
 
-	l1, err := AcquireLease(ctx, first, mcfg)
+	l1, err := AcquireLease(ctx, first, mcfg, LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatalf("first lease: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestInstanceLease_Postgres(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = second.Close() })
 
-	if l2, err := AcquireLease(ctx, second, mcfg); err == nil {
+	if l2, err := AcquireLease(ctx, second, mcfg, LeaseHolder{Role: "serve"}); err == nil {
 		_ = l2.Release()
 		t.Fatal("a second engine took a lease on a postgres meta store already held")
 	} else if !errors.Is(err, ErrLeaseHeld) {
@@ -285,7 +285,7 @@ func TestInstanceLease_Postgres(t *testing.T) {
 		t.Fatalf("release: %v", err)
 	}
 	released = true
-	l3, err := AcquireLease(ctx, second, mcfg)
+	l3, err := AcquireLease(ctx, second, mcfg, LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatalf("reacquire after release: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestInstanceLease_AliasesAreTheSameDatabase(t *testing.T) {
 			cfg := func(p string) config.Meta { return config.Meta{Engine: "sqlite", Path: p} }
 			store := &Store{engine: "sqlite"}
 
-			first, err := AcquireLease(t.Context(), store, cfg(direct))
+			first, err := AcquireLease(t.Context(), store, cfg(direct), LeaseHolder{Role: "serve"})
 			if err != nil {
 				t.Fatalf("the first lease: %v", err)
 			}
@@ -345,7 +345,7 @@ func TestInstanceLease_AliasesAreTheSameDatabase(t *testing.T) {
 			// Positive control: this test can observe a refusal at all.
 			// Without it a green result would only prove the guard is
 			// never reached.
-			if l, err := AcquireLease(t.Context(), store, cfg(direct)); !errors.Is(err, ErrLeaseHeld) {
+			if l, err := AcquireLease(t.Context(), store, cfg(direct), LeaseHolder{Role: "serve"}); !errors.Is(err, ErrLeaseHeld) {
 				if err == nil {
 					_ = l.Release()
 				}
@@ -353,7 +353,7 @@ func TestInstanceLease_AliasesAreTheSameDatabase(t *testing.T) {
 					"the alias either", err)
 			}
 
-			second, err := AcquireLease(t.Context(), store, cfg(alias))
+			second, err := AcquireLease(t.Context(), store, cfg(alias), LeaseHolder{Role: "serve"})
 			if err == nil {
 				_ = second.Release()
 				t.Fatalf("a second lease was granted over the SAME database through %s "+
@@ -375,7 +375,7 @@ func TestInstanceLease_DoesNotDisturbSQLite(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "meta.db")
 	lease, err := AcquireLease(t.Context(), &Store{engine: "sqlite"},
-		config.Meta{Engine: "sqlite", Path: path})
+		config.Meta{Engine: "sqlite", Path: path}, LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatalf("the lease: %v", err)
 	}
@@ -410,13 +410,13 @@ func TestInstanceLease_AcquiresOverAnOpenStore(t *testing.T) {
 		t.Fatalf("read before the lease: %v", err)
 	}
 
-	lease, err := AcquireLease(t.Context(), st, mcfg)
+	lease, err := AcquireLease(t.Context(), st, mcfg, LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatalf("the lease was refused over this process's own open store: %v", err)
 	}
 
 	// Still exclusive: a second engine over the same store is refused.
-	if l, err := AcquireLease(t.Context(), st, mcfg); !errors.Is(err, ErrLeaseHeld) {
+	if l, err := AcquireLease(t.Context(), st, mcfg, LeaseHolder{Role: "serve"}); !errors.Is(err, ErrLeaseHeld) {
 		if err == nil {
 			_ = l.Release()
 		}
@@ -458,14 +458,14 @@ func TestInstanceLease_DSNVariantsAreTheSameDatabase(t *testing.T) {
 	variant := dsn + sep + "application_name=a-different-engine"
 
 	s1 := open(dsn)
-	first, err := AcquireLease(ctx, s1, config.Meta{Engine: "postgres", DSN: dsn})
+	first, err := AcquireLease(ctx, s1, config.Meta{Engine: "postgres", DSN: dsn}, LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatalf("the first lease: %v", err)
 	}
 	defer func() { _ = first.Release() }()
 
 	s2 := open(variant)
-	second, err := AcquireLease(ctx, s2, config.Meta{Engine: "postgres", DSN: variant})
+	second, err := AcquireLease(ctx, s2, config.Meta{Engine: "postgres", DSN: variant}, LeaseHolder{Role: "serve"})
 	if err == nil {
 		_ = second.Release()
 		t.Fatal("a second lease was granted over the SAME database through a DSN differing only by " +
@@ -494,7 +494,7 @@ func TestInstanceLease_ReleaseBeforeStoreCloseDoesNotHang(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	lease, err := AcquireLease(ctx, store, mcfg)
+	lease, err := AcquireLease(ctx, store, mcfg, LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatalf("lease: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestInstanceLease_OneAbstractionAcrossEngines(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	l, err := AcquireLease(ctx, s, config.Meta{Engine: "sqlite", Path: path})
+	l, err := AcquireLease(ctx, s, config.Meta{Engine: "sqlite", Path: path}, LeaseHolder{Role: "serve"})
 	if err != nil {
 		t.Fatalf("AcquireLease: %v", err)
 	}
@@ -569,7 +569,7 @@ func TestInstanceLease_EveryHoldingHasItsOwnEpoch(t *testing.T) {
 	t.Parallel()
 	hex32 := regexp.MustCompile(`^[0-9a-f]{32}$`)
 	path := filepath.Join(t.TempDir(), "meta.db")
-	first, err := acquireFileLease(path)
+	first, err := acquireFileLease(path, LeaseHolder{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,12 +577,12 @@ func TestInstanceLease_EveryHoldingHasItsOwnEpoch(t *testing.T) {
 	if err := first.Release(); err != nil {
 		t.Fatal(err)
 	}
-	again, err := acquireFileLease(path)
+	again, err := acquireFileLease(path, LeaseHolder{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = again.Release() })
-	mem, err := acquireFileLease(":memory:")
+	mem, err := acquireFileLease(":memory:", LeaseHolder{})
 	if err != nil {
 		t.Fatal(err)
 	}
