@@ -118,7 +118,10 @@ func foldRune(r rune) rune {
 // (selection when active)") where a menu leaf wants "Execute". One shared title
 // would force one of the two surfaces to read wrong, so each owns its own.
 type LeaderProjectionOf[H CommandHost] struct {
-	Key   rune
+	Key rune
+	// Label is the English source text; the row shown is its catalog message
+	// (ADR-0219 D5a). The leader card composes "key  label" lines itself, so
+	// the label resolves to text at projection.
 	Label string
 	// LabelFor overrides Label when non-nil, for the one entry whose text is
 	// state-dependent: `x` reads "disconnect" while connected and "connect"
@@ -143,17 +146,38 @@ func (p LeaderProjectionOf[H]) text(h H) string {
 	return p.Label
 }
 
+// leaderID is the label's catalog id for the command that owns it
+// (ADR-0219 D5a).
+func (p LeaderProjectionOf[H]) leaderID(cmd CommandID) string {
+	return "autodb.leader." + string(cmd)
+}
+
 // MenuProjection is how a command appears on the top menu bar.
 //
 // Parent is the leaf's IMMEDIATE parent and nothing more. Ancestry is derived
 // from the node catalog, so there is exactly one parent graph; a full path
 // copied onto every command would be a second one, free to disagree with the
-// first.
+// node catalog at any later edit (see MenuNode).
 type MenuProjection struct {
 	Parent MenuNodeID
-	Label  string
+	// Label is the English source text. The row shown is its catalog message:
+	// MsgID when set, else one derived from the command id — globally unique
+	// already, so it names the row alone (ADR-0219 D5a).
+	Label string
+	// MsgID names the row in the catalogs; "" derives one. Set it only where
+	// the derived id would read wrong (a label shared by two projections of
+	// one command, or a name that is not the command's).
+	MsgID  string
 	Hotkey rune
 	Order  int
+}
+
+// msgID is the row's catalog id: MsgID, else derived from the command's.
+func (p MenuProjection) msgID(cmd CommandID) string {
+	if p.MsgID != "" {
+		return p.MsgID
+	}
+	return "autodb.menu." + string(cmd)
 }
 
 // MenuNode is a category or submenu. Behaviour-free: the tree holds structure
@@ -164,6 +188,14 @@ type MenuNode struct {
 	Label  string
 	Hotkey rune
 	Order  int
+}
+
+// msgID is the node's catalog id, derived from its ID — which already spells
+// its parent path ("home.conns"), so no Parent joins in: the bar reads
+// "autodb.menu.home" for Home, "autodb.menu.home.conns" for DB conns
+// (ADR-0219 D5a).
+func (n MenuNode) msgID() string {
+	return "autodb.menu." + string(n.ID)
 }
 
 // OfferState is how a command appears right now.
@@ -436,6 +468,9 @@ func (c *CatalogOf[H]) Nodes() []MenuNode { return append([]MenuNode(nil), c.nod
 // HelpRow is one line of the help screen's command section.
 type HelpRow struct {
 	Key   rune
+	// ID is the command whose row this is: the help screen names the label's
+	// catalog message by it (autodb.leader.<id>).
+	ID    string
 	Label string
 	Help  string
 }
@@ -458,6 +493,7 @@ func (c *CatalogOf[H]) helpProjection(h H) []HelpRow {
 		}
 		rows = append(rows, row{order: cmd.Leader.Order, r: HelpRow{
 			Key:   cmd.Leader.Key,
+			ID:    string(cmd.ID),
 			Label: cmd.Leader.text(h),
 			Help:  cmd.Leader.Help,
 		}})

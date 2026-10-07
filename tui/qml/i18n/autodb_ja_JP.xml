@@ -1,0 +1,383 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE TS>
+<TS version="2.1" language="ja_JP">
+    <context>
+        <name>autodb</name>
+        <message id="autodb.menu.home">
+            <source>&amp;Home</source>
+            <translation>ホーム(&amp;h)</translation>
+        </message>
+        <message id="autodb.menu.home.conns">
+            <source>&amp;DB conns</source>
+            <translation>DB接続(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.file">
+            <source>&amp;File</source>
+            <translation>ファイル(&amp;f)</translation>
+        </message>
+        <message id="autodb.menu.edit">
+            <source>&amp;Edit</source>
+            <translation>編集(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.run">
+            <source>&amp;Run</source>
+            <translation>実行(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.view">
+            <source>&amp;View</source>
+            <translation>表示(&amp;v)</translation>
+        </message>
+        <message id="autodb.menu.remote">
+            <source>Re&amp;mote</source>
+            <translation>リモート(&amp;m)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom">
+            <source>&amp;Zoom</source>
+            <translation>ズーム(&amp;z)</translation>
+        </message>
+        <message id="autodb.menu.options">
+            <source>&amp;Options</source>
+            <translation>オプション(&amp;o)</translation>
+        </message>
+        <message id="autodb.menu.options.editor">
+            <source>&amp;Editor</source>
+            <translation>エディタ(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.options.theme">
+            <source>&amp;Theme</source>
+            <translation>テーマ(&amp;t)</translation>
+        </message>
+        <message id="autodb.menu.options.language">
+            <source>&amp;Language</source>
+            <translation>言語(&amp;l)</translation>
+        </message>
+        <message id="autodb.menu.system">
+            <source>&amp;System</source>
+            <translation>システム(&amp;s)</translation>
+        </message>
+        <message id="autodb.menu.query.run">
+            <source>&amp;Execute</source>
+            <translation>実行(&amp;e)</translation>
+        </message>
+        <message id="autodb.leader.query.run">
+            <source>run query (selection when active)</source>
+            <translation>クエリを実行（選択範囲があればそれのみ）</translation>
+        </message>
+        <message id="autodb.menu.query.run_selection">
+            <source>Execute &amp;selection</source>
+            <translation>選択範囲を実行(&amp;s)</translation>
+        </message>
+        <message id="autodb.leader.query.run_selection">
+            <source>run selection only</source>
+            <translation>選択範囲のみ実行</translation>
+        </message>
+        <message id="autodb.menu.results.toggle_json">
+            <source>&amp;Results as table/JSON</source>
+            <translation>結果をテーブル/JSON切替(&amp;r)</translation>
+        </message>
+        <message id="autodb.leader.results.toggle_json">
+            <source>toggle results table/JSON</source>
+            <translation>結果をテーブル/JSONで切替</translation>
+        </message>
+        <message id="autodb.leader.view.zoom_toggle">
+            <source>zoom the pane in use, or out</source>
+            <translation>使用中のペインをズーム、または戻す</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_editor">
+            <source>&amp;Query editor</source>
+            <translation>クエリエディタ(&amp;q)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_results">
+            <source>&amp;Results</source>
+            <translation>結果(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_explorer">
+            <source>&amp;Explorer</source>
+            <translation>エクスプローラ(&amp;e)</translation>
+        </message>
+        <message id="autodb.menu.view.zoom_out">
+            <source>Z&amp;oom out</source>
+            <translation>ズーム解除(&amp;o)</translation>
+        </message>
+        <message id="autodb.leader.focus.explorer">
+            <source>focus explorer</source>
+            <translation>エクスプローラへ移動</translation>
+        </message>
+        <message id="autodb.leader.focus.editor">
+            <source>focus query editor</source>
+            <translation>クエリエディタへ移動</translation>
+        </message>
+        <message id="autodb.leader.focus.results">
+            <source>focus results</source>
+            <translation>結果へ移動</translation>
+        </message>
+        <message id="autodb.menu.note.new">
+            <source>&amp;New note</source>
+            <translation>新しいノート(&amp;n)</translation>
+        </message>
+        <message id="autodb.leader.note.new">
+            <source>new note</source>
+            <translation>新しいノート</translation>
+        </message>
+        <message id="autodb.menu.note.save">
+            <source>&amp;Save note</source>
+            <translation>ノートを保存(&amp;s)</translation>
+        </message>
+        <message id="autodb.leader.note.save">
+            <source>save note</source>
+            <translation>ノートを保存</translation>
+        </message>
+        <message id="autodb.menu.conn.select">
+            <source>&amp;Select…</source>
+            <translation>選択(&amp;s)…</translation>
+        </message>
+        <message id="autodb.leader.conn.select">
+            <source>select the query connection</source>
+            <translation>クエリ接続を選択</translation>
+        </message>
+        <message id="autodb.menu.conn.manage">
+            <source>&amp;Edit…</source>
+            <translation>編集(&amp;e)…</translation>
+        </message>
+        <message id="autodb.leader.conn.manage">
+            <source>connections…</source>
+            <translation>接続…</translation>
+        </message>
+        <message id="autodb.menu.workspace.manage">
+            <source>&amp;Workspaces…</source>
+            <translation>ワークスペース(&amp;w)…</translation>
+        </message>
+        <message id="autodb.leader.workspace.manage">
+            <source>workspaces…</source>
+            <translation>ワークスペース…</translation>
+        </message>
+        <message id="autodb.menu.user.manage">
+            <source>&amp;Users (admin)…</source>
+            <translation>ユーザ（管理者）(&amp;u)…</translation>
+        </message>
+        <message id="autodb.leader.user.manage">
+            <source>users…</source>
+            <translation>ユーザ…</translation>
+        </message>
+        <message id="autodb.menu.ip.mine">
+            <source>My &amp;IP addresses…</source>
+            <translation>自分のIPアドレス(&amp;i)…</translation>
+        </message>
+        <message id="autodb.leader.ip.mine">
+            <source>my allowed IPs…</source>
+            <translation>許可された自分のIP…</translation>
+        </message>
+        <message id="autodb.menu.remote.my_keys">
+            <source>My &amp;SSH keys…</source>
+            <translation>自分のSSHキー(&amp;s)…</translation>
+        </message>
+        <message id="autodb.menu.token.mine">
+            <source>&amp;Access tokens…</source>
+            <translation>アクセストークン(&amp;a)…</translation>
+        </message>
+        <message id="autodb.leader.token.mine">
+            <source>my access tokens…</source>
+            <translation>自分のアクセストークン…</translation>
+        </message>
+        <message id="autodb.menu.history.open">
+            <source>&amp;History…</source>
+            <translation>履歴(&amp;h)…</translation>
+        </message>
+        <message id="autodb.leader.history.open">
+            <source>script history…</source>
+            <translation>スクリプト履歴…</translation>
+        </message>
+        <message id="autodb.menu.audit.open">
+            <source>Au&amp;dit log (admin)…</source>
+            <translation>監査ログ（管理者）(&amp;d)…</translation>
+        </message>
+        <message id="autodb.leader.audit.open">
+            <source>audit log…</source>
+            <translation>監査ログ…</translation>
+        </message>
+        <message id="autodb.menu.frontdoor.cacert">
+            <source>&amp;CA certificate…</source>
+            <translation>CA証明書(&amp;c)…</translation>
+        </message>
+        <message id="autodb.leader.frontdoor.cacert">
+            <source>front-door CA certificate…</source>
+            <translation>フロントドアCA証明書…</translation>
+        </message>
+        <message id="autodb.menu.explorer.refresh">
+            <source>Re&amp;fresh explorer</source>
+            <translation>エクスプローラを更新(&amp;f)</translation>
+        </message>
+        <message id="autodb.leader.explorer.refresh">
+            <source>refresh explorer</source>
+            <translation>エクスプローラを更新</translation>
+        </message>
+        <message id="autodb.menu.ip.allowlist">
+            <source>&amp;Global IP addresses (admin)…</source>
+            <translation>グローバルIPアドレス（管理者）(&amp;g)…</translation>
+        </message>
+        <message id="autodb.leader.ip.allowlist">
+            <source>ip allowlist (admin)…</source>
+            <translation>IP許可リスト（管理者）…</translation>
+        </message>
+        <message id="autodb.menu.keyslot.manage">
+            <source>Service &amp;keyslot (admin)…</source>
+            <translation>サービスキースロット（管理者）(&amp;k)…</translation>
+        </message>
+        <message id="autodb.leader.keyslot.manage">
+            <source>service keyslot (admin)…</source>
+            <translation>サービスキースロット（管理者）…</translation>
+        </message>
+        <message id="autodb.leader.warning.dismiss_cleartext">
+            <source>dismiss the no-TLS warning</source>
+            <translation>TLSなし警告を閉じる</translation>
+        </message>
+        <message id="autodb.menu.session.login">
+            <source>&amp;Login / Switch user…</source>
+            <translation>ログイン / ユーザ切替(&amp;l)…</translation>
+        </message>
+        <message id="autodb.leader.session.login">
+            <source>login / switch user</source>
+            <translation>ログイン / ユーザ切替</translation>
+        </message>
+        <message id="autodb.menu.remote.connect">
+            <source>&amp;Connect…</source>
+            <translation>接続(&amp;c)…</translation>
+        </message>
+        <message id="autodb.menu.remote.disconnect">
+            <source>&amp;Disconnect</source>
+            <translation>切断(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.remote.manage">
+            <source>&amp;Manage…</source>
+            <translation>管理(&amp;m)…</translation>
+        </message>
+        <message id="autodb.leader.session.connect">
+            <source>connect</source>
+            <translation>接続</translation>
+        </message>
+        <message id="autodb.leader.session.disconnect">
+            <source>disconnect</source>
+            <translation>切断</translation>
+        </message>
+        <message id="autodb.menu.server.restart">
+            <source>&amp;Restart server</source>
+            <translation>サーバを再起動(&amp;r)</translation>
+        </message>
+        <message id="autodb.leader.server.restart">
+            <source>restart the server</source>
+            <translation>サーバを再起動</translation>
+        </message>
+        <message id="autodb.menu.app.pressure">
+            <source>&amp;Pressure</source>
+            <translation>負荷(&amp;p)</translation>
+        </message>
+        <message id="autodb.leader.app.pressure">
+            <source>front-door pressure</source>
+            <translation>フロントドアの負荷</translation>
+        </message>
+        <message id="autodb.menu.app.profile">
+            <source>Pro&amp;file…</source>
+            <translation>プロファイル(&amp;f)…</translation>
+        </message>
+        <message id="autodb.leader.app.profile">
+            <source>profile</source>
+            <translation>プロファイル</translation>
+        </message>
+        <message id="autodb.menu.app.about">
+            <source>&amp;About</source>
+            <translation>情報(&amp;a)</translation>
+        </message>
+        <message id="autodb.leader.app.about">
+            <source>about autodb</source>
+            <translation>autodbについて</translation>
+        </message>
+        <message id="autodb.menu.app.help">
+            <source>&amp;Help</source>
+            <translation>ヘルプ(&amp;h)</translation>
+        </message>
+        <message id="autodb.leader.app.help">
+            <source>help</source>
+            <translation>ヘルプ</translation>
+        </message>
+        <message id="autodb.menu.app.quit">
+            <source>E&amp;xit</source>
+            <translation>終了(&amp;x)</translation>
+        </message>
+        <message id="autodb.leader.app.quit">
+            <source>quit</source>
+            <translation>終了</translation>
+        </message>
+        <message id="autodb.menu.edit.copy">
+            <source>&amp;Copy/Yank (register; clipboard if available)</source>
+            <translation>コピー/ヤンク(&amp;c)（レジスタ；可能ならクリップボード）</translation>
+        </message>
+        <message id="autodb.menu.edit.cut">
+            <source>Cu&amp;t to register</source>
+            <translation>切り取り(&amp;t)（レジスタへ）</translation>
+        </message>
+        <message id="autodb.menu.edit.paste">
+            <source>&amp;Paste register</source>
+            <translation>レジスタを貼り付け(&amp;p)</translation>
+        </message>
+        <message id="autodb.menu.options.editor.vim">
+            <source>&amp;Vim mode</source>
+            <translation>Vimモード(&amp;v)</translation>
+        </message>
+        <message id="autodb.menu.options.editor.textedit">
+            <source>&amp;TextEdit mode</source>
+            <translation>TextEditモード(&amp;t)</translation>
+        </message>
+        <message id="autodb.menu.note.open">
+            <source>&amp;Open note…</source>
+            <translation>ノートを開く(&amp;o)…</translation>
+        </message>
+        <message id="autodb.leader.note.open">
+            <source>open a note…</source>
+            <translation>ノートを開く…</translation>
+        </message>
+        <message id="autodb.menu.options.theme.dark">
+            <source>&amp;Dark</source>
+            <translation>ダーク(&amp;d)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.light">
+            <source>&amp;Light</source>
+            <translation>ライト(&amp;l)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.mono">
+            <source>&amp;Mono</source>
+            <translation>モノ(&amp;m)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.retro">
+            <source>&amp;Retro</source>
+            <translation>レトロ(&amp;r)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.sepia">
+            <source>&amp;Sepia</source>
+            <translation>セピア(&amp;s)</translation>
+        </message>
+        <message id="autodb.menu.options.language.en">
+            <source>English (&amp;1)</source>
+            <translation>English (&amp;1)</translation>
+        </message>
+        <message id="autodb.menu.options.language.ko_KR">
+            <source>한국어 (&amp;2)</source>
+            <translation>한국어 (&amp;2)</translation>
+        </message>
+        <message id="autodb.menu.options.language.ja_JP">
+            <source>日本語 (&amp;3)</source>
+            <translation>日本語 (&amp;3)</translation>
+        </message>
+        <message id="autodb.menu.options.language.zh_CN">
+            <source>中文 (&amp;4)</source>
+            <translation>中文 (&amp;4)</translation>
+        </message>
+        <message id="autodb.menu.options.language.es">
+            <source>Español (&amp;5)</source>
+            <translation>Español (&amp;5)</translation>
+        </message>
+        <message id="autodb.menu.options.language.pt_BR">
+            <source>Português (Brasil) (&amp;6)</source>
+            <translation>Português (Brasil) (&amp;6)</translation>
+        </message>
+    </context>
+</TS>

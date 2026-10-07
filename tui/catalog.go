@@ -399,9 +399,9 @@ func catalogCommands() []CommandOf[*Host] {
 				Key: 'x', Order: 230,
 				LabelFor: func(h *Host) string {
 					if h.session.Connected() {
-						return "disconnect"
+						return h.tr("autodb.leader.session.disconnect", "disconnect")
 					}
-					return "connect"
+					return h.tr("autodb.leader.session.connect", "connect")
 				},
 			},
 		},

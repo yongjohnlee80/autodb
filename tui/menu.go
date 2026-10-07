@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
+	"github.com/yongjohnlee80/golib/tui"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 )
@@ -90,8 +91,15 @@ func (h *Host) projectBar() {
 			continue
 		}
 		for _, mp := range cmd.Menu {
+			// The label a row holds is its catalog MESSAGE: the widget the
+			// QML binds resolves it in the App's language, so a switch
+			// relabels the bar without a reproject (ADR-0219 D5a). The
+			// English catalog holds the RENDERED label — withMnemonic's
+			// output, marker and all — so the marker survives where the
+			// hotkey used to be baked in here.
 			row := tuidecl.Row{
-				"key": string(cmd.ID), "kind": rowItem, "label": withMnemonic(mp.Label, mp.Hotkey),
+				"key": string(cmd.ID), "kind": rowItem,
+				"label": tui.Msg(mp.msgID(cmd.ID)),
 				"enabled": off.State == OfferOffered, "id": string(cmd.ID), "group": "", "checked": false,
 			}
 			if group, checked, ok := h.radioOf(cmd.ID); ok {
@@ -109,7 +117,7 @@ func (h *Host) projectBar() {
 			if fill(child.ID) {
 				entries = append(entries, menuEntry{child.Order, tuidecl.Row{
 					"key": "node:" + string(child.ID), "kind": rowSubmenu,
-					"label": withMnemonic(child.Label, child.Hotkey), "enabled": true, "id": "",
+					"label": tui.Msg(child.msgID()), "enabled": true, "id": "",
 					"group": "", "checked": false, "rows": h.menus.rowsOf(child.ID),
 				}})
 			}
@@ -126,7 +134,7 @@ func (h *Host) projectBar() {
 	for _, n := range children[""] {
 		if fill(n.ID) {
 			top = append(top, menuEntry{n.Order, tuidecl.Row{
-				"key": string(n.ID), "label": withMnemonic(n.Label, n.Hotkey), "rows": h.menus.rowsOf(n.ID),
+				"key": string(n.ID), "label": tui.Msg(n.msgID()), "rows": h.menus.rowsOf(n.ID),
 			}})
 		}
 	}
@@ -157,6 +165,12 @@ func (h *Host) radioOf(id CommandID) (group string, checked, ok bool) {
 // projectLeader resets the leader menu's rows: every command with a leader
 // key, by order. A disabled one stays, saying why, and its key runs nothing.
 // App.leaderText is the same rows as the card draws them.
+//
+// The card's lines are text composed HERE ("q  focus query editor"), so a
+// label resolves through the App at projection — composed once, the line
+// keeps the language it was built in, and useLanguage reprojects so no
+// stale frame outlives the card (a switch closes open menus; the card closes
+// on any key regardless).
 func (h *Host) projectLeader() {
 	type entry struct {
 		order int
@@ -171,7 +185,7 @@ func (h *Host) projectLeader() {
 		if off.State == OfferHidden {
 			continue
 		}
-		text := fmt.Sprintf("%c  %s", cmd.Leader.Key, cmd.Leader.text(h))
+		text := fmt.Sprintf("%c  %s", cmd.Leader.Key, h.tr(cmd.Leader.leaderID(cmd.ID), cmd.Leader.text(h)))
 		if off.State == OfferDisabled {
 			text += "  — " + off.Reason
 		}
@@ -191,19 +205,32 @@ func (h *Host) projectLeader() {
 	h.set("App.leaderText", strings.Join(lines, "\n"))
 }
 
+// tr is text resolved through the App's language when id names it in the
+// catalogs, else the source text as it stands: a composed line's one
+// translation point (ADR-0219 D5c). Translate returns the id itself when no
+// catalog holds it — the source label is the better answer there, and the
+// inventory check (D7) keeps that from shipping unnoticed.
+func (h *Host) tr(id, text string) string {
+	if res := h.p.App().Translate(tui.Msg(id)); res != id {
+		return res
+	}
+	return text
+}
+
 // helpText is the help screen's command list: the leader's commands, from the
 // same projection the leader runs, so the documented keys cannot drift from
 // the real ones.
 func (h *Host) helpText() string {
 	var b strings.Builder
-	b.WriteString("SPC — the leader menu:\n\n")
+	b.WriteString(h.tr("autodb.help.leader", "SPC — the leader menu:") + "\n\n")
 	for _, r := range h.catalog.helpProjection(h) {
-		fmt.Fprintf(&b, "  %c  %s\n", r.Key, r.Label)
+		fmt.Fprintf(&b, "  %c  %s\n", r.Key, h.tr("autodb.leader."+string(r.ID), r.Label))
 		if r.Help != "" {
 			fmt.Fprintf(&b, "       %s\n", r.Help)
 		}
 	}
-	b.WriteString("\nPane search: / finds in the focused query or results view; n/N move to the next/previous matching row.\n")
+	b.WriteString("\n" + h.tr("autodb.help.search",
+		"Pane search: / finds in the focused query or results view; n/N move to the next/previous matching row.") + "\n")
 	return b.String()
 }
 
