@@ -9,11 +9,20 @@ permissions:
 
 jobs:
   build:
-    # The shipped binaries carry --gui (golib/gui's native window), which
-    # needs cgo and each platform's window libraries — so Linux installs the
-    # Wayland/X11 headers and macOS builds on a mac runner. A cgo-less build
-    # still exists (`make build`): the gui flag then refuses with the reason
-    # instead of the binary failing to build.
+    # Linux builds STATIC, the TUI alone: CGO_ENABLED=0, no `gui` tag. That is
+    # the binary a server, a VM, a container or a Homebrew install on a
+    # headless host runs, and it must start with nothing but the kernel. A
+    # Linux "-gui" build adds --gui (golib/gui's native window): cgo, against
+    # the window system's libraries, which it then NEEDS to run, so it is a
+    # separate download, built natively on each architecture's runner. macOS
+    # builds with cgo on a Mac and its one build carries the GUI; it needs only
+    # macOS itself to run.
+    #
+    # v0.4.6 and v0.4.7 built every Linux binary with -tags gui, so the plain
+    # linux-amd64 download linked libEGL, libwayland-client and libX11 and
+    # would not start on a host without them ("error while loading shared
+    # libraries: libEGL.so.1") -- caught by the Homebrew tap's ubuntu test.
+    # The static check below keeps that from shipping again.
     #
     # Runner labels: macos-13 was retired 2025-12-04 and macos-14 follows
     # 2026-11-02, so Intel builds on macos-15-intel (the x86_64 label
@@ -22,10 +31,12 @@ jobs:
     strategy:
       matrix:
         include:
-          - { goos: linux,  goarch: amd64, runner: ubuntu-latest }
-          - { goos: linux,  goarch: arm64, runner: ubuntu-24.04-arm }
-          - { goos: darwin, goarch: amd64, runner: macos-15-intel }
-          - { goos: darwin, goarch: arm64, runner: macos-15 }
+          - { goos: linux,  goarch: amd64, runner: ubuntu-latest,    cgo: "0", tags: "",    suffix: "" }
+          - { goos: linux,  goarch: arm64, runner: ubuntu-latest,    cgo: "0", tags: "",    suffix: "" }
+          - { goos: linux,  goarch: amd64, runner: ubuntu-latest,    cgo: "1", tags: "gui", suffix: "-gui" }
+          - { goos: linux,  goarch: arm64, runner: ubuntu-24.04-arm, cgo: "1", tags: "gui", suffix: "-gui" }
+          - { goos: darwin, goarch: amd64, runner: macos-15-intel,   cgo: "1", tags: "gui", suffix: "" }
+          - { goos: darwin, goarch: arm64, runner: macos-15,         cgo: "1", tags: "gui", suffix: "" }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,35 +44,47 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
+      - name: the window system's libraries (Linux GUI build)
+        if: matrix.goos == 'linux' && matrix.tags == 'gui'
+        # golib/gui's window libraries (Wayland/X11/Vulkan), per
+        # golib/gui/README. libvulkan-dev carries the headers; there is no
+        # vulkan-headers package on bookworm/trixie.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev \
+            libvulkan-dev
       - name: build
         env:
-          CGO_ENABLED: "1"
+          CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          if [ "$GOOS" = "linux" ]; then
-            # golib/gui's window libraries (Wayland/X11/Vulkan), per
-            # golib/gui/README. libvulkan-dev carries the headers; there is
-            # no vulkan-headers package on bookworm/trixie.
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends \
-              libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev \
-              libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev \
-              libvulkan-dev
-          fi
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
           COMMIT="$(git rev-parse --short HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          OUT="autodb-${VERSION}-${GOOS}-${GOARCH}"
+          OUT="autodb-${VERSION}-${GOOS}-${GOARCH}${{ matrix.suffix }}"
           # -s -w: no symbol table or DWARF (about a third of the binary);
           # stack traces keep their function names. -trimpath keeps the
-          # runner's paths out of the artefact. -tags gui: the native window.
-          go build -tags gui -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" -o "${OUT}" ./cmd/autodb
+          # runner's paths out of the artefact. -tags gui only where the
+          # matrix asks for the native window.
+          go build -tags "${{ matrix.tags }}" -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" -o "${OUT}" ./cmd/autodb
+          # A plain Linux binary must be STATIC: it is the one a headless host
+          # downloads. Asserted rather than assumed.
+          if [ "${GOOS}" = "linux" ] && [ -z "${{ matrix.suffix }}" ]; then
+            file "${OUT}"
+            file "${OUT}" | grep -q "statically linked" || {
+              echo "::error::${OUT} is not statically linked; the plain Linux download must start without the window libraries"
+              exit 1
+            }
+          fi
           tar czf "${OUT}.tar.gz" "${OUT}"
-          sha256sum "${OUT}.tar.gz" > "${OUT}.tar.gz.sha256"
+          shasum -a 256 "${OUT}.tar.gz" > "${OUT}.tar.gz.sha256" # on Ubuntu and macOS alike
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
           path: |
             *.tar.gz
             *.tar.gz.sha256
