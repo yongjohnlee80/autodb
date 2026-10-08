@@ -76,14 +76,18 @@ I built it for myself first. I hope it helps someone in my shoes.
 
 ## Installation
 
-autodb is a single static binary with no runtime dependencies.
+autodb is a single static binary with no runtime dependencies. On Linux the
+native window (`--gui`) is a separate `linux-<arch>-gui` download, because it
+links the window system's libraries (Wayland/X11/EGL) and needs them to run;
+the plain download is the static terminal build that runs anywhere. The macOS
+build carries the window itself.
 
 | Platform | Install |
 |---|---|
 | macOS, Linux | [Homebrew](https://brew.sh): `brew install yongjohnlee80/tap/autodb` |
 | Linux, macOS | [mise](https://mise.jdx.dev): `mise use -g github:yongjohnlee80/autodb` |
 | Linux, macOS | The install script, below |
-| Linux, macOS | A [release archive](https://github.com/yongjohnlee80/autodb/releases/latest) (`amd64` and `arm64`, with SHA-256 checksums) |
+| Linux, macOS | A [release archive](https://github.com/yongjohnlee80/autodb/releases/latest) (`amd64` and `arm64`, with SHA-256 checksums; on Linux, the `-gui` archive adds `--gui`) |
 | Windows | Use [WSL2](https://learn.microsoft.com/windows/wsl/install) and any Linux method. A native Windows build is not published yet. |
 | Any, with Go 1.25+ | Build from source, below |
 
