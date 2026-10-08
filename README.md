@@ -76,11 +76,11 @@ I built it for myself first. I hope it helps someone in my shoes.
 
 ## Installation
 
-autodb is a single static binary with no runtime dependencies. On Linux the
-native window (`--gui`) is a separate `linux-<arch>-gui` download, because it
-links the window system's libraries (Wayland/X11/EGL) and needs them to run;
-the plain download is the static terminal build that runs anywhere. The macOS
-build carries the window itself.
+autodb is a single binary. On Linux the plain download is static, with no
+runtime dependencies, and runs anywhere. The native window (`--gui`) is a
+separate `linux-<arch>-gui` download, because it links the window system's
+libraries (Wayland/X11/EGL) and needs them to run. The macOS build carries the
+window itself and needs only macOS.
 
 | Platform | Install |
 |---|---|

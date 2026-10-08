@@ -19,10 +19,11 @@ build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/autodb ./cmd/autodb
 
 # build-gui builds the windowed binary (golib/gui needs cgo and, on Linux,
-# the Wayland/X11 headers — see golib/gui/README). The released binaries are
-# built this way, so a brew install's --gui opens a native window; the dev
-# `build` above stays cgo-less so a checkout with no window headers still
-# builds the whole program.
+# the Wayland/X11 headers — see golib/gui/README). The macOS release and the
+# Linux `-gui` downloads are built this way; the plain Linux release is
+# `build`'s shape, static, so it starts on a host with no window libraries.
+# The dev `build` above stays cgo-less so a checkout with no window headers
+# still builds the whole program.
 build-gui:
 	CGO_ENABLED=1 go build -tags gui -trimpath -ldflags "$(LDFLAGS)" -o bin/autodb ./cmd/autodb
 
