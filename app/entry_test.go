@@ -20,9 +20,10 @@ package app
 import (
 	"bytes"
 	"context"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ import (
 func serveConfigAt(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "config.toml")
-	body := "[server]\nsocket = " + filepath.Join(dir, "autodb.sock") + "\n"
+	body := "[server]\nsocket = \"" + filepath.Join(dir, "autodb.sock") + "\"\n"
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -135,31 +136,129 @@ func TestServe_ACancelledContextEndsIt(t *testing.T) {
 	}
 }
 
-// And --web-ui, the other long-running mode: the same cancelled context must
-// end it before it can bind its port, or an embedding host could not stop it
-// either.
-func TestWebUI_ACancelledContextEndsIt(t *testing.T) {
-	dir := t.TempDir()
+// serveStarted runs --serve on a config of its own until its socket answers a
+// dial, and returns how to stop it: cancel ends the daemon through the
+// caller's context, and done receives when run has returned.
+func serveStarted(t *testing.T, ctx context.Context, dir, version string) (sock string, cancel context.CancelFunc, done <-chan struct{}) {
+	t.Helper()
 	cfg := serveConfigAt(t, dir)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	sock = filepath.Join(dir, "autodb.sock")
 
-	done := make(chan struct{})
-	var code int
-	var errOut bytes.Buffer
+	ctx, cancel = context.WithCancel(ctx)
+	doneCh := make(chan struct{}, 1)
+	var serveErr bytes.Buffer
 	go func() {
-		defer close(done)
+		defer close(doneCh)
 		var out bytes.Buffer
-		code = run(ctx, []string{"--web-ui", "--config", cfg}, Options{}, &out, &errOut)
+		_ = run(ctx, []string{"--serve", "--config", cfg}, Options{Version: version}, &out, &serveErr)
 	}()
+	done = doneCh
+
+	// THE DAEMON, NOT THE SOCKET FILE: the file exists from the bind, so the
+	// cell waits for a dial to be answered — proof it is serving.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		c, derr := net.DialTimeout("unix", sock, 500*time.Millisecond)
+		if derr == nil {
+			_ = c.Close()
+			return sock, cancel, done
+		}
+		select {
+		case <-done:
+			t.Fatalf("--serve exited before it served (dir %s):\n%s", dir, serveErr.String())
+		case <-time.After(100 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("the daemon never answered on %s:\n%s", sock, serveErr.String())
+		}
+	}
+}
+
+// A serve that has STARTED must still obey the context. The pre-cancelled
+// cell above proves a cancelled context is refused before it serves; this one
+// proves the same context ENDS a daemon that is up and answering — the case a
+// host embedding autodb actually hits, and the one a background-derived signal
+// context used to make impossible.
+func TestServe_ACancelledContextEndsARunningDaemon(t *testing.T) {
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data) // the store the fresh daemon opens
+
+	dir := t.TempDir()
+	sock, cancel, done := serveStarted(t, context.Background(), dir, "ctx-live")
+	defer cancel()
+
+	cancel()
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
-		t.Fatal("--web-ui did not end on a cancelled context")
+	case <-time.After(30 * time.Second):
+		t.Fatal("a running --serve did not end when its context was cancelled")
 	}
-	// 0 would mean a server that served and stopped cleanly, which a
-	// cancelled-before-it-started context never is.
-	if code == 0 && !strings.Contains(errOut.String(), "cancel") {
-		t.Errorf("a cancelled --web-ui exited 0; stderr:\n%s", errOut.String())
+	// The socket the daemon owned is gone: cleanup ran, so a successor can
+	// bind, and nothing answers at the address the host told it to leave.
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Errorf("the ended daemon left its socket behind (stat: %v)", err)
 	}
+}
+
+// And --web-ui STARTED: a gateway that is already serving a browser ends on
+// the caller's context too. The daemon it fronts is the cell's own, started
+// the same way, and stopped with it.
+func TestWebUI_ACancelledContextEndsARunningGateway(t *testing.T) {
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+
+	// A free loopback port for the gateway, picked before anything binds it.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(probe.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = probe.Close()
+
+	dir := t.TempDir()
+	cfg := serveConfigAt(t, dir)
+	_, stopServe, serveDone := serveStarted(t, context.Background(), dir, "ctx-live")
+	defer stopServe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	gwDone := make(chan struct{}, 1)
+	go func() {
+		defer close(gwDone)
+		var out, errOut bytes.Buffer
+		_ = run(ctx, []string{"--web-ui", "--config", cfg, "--port", port}, Options{}, &out, &errOut)
+	}()
+
+	// The gateway is UP when it answers the browser's own request.
+	url := "http://127.0.0.1:" + port + "/"
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		resp, gerr := http.Get(url)
+		if gerr == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		select {
+		case <-gwDone:
+			t.Fatal("--web-ui exited before it served")
+		case <-time.After(100 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			stopServe()
+			t.Fatalf("the gateway never answered on %s", url)
+		}
+	}
+
+	cancel()
+	select {
+	case <-gwDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("a running --web-ui did not end when its context was cancelled")
+	}
+	stopServe()
+	<-serveDone
 }
