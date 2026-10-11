@@ -63,6 +63,9 @@ const defaultAdminName = "root"
 const minPassphraseLen = 8
 
 type initOpts struct {
+	// version is the build's, recorded in the lease Main's caller hands it
+	// (build.version). Empty only in cells that never reach the lease.
+	version string
 	// prompt reads a line, echoing it. Injected so cells drive the ceremony
 	// without a terminal.
 	prompt func(label, def string) (string, error)
@@ -111,7 +114,7 @@ func runInit(ctx context.Context, out io.Writer, configPath string, o initOpts) 
 	// The lease is the whole reason this is safe to run on a live host: if a
 	// daemon is serving this store, we are told to stop it rather than
 	// becoming a second writer against the same rows.
-	lease, err := meta.AcquireLease(ctx, store, cfg.Meta, meta.LeaseHolder{Role: "init", Version: version})
+	lease, err := meta.AcquireLease(ctx, store, cfg.Meta, meta.LeaseHolder{Role: "init", Version: o.version})
 	if err != nil {
 		if errors.Is(err, meta.ErrLeaseHeld) {
 			return fmt.Errorf("refusing to initialise: %w\n"+

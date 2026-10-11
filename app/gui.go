@@ -9,15 +9,17 @@
 package app
 
 import (
+	"context"
+
 	guilib "github.com/yongjohnlee80/golib/gui"
 )
 
 // guiDispatch is --gui's arm of the dispatch switch. gui.Main keeps the
 // platform's main thread (macOS's AppKit among them) and runs the program
 // inside it — golib/gui's one contract.
-func guiDispatch(configPath, remoteProfile string) error {
+func guiDispatch(ctx context.Context, configPath, remoteProfile string, b build) error {
 	guilib.Main(func() error {
-		return runGUI(configPath, remoteProfile)
+		return runGUI(ctx, configPath, remoteProfile, b)
 	})
 	return nil
 }
@@ -28,7 +30,7 @@ func guiDispatch(configPath, remoteProfile string) error {
 // cell drawn natively; the program itself is unchanged.
 //
 // Called INSIDE gui.Main, which owns the platform's main thread.
-func runGUI(configPath, remoteProfile string) error {
+func runGUI(ctx context.Context, configPath, remoteProfile string, b build) error {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
@@ -51,5 +53,5 @@ func runGUI(configPath, remoteProfile string) error {
 		guilib.WithTitle("autodb"),
 		guilib.WithSize(1020, 640),
 	)
-	return runUIOn(backend, ep.Network, cfg, start, configPath, addr, notesRoot)
+	return runUIOn(ctx, backend, ep.Network, cfg, start, configPath, addr, notesRoot, b)
 }

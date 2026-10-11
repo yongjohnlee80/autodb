@@ -104,7 +104,7 @@ func TestStartFrontDoor_ListensAndHasTheEngineBehindIt(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	l, _, err := startFrontDoor(ctx, cfg, eng, logger.Nop{}, nil)
+	l, _, err := startFrontDoor(ctx, cfg, eng, logger.Nop{}, nil, newBuild(Options{}))
 	if err != nil {
 		t.Fatalf("startFrontDoor: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestStartFrontDoor_DisabledStartsNothing(t *testing.T) {
 	t.Parallel()
 	var cfg config.Config
 	cfg.FrontDoor = config.FrontDoor{Enabled: false, Bind: "127.0.0.1:0"}
-	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{}, nil)
+	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{}, nil, newBuild(Options{}))
 	if err != nil {
 		t.Fatalf("a disabled front door returned an error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestStartFrontDoor_UnusableMaterialFailsTheStart(t *testing.T) {
 	t.Parallel()
 	// Expired: valid PEM, valid key pair, and not something that may serve.
 	cfg := frontDoorConfig(t, time.Now().Add(-time.Hour))
-	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{}, nil)
+	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{}, nil, newBuild(Options{}))
 	if err == nil {
 		if l != nil {
 			l.Close()

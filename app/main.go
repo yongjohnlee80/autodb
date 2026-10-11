@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/pressure"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -44,21 +45,39 @@ type Options struct {
 	// Version, Commit and BuildDate are the build's, stamped in its main
 	// package (-ldflags "-X main.version=…"): --version prints them, the
 	// daemon reports them, the lease records them, and the TUI's About modal
-	// shows them.
+	// shows them. A missing one keeps the unstamped build's ("dev", "none",
+	// "unknown"), so the zero Options is the community build exactly as a
+	// plain `go build` built it.
 	Version   string
 	Commit    string
 	BuildDate string
 }
 
-// version, commit and buildDate are Options, read where a mode needs its build's
-// identity. Main writes them once, at entry; nothing else does. Unstamped, as a
-// plain `go build` builds it, they are the zero build ("dev", "none",
-// "unknown") — exactly the values the ldflags globals held before the move.
-var (
-	version   = "dev"
-	commit    = "none"
-	buildDate = "unknown"
-)
+// build is one build's identity, frozen once at entry and threaded through
+// the modes. It is a value, not package state: two callers may run two
+// builds side by side in one process, and a server keeps the identity it
+// started with however many calls follow.
+type build struct {
+	version   string
+	commit    string
+	buildDate string
+}
+
+// newBuild normalizes Options: an unstamped field keeps the unstamped
+// build's, the same strings the ldflags globals held before the move.
+func newBuild(o Options) build {
+	b := build{version: o.Version, commit: o.Commit, buildDate: o.BuildDate}
+	if b.version == "" {
+		b.version = "dev"
+	}
+	if b.commit == "" {
+		b.commit = "none"
+	}
+	if b.buildDate == "" {
+		b.buildDate = "unknown"
+	}
+	return b
+}
 
 // repoURL and author are shown in the TUI's About modal.
 const (
@@ -96,9 +115,18 @@ const (
 // newly built binary BEFORE `systemctl stop`, so a healthy front door is never
 // taken down for a configuration that was already knowably refused.
 func Main(ctx context.Context, args []string, o Options) int {
-	version, commit, buildDate = o.Version, o.Commit, o.BuildDate
+	return run(ctx, args, o, os.Stdout, os.Stderr)
+}
+
+// run is Main with its writers as parameters, so the entry's own contract —
+// what --version prints, what a usage error says — is tested without the
+// process's streams. The modes print their own operational banners to the
+// process's streams, as they always did.
+func run(ctx context.Context, args []string, o Options, stdout, stderr io.Writer) int {
+	b := newBuild(o)
 
 	fs := flag.NewFlagSet("autodb", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	showVersion := fs.Bool("version", false, "print version and exit")
 	serve := fs.Bool("serve", false, "run the RPC server")
 	ui := fs.Bool("ui", false, "run the standalone TUI")
@@ -167,13 +195,13 @@ func Main(ctx context.Context, args []string, o Options) int {
 
 	if err := checkFlags(fs, *serve, *ui, *gui, *webUI, *printEndpoint, *migrateToPG, *createCert, *initRun,
 		*checkConfig, *applyScripts, *revertScript != "", *port); err != nil {
-		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+		fmt.Fprintf(stderr, "autodb: %v\n", err)
 		fs.Usage()
 		return 2
 	}
 
 	if *showVersion {
-		fmt.Printf("autodb %s (%s, built %s)\n", version, commit, buildDate)
+		fmt.Fprintf(stdout, "autodb %s (%s, built %s)\n", b.version, b.commit, b.buildDate)
 		return 0
 	}
 
@@ -182,8 +210,8 @@ func Main(ctx context.Context, args []string, o Options) int {
 		// First in the switch deliberately. It is the one mode whose whole
 		// contract is "decide and change nothing", so it must never be
 		// silently shadowed by a mode that acts.
-		if err := runCheckConfig(os.Stdout, *configPath); err != nil {
-			return reportCode(err)
+		if err := runCheckConfig(stdout, *configPath); err != nil {
+			return reportCode(err, stderr)
 		}
 		return 0
 	case *applyScripts || *revertScript != "":
@@ -191,54 +219,54 @@ func Main(ctx context.Context, args []string, o Options) int {
 		if *revertScript != "" {
 			var err error
 			if n, err = parseScriptNumber(*revertScript); err != nil {
-				fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+				fmt.Fprintf(stderr, "autodb: %v\n", err)
 				return 2
 			}
 		}
-		if err := runSchema(ctx, os.Stdout, *configPath, schemaOpts{
-			dryRun: *migrateDry, revert: n,
+		if err := runSchema(ctx, stdout, *configPath, schemaOpts{
+			dryRun: *migrateDry, revert: n, version: b.version,
 		}); err != nil {
-			return reportCode(err)
+			return reportCode(err, stderr)
 		}
 		return 0
 	case *initRun:
-		if err := runInit(ctx, os.Stdout, *configPath, initOpts{}); err != nil {
-			return reportCode(err)
+		if err := runInit(ctx, stdout, *configPath, initOpts{version: b.version}); err != nil {
+			return reportCode(err, stderr)
 		}
 		return 0
 	case *createCert:
-		if err := runCreateCert(os.Stdout, *configPath, createCertOpts{
+		if err := runCreateCert(stdout, *configPath, createCertOpts{
 			dir: *certDir, hosts: certHosts, leafOnly: *certLeafOnly,
 			force: *certForce, exportCA: *certExportCA,
 		}); err != nil {
-			return reportCode(err)
+			return reportCode(err, stderr)
 		}
 	case *migrateToPG:
-		if err := runMigrateToPostgres(ctx, os.Stdout, migrateOpts{
+		if err := runMigrateToPostgres(ctx, stdout, migrateOpts{
 			from: *migrateFrom, to: *migrateTo, dryRun: *migrateDry,
-			allowInsecure: *migrateInsecure,
+			allowInsecure: *migrateInsecure, version: b.version,
 		}); err != nil {
-			return reportCode(err)
+			return reportCode(err, stderr)
 		}
 	case *printEndpoint:
 		if err := runPrintEndpoint(*configPath); err != nil {
-			return reportCode(err)
+			return reportCode(err, stderr)
 		}
 	case *serve:
-		if err := runServe(*configPath); err != nil {
-			return reportCode(err)
+		if err := runServe(ctx, *configPath, b); err != nil {
+			return reportCode(err, stderr)
 		}
 	case *ui:
-		if err := runUI(*configPath, *remoteProfile); err != nil {
-			return reportCode(err)
+		if err := runUI(ctx, *configPath, *remoteProfile, b); err != nil {
+			return reportCode(err, stderr)
 		}
 	case *gui:
-		if err := guiDispatch(*configPath, *remoteProfile); err != nil {
-			return reportCode(err)
+		if err := guiDispatch(ctx, *configPath, *remoteProfile, b); err != nil {
+			return reportCode(err, stderr)
 		}
 	case *webUI:
-		if err := runWebUI(*configPath, *port); err != nil {
-			return reportCode(err)
+		if err := runWebUI(ctx, *configPath, *port, b); err != nil {
+			return reportCode(err, stderr)
 		}
 	default:
 		fs.Usage()
@@ -285,8 +313,8 @@ const exitAlreadyServing = 69
 // that grows this condition cannot miss it.
 var errAlreadyServing = errors.New("another autodb is already serving")
 
-// reportCode prints err and returns the status that says what KIND of
-// failure it was. Main turns it into the process's exit code; a caller that
+// reportCode prints err to stderr and returns the status that says what KIND
+// of failure it was. Main turns it into the process's exit code; a caller that
 // embeds autodb can branch on it instead.
 //
 // The framing comes from the error's type. errors.Is(err, config.ErrInvalid)
@@ -294,9 +322,9 @@ var errAlreadyServing = errors.New("another autodb is already serving")
 // choice rather than new machinery — and it is in ONE place because the last
 // time a fix like this was applied per-command it was applied to one command
 // and the defect survived in the others.
-func reportCode(err error) int {
+func reportCode(err error, stderr io.Writer) int {
 	if errors.Is(err, config.ErrInvalid) {
-		fmt.Fprintf(os.Stderr, "autodb: the configuration is invalid — this is not a "+
+		fmt.Fprintf(stderr, "autodb: the configuration is invalid — this is not a "+
 			"failure of the command you ran:\n  %v\n", err)
 		return exitConfig
 	}
@@ -305,10 +333,10 @@ func reportCode(err error) int {
 	// already exited non-zero while the endpoint collision exited 0 — although
 	// an operator's next move is the same for both: find the other autodb.
 	if errors.Is(err, errAlreadyServing) || errors.Is(err, meta.ErrLeaseHeld) {
-		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+		fmt.Fprintf(stderr, "autodb: %v\n", err)
 		return exitAlreadyServing
 	}
-	fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+	fmt.Fprintf(stderr, "autodb: %v\n", err)
 	return 1
 }
 
@@ -458,10 +486,16 @@ func checkFlags(fs *flag.FlagSet, serve, ui, guiLaunch, webUI, printEndpoint, mi
 //	                                                 |
 //	[Serve RPC]   <- [Start Front Door]    <- [Start Janitor & Roller]
 //	      |
-//	[Wait for SIGINT / SIGTERM / Lost Lease / Front Door Failure]
+//
+// [Wait for SIGINT / SIGTERM / Lost Lease / Front Door Failure]
+//
 //	      |
 //	[Graceful Shutdown & Remove Inode-Pinned Socket]
-func runServe(configPath string) error {
+//
+// The context is the caller's: Main's ctx, with SIGINT/SIGTERM layered on
+// top, so a host that embeds autodb stops the daemon by cancelling it, and
+// the CLI (whose ctx is Background) behaves exactly as before.
+func runServe(ctx context.Context, configPath string, b build) error {
 	// config.Load owns path resolution: an empty path resolves to the
 	// default location, a missing file means defaults, and everything else
 	// (unreadable file, bad TOML, unknown keys) fails loudly — no silent
@@ -521,7 +555,7 @@ func runServe(configPath string) error {
 	// moment it runs, after the re-bind watcher has stopped (socket.go).
 	defer sock.Cleanup()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	store, err := meta.Open(ctx, cfg.Meta)
@@ -536,7 +570,7 @@ func runServe(configPath string) error {
 	// nothing about the store, so two endpoints could share one meta store
 	// and each keep its own in-memory session registry and transaction
 	// reservation, both believing they enforced a limit neither held.
-	lease, err := meta.AcquireLease(ctx, store, cfg.Meta, meta.LeaseHolder{Role: "serve", Version: version})
+	lease, err := meta.AcquireLease(ctx, store, cfg.Meta, meta.LeaseHolder{Role: "serve", Version: b.version})
 	if err != nil {
 		if errors.Is(err, meta.ErrLeaseHeld) {
 			// Release OUR bind before looking for the holder: a newcomer that
@@ -636,7 +670,7 @@ func runServe(configPath string) error {
 				"action": action, "error": err.Error()})
 		}
 	}
-	fd, fdServe, ferr := startFrontDoor(serveCtx, cfg, eng, oplog, fdAudit)
+	fd, fdServe, ferr := startFrontDoor(serveCtx, cfg, eng, oplog, fdAudit, b)
 	if ferr != nil {
 		_ = sock.Close()
 		return ferr
@@ -705,7 +739,7 @@ func runServe(configPath string) error {
 	// operators' way in, and a remote listener that cannot bind is tried again
 	// and said loudly instead.
 	ctl := remotectl.New(remotectl.Config{Cfg: cfg, Store: store, Auth: svc, Limiter: lim, Fan: fan,
-		Version: version, Logf: remoteLog})
+		Version: b.version, Logf: remoteLog})
 	if rerr := ctl.Start(serveCtx); rerr != nil {
 		remoteLog("REMOTE CONTROL DID NOT START: " + rerr.Error())
 	}
@@ -737,12 +771,12 @@ func runServe(configPath string) error {
 	// before sending anything. Empty for a store with no file identity.
 	storeID, storePath, _ := meta.StoreID(cfg.Meta)
 	rpcOpts = append(rpcOpts, rpc.WithStoreIdentity(storeID, storePath))
-	srv := rpc.New(svc, eng, cfg.Server, version, rpcOpts...)
+	srv := rpc.New(svc, eng, cfg.Server, b.version, rpcOpts...)
 	// The lease record now says where this daemon answers, for a frontend
 	// that resolved a different socket over the same store. Best effort:
 	// without it this daemon is only unfindable through the record.
 	_ = lease.Announce(ep.Network, ep.Address, srv.Instance(), rpc.Protocol)
-	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
+	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", b.version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the
 	// shutdown is indistinguishable from a clean SIGTERM, and the one
@@ -789,7 +823,7 @@ func runServe(configPath string) error {
 //	       |
 //	(On Unexpected Error -> stopServing() -> Teardown Daemon)
 func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine,
-	oplog logger.Logger, audit auditSink) (*frontdoor.Listener, <-chan error, error) {
+	oplog logger.Logger, audit auditSink, b build) (*frontdoor.Listener, <-chan error, error) {
 
 	if !frontdoor.EnabledFrom(cfg.FrontDoor) {
 		return nil, nil, nil
@@ -804,7 +838,7 @@ func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- l.Serve(ctx) }()
-	fmt.Printf("autodb %s serving the PostgreSQL wire protocol on %s\n", version, cfg.FrontDoor.Bind)
+	fmt.Printf("autodb %s serving the PostgreSQL wire protocol on %s\n", b.version, cfg.FrontDoor.Bind)
 	return l, errc, nil
 }
 
@@ -1206,7 +1240,7 @@ func locatorFor(cfg config.Config, ep config.Endpoint) func(context.Context) (rp
 	return func(ctx context.Context) (rpc.Located, error) { return rpc.Locate(ctx, ep, cfg.Meta) }
 }
 
-func runUI(configPath, remoteProfile string) error {
+func runUI(ctx context.Context, configPath, remoteProfile string, b build) error {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
@@ -1229,14 +1263,14 @@ func runUI(configPath, remoteProfile string) error {
 	if err != nil {
 		return fmt.Errorf("terminal: %w", err)
 	}
-	return runUIOn(backend, ep.Network, cfg, start, configPath, addr, notesRoot)
+	return runUIOn(ctx, backend, ep.Network, cfg, start, configPath, addr, notesRoot, b)
 }
 
 // runUIOn runs the standalone UI on the backend it is handed: a terminal's
 // (--ui) or a native window's (--gui). Everything else is the one program —
 // the session, the host, the catalog — exactly as golib's Backend seam
 // promises (golib/gui).
-func runUIOn(backend tuicore.Backend, network string, cfg config.Config, start tuiapp.Start, configPath, addr, notesRoot string) error {
+func runUIOn(ctx context.Context, backend tuicore.Backend, network string, cfg config.Config, start tuiapp.Start, configPath, addr, notesRoot string, b build) error {
 	// The terminal no longer builds a store at startup. It CANNOT: the personal
 	// root is `<base>/u-<subject>`, and the subject is the daemon's canonical
 	// identity, which does not exist until afterLogin. Constructing here is what
@@ -1274,12 +1308,12 @@ func runUIOn(backend tuicore.Backend, network string, cfg config.Config, start t
 	}
 	activeConfig := configPathFor(configPath)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	host, err := tuiapp.New(session, notesFor, cancel, tuiapp.Options{
 		Start: start,
 		About: tuiapp.AboutInfo{
-			Version: version, Commit: commit, BuildDate: buildDate,
+			Version: b.version, Commit: b.commit, BuildDate: b.buildDate,
 			Repo: repoURL, Author: author,
 			NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine.String(), MetaPath: metaPath,
 			ConfigPath: activeConfig,
@@ -1341,7 +1375,7 @@ func uiStart(cfg config.Config, remoteProfile, profilesPath string) (tuiapp.Star
 // runWebUI serves the TUI to a browser. It reaches the daemon ONLY
 // through the same RPC client seam --ui uses, and unlike --ui it never starts one:
 // a missing daemon is a startup failure here, not something to fix by spawning.
-func runWebUI(configPath string, port int) error {
+func runWebUI(ctx context.Context, configPath string, port int, b build) error {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
@@ -1354,7 +1388,7 @@ func runWebUI(configPath string, port int) error {
 	// FAIL FAST, before binding a port or building anything: an operator who
 	// forgot `autodb --serve` should learn it now and not from a browser tab that
 	// loads and then does nothing.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	daemonVersion, err := webserver.Preflight(ctx, ep.Network, ep.Address)
 	if err != nil {
@@ -1381,7 +1415,7 @@ func runWebUI(configPath string, port int) error {
 		// which exist only to be looked up here.
 		Log: logger.New(logger.WithWriter(os.Stderr), logger.WithContext("autodb")),
 		About: tuiapp.AboutInfo{
-			Version: version, Commit: commit, BuildDate: buildDate,
+			Version: b.version, Commit: b.commit, BuildDate: b.buildDate,
 			Repo: repoURL, Author: author,
 			NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine.String(),
 			MetaPath:   metaPathFor(cfg),
