@@ -1,7 +1,8 @@
 // Command autodb is the community build of the autodb binary: app.Main with
-// no registrations (the base-product pattern, conventions/base-products.md).
-// The modes and their flags are app's; this file owns only what the build
-// stamps: version, commit and build date, passed in as app.Options.
+// no registrations — the program is the app package's, and this file owns
+// only what the build stamps: version, commit and build date, passed in as
+// app.Options. An enterprise build does the same with its own stamps and its
+// own registrations, without copying the program.
 package main
 
 import (

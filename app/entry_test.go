@@ -3,13 +3,12 @@ package app
 // THE PUBLIC ENTRY'S OWN CONTRACT, tested through run with private writers,
 // separately from the CLI's binary (exitcode_test.go drives that).
 //
-// Three properties ADR 0100 §1.1 promises a consumer, and none of them can
-// be seen by testing package main — they only exist once Main is a library
-// entry:
+// Three properties a consumer of the public entry relies on, and none of them
+// can be seen by testing package main — they only exist once Main is a
+// library entry:
 //
 //   - the zero Options is the community build: an unstamped call prints the
-//     unstamped build's identity, not blanks (conventions/base-products.md,
-//     the zero value is the community build, byte-for-byte);
+//     unstamped build's identity, not blanks;
 //   - a build's identity is ITS OWN: two callers may run two builds side by
 //     side in one process, so identity is a value threaded from Options, never
 //     package state that a later call rewrites under a running server;
