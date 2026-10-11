@@ -182,18 +182,18 @@ func expectedControls() map[string][3]string {
 		"card-an-unusable-token-gets-no-advice":          {"tui/conncard.go", "./tui/", "TestCardBudget_AnUnusableTokenGetsNoBudgetBlock"},
 		"card-the-connections-own-bound-leads":           {"tui/conncard.go", "./tui/", "TestCardBudget_TheConnectionsOwnBoundLeads"},
 		"pressure-the-view-is-admin-only":                {"rpc/methods.go", "./rpc/", "TestPressure_TheViewIsAdminOnly"},
-		"pressure-the-tunnel-recipe-matches-the-build":   {"cmd/autodb/main.go", "./cmd/autodb/", "TestPressureDoc_TheTunnelRecipeMatchesTheBuild"},
+		"pressure-the-tunnel-recipe-matches-the-build":   {"app/main.go", "./app/", "TestPressureDoc_TheTunnelRecipeMatchesTheBuild"},
 
 		// Review round: the five production contracts the 84-control sweep did
 		// not exercise. Four of them are the same shape -- a cell asserting an
 		// output cannot see whether the mechanism inside it did any work.
-		"pressure-the-daemon-is-given-something-to-observe":  {"cmd/autodb/main.go", "./cmd/autodb/", "TestFrontDoorWiring_TheListenerIsGivenSomethingToObserve"},
+		"pressure-the-daemon-is-given-something-to-observe":  {"app/main.go", "./app/", "TestFrontDoorWiring_TheListenerIsGivenSomethingToObserve"},
 		"pressure-credential-refusals-reach-the-view":        {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_CredentialRefusalsRenderWithoutRaisingTheCapacityRate"},
 		"pressure-the-snapshot-holds-its-lock":               {"frontdoor/pressure_loop.go", "./frontdoor/", "TestPressureSnapshot_AReaderAndTheTickOverlap"},
 		"pressure-the-protocol-bump-is-not-optional":         {"rpc/server.go", "./rpc/", "TestProtocol_TheVerbSurfaceIsPinned"},
 		"pressure-a-new-verb-cannot-be-silent":               {"rpc/methods.go", "./rpc/", "TestProtocol_TheVerbSurfaceIsPinned"},
-		"pressure-the-surface-stays-off-routable-interfaces": {"webserver/gateway.go", "./cmd/autodb/", "TestPressureTunnel_TheSurfaceIsUnreachableOffLoopback"},
-		"pressure-the-forward-reaches-the-real-address":      {"webserver/gateway.go", "./cmd/autodb/", "TestPressureTunnel_TheDocumentedForwardReachesTheSurface"},
+		"pressure-the-surface-stays-off-routable-interfaces": {"webserver/gateway.go", "./app/", "TestPressureTunnel_TheSurfaceIsUnreachableOffLoopback"},
+		"pressure-the-forward-reaches-the-real-address":      {"webserver/gateway.go", "./app/", "TestPressureTunnel_TheDocumentedForwardReachesTheSurface"},
 		"pressure-the-shipped-frontend-agrees":               {"lua/autodb/client.lua", "./rpc/", "TestProtocol_TheShippedFrontendSpeaksTheSameNumber"},
 		"pressure-only-a-refusal-that-landed-counts":         {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_AFailedWriteIsNotCountedAsARefusal"},
 		"pressure-a-denial-lasts-a-full-window":              {"core/pressure/window.go", "./core/pressure/", "TestWindow_ADenialLastsAtLeastAFullWindowWhereverItLands"},

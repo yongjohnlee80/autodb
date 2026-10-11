@@ -997,8 +997,8 @@ func All() []Mutation {
 			Guarantee:   "that the view is not disclosed to every authenticated caller, since it reports other users' session counts and the source addresses being refused",
 		},
 		{
-			Name: "pressure-the-tunnel-recipe-matches-the-build", Package: "./cmd/autodb/",
-			File:        "cmd/autodb/main.go",
+			Name: "pressure-the-tunnel-recipe-matches-the-build", Package: "./app/",
+			File:        "app/main.go",
 			Anchor:      "const defaultWebPort = 7010",
 			Replacement: "const defaultWebPort = 9999",
 			Test:        "TestPressureDoc_TheTunnelRecipeMatchesTheBuild",
@@ -1006,8 +1006,8 @@ func All() []Mutation {
 			Guarantee:   "that the documented tunnel names the port this build actually serves, since a recipe pasted under pressure that fails teaches somebody the surface does not work",
 		},
 		{
-			Name: "pressure-the-daemon-is-given-something-to-observe", Package: "./cmd/autodb/",
-			File:        "cmd/autodb/main.go",
+			Name: "pressure-the-daemon-is-given-something-to-observe", Package: "./app/",
+			File:        "app/main.go",
 			Anchor:      "\t\tCapacity:          eng,\n",
 			Replacement: "",
 			Test:        "TestFrontDoorWiring_TheListenerIsGivenSomethingToObserve",
@@ -1057,7 +1057,7 @@ func All() []Mutation {
 			Guarantee:   "that adding a verb is a visible diff rather than one registration line among sixty-two, since the handshake is the only thing that can tell a newer frontend it has reached an older daemon",
 		},
 		{
-			Name: "pressure-the-surface-stays-off-routable-interfaces", Package: "./cmd/autodb/",
+			Name: "pressure-the-surface-stays-off-routable-interfaces", Package: "./app/",
 			File:        "webserver/gateway.go",
 			Anchor:      "func ListenAddr(port int) string { return fmt.Sprintf(\"127.0.0.1:%d\", port) }",
 			Replacement: "func ListenAddr(port int) string { return fmt.Sprintf(\"0.0.0.0:%d\", port) }",
@@ -1066,7 +1066,7 @@ func All() []Mutation {
 			Guarantee:   "that the browser surface is unreachable without the forward, since it reports other people's session counts and the addresses being refused, and a widened bind would leave every tunnel cell passing",
 		},
 		{
-			Name: "pressure-the-forward-reaches-the-real-address", Package: "./cmd/autodb/",
+			Name: "pressure-the-forward-reaches-the-real-address", Package: "./app/",
 			File:        "webserver/gateway.go",
 			Anchor:      "func ListenAddr(port int) string { return fmt.Sprintf(\"127.0.0.1:%d\", port) }",
 			Replacement: "func ListenAddr(port int) string { return fmt.Sprintf(\"127.0.0.1:%d\", port+1) }",
