@@ -29,11 +29,14 @@ import (
 type schemaOpts struct {
 	dryRun bool
 	revert int // the script number to revert; 0 to apply
+	// version is the build's, recorded in the lease (build.version). Empty
+	// only in cells that never reach the lease.
+	version string
 }
 
 // openLeased opens the configured store without migrating and holds its
-// lease; release closes both.
-func openLeased(ctx context.Context, configPath, verb string) (*meta.Store, func(), error) {
+// lease; release closes both. The version is recorded in the lease.
+func openLeased(ctx context.Context, configPath, verb, version string) (*meta.Store, func(), error) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return nil, nil, err
@@ -72,10 +75,10 @@ func parseScriptNumber(s string) (int, error) {
 
 func runSchema(ctx context.Context, out io.Writer, configPath string, o schemaOpts) error {
 	if o.revert != 0 {
-		return runRevertScript(ctx, out, configPath, o.revert)
+		return runRevertScript(ctx, out, configPath, o.version, o.revert)
 	}
 	verb := "apply-migration-scripts"
-	store, release, err := openLeased(ctx, configPath, verb)
+	store, release, err := openLeased(ctx, configPath, verb, o.version)
 	if err != nil {
 		return err
 	}
@@ -140,9 +143,9 @@ func baselineEffect(v int, dryRun bool) string {
 	}
 }
 
-func runRevertScript(ctx context.Context, out io.Writer, configPath string, n int) error {
+func runRevertScript(ctx context.Context, out io.Writer, configPath, version string, n int) error {
 	verb := "revert-migration-script"
-	store, release, err := openLeased(ctx, configPath, verb)
+	store, release, err := openLeased(ctx, configPath, verb, version)
 	if err != nil {
 		return err
 	}

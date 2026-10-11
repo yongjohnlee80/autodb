@@ -40,6 +40,9 @@ type migrateOpts struct {
 	// applies to a DSN typed on the command line exactly as it applies to one
 	// in a config file, or the check is theatre.
 	allowInsecure bool
+	// version is the build's, recorded in both leases (build.version). Empty
+	// only in cells that never reach a lease.
+	version string
 }
 
 // runMigrateToPostgres performs (or rehearses) the migration.
@@ -121,7 +124,7 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	}
 	defer func() { _ = src.Close() }()
 
-	srcLease, err := meta.AcquireLease(ctx, src, srcCfg, meta.LeaseHolder{Role: "migrate", Version: version})
+	srcLease, err := meta.AcquireLease(ctx, src, srcCfg, meta.LeaseHolder{Role: "migrate", Version: o.version})
 	if err != nil {
 		if errors.Is(err, meta.ErrLeaseHeld) {
 			return fmt.Errorf("migrate-to-postgres: a daemon is serving the SOURCE store at %s. "+
@@ -141,7 +144,7 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	}
 	defer func() { _ = dst.Close() }()
 
-	dstLease, err := meta.AcquireLease(ctx, dst, dstCfg, meta.LeaseHolder{Role: "migrate", Version: version})
+	dstLease, err := meta.AcquireLease(ctx, dst, dstCfg, meta.LeaseHolder{Role: "migrate", Version: o.version})
 	if err != nil {
 		if errors.Is(err, meta.ErrLeaseHeld) {
 			return fmt.Errorf("migrate-to-postgres: a daemon is serving the DESTINATION store. " +

@@ -8,13 +8,16 @@
 package app
 
 import (
+	"context"
 	"errors"
 )
 
 // guiDispatch refuses: this binary was built without the gui tag.
-func guiDispatch(configPath, remoteProfile string) error {
+func guiDispatch(ctx context.Context, configPath, remoteProfile string, b build) error {
+	_ = ctx
 	_ = configPath
 	_ = remoteProfile
+	_ = b
 	return errNoGui
 }
 
