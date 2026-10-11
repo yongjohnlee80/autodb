@@ -23,7 +23,7 @@ declare -A shards=(
   [tui]="$mod/tui"
   [frontdoor]="$mod/frontdoor"
   [exec]="$mod/core/exec"
-  [cmd-auth]="$mod/cmd/autodb $mod/core/auth"
+  [cmd-auth]="$mod/app $mod/core/auth"
   [guards]="$mod/internal/gatemutation $mod/internal/scriptguard $mod/internal/commentguard"
 )
 

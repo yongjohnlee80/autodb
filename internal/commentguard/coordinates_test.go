@@ -39,7 +39,7 @@ import (
 var certifiedClean = []string{
 	"webserver",
 	"core/config",
-	"cmd/autodb",
+	"app",
 	"rpc",
 	"core/engine",
 	"core/meta",

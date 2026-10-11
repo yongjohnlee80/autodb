@@ -1,0 +1,676 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/meta"
+
+	"github.com/yongjohnlee80/autodb/core/config"
+	coreexec "github.com/yongjohnlee80/autodb/core/exec"
+)
+
+// Every [exec] setting has to REACH the engine. All of them were parsed,
+// validated and defaulted, and then dropped: the construction site passed
+// history and max_statement_bytes and nothing else, so an operator who set
+// max_tx_duration got the built-in default with no indication their value had
+// gone nowhere.
+//
+// The values below are deliberately unlike every default. A test using the
+// defaults would pass against a call site that passed no options at all,
+// which is the version of this test that would have shipped the bug.
+func TestExecOptions_EveryConfiguredValueReachesTheEngine(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{}
+	cfg.Exec = config.Exec{
+		MaxStatementBytes:    4242,
+		MaxSessionsPerUser:   3,
+		MaxSessionsGlobal:    77,
+		SessionIdleTimeout:   config.Duration(11 * time.Minute),
+		IdleInTxTimeout:      config.Duration(13 * time.Second),
+		MaxTxDuration:        config.Duration(14 * time.Minute),
+		DebugIdleInTxTimeout: config.Duration(17 * time.Minute),
+		MaxTxDurationCeiling: config.Duration(19 * time.Minute),
+		PoolMaxConns:         6,
+		PoolMaxConnIdleTime:  config.Duration(21 * time.Second),
+		PoolMaxConnLifetime:  config.Duration(23 * time.Minute),
+		JanitorInterval:      config.Duration(2 * time.Second),
+	}
+
+	// The front door's two registry-scoped bounds come from ITS section, and
+	// until F0f nothing wired either: both were zero in a running daemon,
+	// which means the lease cap and the resident budget did not exist
+	// outside tests.
+	cfg.FrontDoor = config.FrontDoor{
+		Enabled: true, MaxLeases: 5, ResidentBudgetBytes: 12345678,
+	}
+
+	eng := coreexec.New(nil, nil, execOptions(cfg, func(string) {})...)
+	got := eng.Settings()
+
+	for _, c := range []struct {
+		name       string
+		got, want  any
+		wasDropped string
+	}{
+		{"max_statement_bytes", got.MaxStatementBytes, 4242, ""},
+		{"max_sessions_per_user", got.MaxSessionsPerUser, 3, "the per-user cap was unreachable"},
+		{"max_sessions_global", got.MaxSessionsGlobal, 77, "the global cap was unreachable"},
+		{"session_idle_timeout", got.SessionIdleTimeout, 11 * time.Minute, "orphaned sessions were reaped on the default schedule"},
+		{"idle_in_tx_timeout", got.IdleInTxTimeout, 13 * time.Second, "an abandoned transaction held locks for the default 90s"},
+		{"max_tx_duration", got.MaxTxDuration, 14 * time.Minute, "the outside bound on a transaction was the default"},
+		{"debug_idle_in_tx_timeout", got.DebugIdleInTxTimeout, 17 * time.Minute, ""},
+		{"max_tx_duration_ceiling", got.MaxTxDurationCeiling, 19 * time.Minute, ""},
+		{"pool_max_conns", got.PoolMaxConns, 6, "a target's connection budget was bounded by the default"},
+		{"pool_max_conn_idle_time", got.PoolMaxConnIdleTime, 21 * time.Second, ""},
+		{"pool_max_conn_lifetime", got.PoolMaxConnLifetime, 23 * time.Minute, ""},
+		{"frontdoor.max_leases", got.LeaseCap, 5, "the per-target wire-lease cap was zero, which is no cap at all"},
+		{"frontdoor.resident_budget_bytes", got.ResidentBudget, int64(12345678), "the wire sessions' memory budget was zero, which is no budget at all"},
+	} {
+		if c.got != c.want {
+			msg := c.wasDropped
+			if msg == "" {
+				msg = "the configured value never reached the engine"
+			}
+			t.Errorf("[exec] %s = %v, want %v — %s", c.name, c.got, c.want, msg)
+		}
+	}
+}
+
+// A lost lease is a shutdown. Nothing read Lost() before, so an engine
+// whose lock had dropped kept serving — and a second engine, finding the lock
+// free, would take it. That is the two-engines-one-store state the lease
+// exists to prevent, reached through the lease itself.
+func TestWatchLease_LosingTheLeaseStopsServing(t *testing.T) {
+	t.Parallel()
+
+	lost := make(chan struct{})
+	stopped := make(chan struct{})
+	var warned string
+	fired := watchLease(t.Context(), lost, func() { close(stopped) }, func(m string) { warned = m })
+
+	// Positive control: while the lease holds, nothing stops. Without this a
+	// watcher that stopped unconditionally would pass the assertion below.
+	select {
+	case <-stopped:
+		t.Fatal("serving stopped while the lease was still held")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(lost)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the lease was lost and the daemon kept serving; a second engine can now take the " +
+			"lock while this one is still writing to the same meta store")
+	}
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the loss was not reported, so the exit is indistinguishable from a clean shutdown")
+	}
+	if warned == "" {
+		t.Error("nothing was logged; the operator has no way to learn why the daemon stopped")
+	}
+}
+
+// And the watcher must not outlive the daemon: a goroutine per serve that
+// never returns is a leak in every test binary that starts one.
+func TestWatchLease_StopsWithTheServeContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	watchLease(ctx, make(chan struct{}), func() { close(stopped) }, func(string) {})
+	cancel()
+	select {
+	case <-stopped:
+		t.Fatal("a cancelled serve context triggered the lease-loss path; shutdown would report a " +
+			"lease failure that never happened")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// The previous cells exercised the helpers directly, so deleting the
+// production calls to watchLease and StartJanitor left the whole suite green
+// — which is the failure mode the helpers were supposed to prevent. These go
+// through startEngine, the one place the daemon wires them, and observe the
+// EFFECT rather than the call.
+func startedEngine(t *testing.T, cfg config.Config, lost <-chan struct{}) (*coreexec.Engine, context.Context, *meta.Store, *auth.Service, string) {
+	t.Helper()
+
+	store, err := meta.Open(t.Context(), config.Meta{Engine: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("meta.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	tok, _, err := svc.Bootstrap(t.Context(), "root", "root-passphrase", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	eng, serveCtx, _, stop, err := startEngine(t.Context(), cfg, store, svc, lost, wiredEpoch, func(string) {})
+	if err != nil {
+		t.Fatalf("startEngine: %v", err)
+	}
+	t.Cleanup(func() { stop(); _ = eng.Close() })
+	return eng, serveCtx, store, svc, tok
+}
+
+// startEngine revokes the device-bound sessions a previous start left, before
+// it serves, and says so; a local session survives. Through
+// startEngine, not the helper: deleting the call must fail this cell.
+func TestStartEngineRevokesThePreviousStartsRemoteSessions(t *testing.T) {
+	store, err := meta.Open(t.Context(), config.Meta{Engine: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("meta.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	if _, _, err := svc.Bootstrap(t.Context(), "root", "root-passphrase", "127.0.0.1"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	remote, err := store.Sessions.OnCtx(t.Context()).
+		Set(meta.SessTokenHash, []byte("remote")).Set(meta.SessUserID, int64(1)).
+		Set(meta.SessIP, "203.0.113.7").Set(meta.SessCreatedAt, int64(1)).
+		Set(meta.SessExpiresAt, int64(9_999_999_999)).Set(meta.SessRevoked, int64(0)).
+		Set(meta.SessDeviceID, int64(7)).Insert()
+	if err != nil {
+		t.Fatalf("seeding a remote session: %v", err)
+	}
+	var logged []string
+	eng, _, _, stop, err := startEngine(t.Context(), execConfig(), store, svc, make(chan struct{}), wiredEpoch,
+		func(msg string) { logged = append(logged, msg) })
+	if err != nil {
+		t.Fatalf("startEngine: %v", err)
+	}
+	t.Cleanup(func() { stop(); _ = eng.Close() })
+	got, err := store.Sessions.OnCtx(t.Context()).With(meta.SessID, remote).Get()
+	if err != nil || got.Revoked != 1 {
+		t.Fatalf("the previous start's remote session: %+v, %v; want revoked", got, err)
+	}
+	local, err := store.Sessions.OnCtx(t.Context()).With(meta.SessDeviceID, int64(0)).With(meta.SessRevoked, int64(0)).Count()
+	if err != nil || local != 1 {
+		t.Errorf("live local sessions after the start: %d, %v; want the bootstrap's 1", local, err)
+	}
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "revoked 1 remote session") }) {
+		t.Errorf("the start did not say what it revoked: %q", logged)
+	}
+}
+
+// wiredEpoch stands in for the lease's epoch in startedEngine.
+const wiredEpoch = "0123456789abcdef0123456789abcdef"
+
+// The daemon stamps attempts with the LEASE's epoch, the one startEngine is
+// handed — recovery settles attempts whose epoch is not the serving daemon's,
+// and that is sound only because the lease is exclusive. An engine that minted
+// its own instead would stamp an epoch the lease never vouched for.
+func TestStartEngineStampsAttemptsWithTheLeaseEpoch(t *testing.T) {
+	eng, _, _, _, _ := startedEngine(t, execConfig(), make(chan struct{}))
+	if got := eng.OwnerEpoch(); got != wiredEpoch {
+		t.Errorf("startEngine's engine stamps epoch %q, want the lease's %q", got, wiredEpoch)
+	}
+}
+
+func execConfig() config.Config {
+	cfg := config.Config{}
+	cfg.Exec = config.Exec{
+		MaxStatementBytes:    65536,
+		MaxSessionsPerUser:   8,
+		MaxSessionsGlobal:    256,
+		SessionIdleTimeout:   config.Duration(50 * time.Millisecond),
+		IdleInTxTimeout:      config.Duration(90 * time.Second),
+		MaxTxDuration:        config.Duration(5 * time.Minute),
+		DebugIdleInTxTimeout: config.Duration(10 * time.Minute),
+		MaxTxDurationCeiling: config.Duration(30 * time.Minute),
+		PoolMaxConns:         8,
+		PoolMaxConnIdleTime:  config.Duration(10 * time.Minute),
+		PoolMaxConnLifetime:  config.Duration(60 * time.Minute),
+		JanitorInterval:      config.Duration(20 * time.Millisecond),
+		ReconcileInterval:    config.Duration(20 * time.Millisecond),
+	}
+	return cfg
+}
+
+// config → daemon → an actual reconciliation pass.
+//
+// Same reasoning as the janitor cell: the reconciler is exercised
+// directly in core/exec, so deleting the production call in startEngine would
+// leave every one of those tests green while the daemon kept a complete
+// record of undetermined transactions and never went back to find out. This
+// goes through startEngine and observes the EFFECT.
+//
+// The entry is seeded against a sqlite target, which has no oracle, so the
+// pass terminates it outcome_unresolvable(no-oracle) without needing a live
+// PostgreSQL — the property under test is that the daemon RUNS the
+// reconciler, not what the reconciler concludes.
+func TestStartEngine_TheReconcilerActuallyRunsOnTheConfiguredSchedule(t *testing.T) {
+	t.Parallel()
+
+	seedPending := func(t *testing.T, store *meta.Store, connID int64, txID string) {
+		t.Helper()
+		// A real transaction enqueues as it opens, so a seed modelling one
+		// must too — the reconciler works from the pending QUEUE, not from a
+		// state predicate over the log (raised in review).
+		if _, err := store.TxPending.OnCtx(t.Context()).
+			Set(meta.TxPendTxID, txID).Set(meta.TxPendConnID, connID).
+			Set(meta.TxPendCreatedAt, int64(1)).Insert(); err != nil {
+			t.Fatalf("seeding the pending queue: %v", err)
+		}
+		for i, st := range []string{"opened", "commit_started"} {
+			if _, err := store.TxOutcomes.OnCtx(t.Context()).
+				Set(meta.TxOutTxID, txID).Set(meta.TxOutSeq, int64(i+1)).
+				Set(meta.TxOutState, st).Set(meta.TxOutReason, "").
+				Set(meta.TxOutUserID, int64(1)).Set(meta.TxOutConnID, connID).
+				Set(meta.TxOutHistoryID, int64(0)).Set(meta.TxOutTargetXID, "55").
+				Set(meta.TxOutCreatedAt, int64(1000+i)).Insert(); err != nil {
+				t.Fatalf("seeding: %v", err)
+			}
+		}
+	}
+	settled := func(t *testing.T, store *meta.Store, txID string) bool {
+		t.Helper()
+		rows, err := store.TxOutcomes.OnCtx(t.Context()).With(meta.TxOutTxID, txID).Select()
+		if err != nil {
+			t.Fatalf("reading the log: %v", err)
+		}
+		for _, r := range rows {
+			if r.State == "committed" || r.State == "rolled_back" || r.State == "outcome_unresolvable" {
+				return true
+			}
+		}
+		return false
+	}
+
+	cfg := execConfig()
+	eng, _, store, _, tok := startedEngine(t, cfg, make(chan struct{}))
+	dsn := fmt.Sprintf("file:recon%d?mode=memory&cache=shared", time.Now().UnixNano())
+	connID, err := eng.CreateConnection(t.Context(), tok, "target", "sqlite", dsn, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("CreateConnection: %v", err)
+	}
+
+	// Positive control: an `opened` transaction is NOT the reconciler's to
+	// settle, so if this one were also resolved the test below would be
+	// satisfied by a pass that terminates everything it sees.
+	seedControl := func() {
+		if _, err := store.TxPending.OnCtx(t.Context()).
+			Set(meta.TxPendTxID, "tx_control").Set(meta.TxPendConnID, connID).
+			Set(meta.TxPendCreatedAt, int64(1)).Insert(); err != nil {
+			t.Fatalf("seeding the control queue entry: %v", err)
+		}
+		if _, err := store.TxOutcomes.OnCtx(t.Context()).
+			Set(meta.TxOutTxID, "tx_control").Set(meta.TxOutSeq, int64(1)).
+			Set(meta.TxOutState, "opened").Set(meta.TxOutReason, "").
+			Set(meta.TxOutUserID, int64(1)).Set(meta.TxOutConnID, connID).
+			Set(meta.TxOutHistoryID, int64(0)).Set(meta.TxOutTargetXID, "").
+			Set(meta.TxOutCreatedAt, int64(1)).Insert(); err != nil {
+			t.Fatalf("seeding the control: %v", err)
+		}
+	}
+	seedControl()
+	seedPending(t, store, connID, "tx_pending")
+
+	// 25x the configured interval. Nothing in this test calls the
+	// reconciler.
+	time.Sleep(500 * time.Millisecond)
+
+	if !settled(t, store, "tx_pending") {
+		t.Fatal("an undetermined transaction outlived 25 reconcile intervals: the daemon either " +
+			"never started the reconciler or never passed it the configured interval, so a " +
+			"crash-window outcome would stay unknown forever")
+	}
+	if settled(t, store, "tx_control") {
+		t.Fatal("an `opened` transaction was terminated too — the pass settles everything it " +
+			"sees, so the assertion above proves nothing about reconciliation")
+	}
+}
+
+// config → daemon → an actual reap. The session idle timeout and the janitor
+// interval both come from configuration and nothing in the test calls the
+// reaper: if the daemon does not start the janitor, or does not pass the
+// configured timings, the session simply never goes away.
+func TestStartEngine_TheJanitorActuallyReapsOnTheConfiguredSchedule(t *testing.T) {
+	t.Parallel()
+
+	openSession := func(t *testing.T, cfg config.Config) (*coreexec.Engine, coreexec.SessionID, string) {
+		t.Helper()
+		eng, _, store, _, tok := startedEngine(t, cfg, make(chan struct{}))
+		dsn := fmt.Sprintf("file:wiring%d?mode=memory&cache=shared", time.Now().UnixNano())
+		connID, err := eng.CreateConnection(t.Context(), tok, "target", "sqlite", dsn, "127.0.0.1")
+		if err != nil {
+			t.Fatalf("CreateConnection: %v", err)
+		}
+		if err := store.Connections.OnCtx(t.Context()).With(meta.ConnID, connID).
+			Set(meta.ConnProfile, string(coreexec.ProfileSession)).Update(); err != nil {
+			t.Fatalf("enabling the session profile: %v", err)
+		}
+		sid, err := eng.OpenSession(t.Context(), tok, connID, "127.0.0.1")
+		if err != nil {
+			t.Fatalf("OpenSession: %v", err)
+		}
+		return eng, sid, tok
+	}
+
+	// Positive control: with a long idle timeout the session SURVIVES.
+	// Without it, a test asserting the session goes away would be satisfied
+	// by a session that could never be opened or that died for any reason.
+	t.Run("a session within its idle timeout survives", func(t *testing.T) {
+		t.Parallel()
+		cfg := execConfig()
+		cfg.Exec.SessionIdleTimeout = config.Duration(time.Hour)
+		eng, sid, tok := openSession(t, cfg)
+		time.Sleep(200 * time.Millisecond)
+		if _, err := eng.SessionExecute(t.Context(), tok, sid, "SELECT 1", "127.0.0.1"); errors.Is(err, coreexec.ErrSessionNotFound) {
+			t.Fatal("a session well within its idle timeout was reaped")
+		}
+	})
+
+	t.Run("an idle session is reaped without anyone calling the reaper", func(t *testing.T) {
+		t.Parallel()
+		eng, sid, tok := openSession(t, execConfig())
+
+		// Checked ONCE, after waiting. Polling with SessionExecute would
+		// keep the session alive — every statement refreshes lastUsed — so a
+		// poll loop asks a question whose own asking prevents the answer.
+		// The wait is 10x the idle timeout and 25x the janitor interval.
+		time.Sleep(500 * time.Millisecond)
+		_, err := eng.SessionExecute(t.Context(), tok, sid, "SELECT 1", "127.0.0.1")
+		if !errors.Is(err, coreexec.ErrSessionNotFound) {
+			t.Fatalf("the session outlived its configured idle timeout by an order of magnitude "+
+				"(SessionExecute = %v): the daemon either never started the janitor or never "+
+				"passed it the configured timings, so nothing enforces the bounds an "+
+				"operator set", err)
+		}
+	})
+}
+
+// lease loss → the server context actually stops. Not the helper in
+// isolation: the context startEngine hands the server.
+func TestStartEngine_LosingTheLeaseStopsTheServeContext(t *testing.T) {
+	t.Parallel()
+
+	lost := make(chan struct{})
+	_, serveCtx, _, _, _ := startedEngine(t, execConfig(), lost)
+
+	// Positive control: the server runs while the lease holds.
+	select {
+	case <-serveCtx.Done():
+		t.Fatal("the serve context was cancelled while the lease was still held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(lost)
+	select {
+	case <-serveCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lease was lost and the server kept running; a second engine can now take " +
+			"the lock while this one is still writing to the same meta store")
+	}
+}
+
+// config -> daemon -> partitions actually rolled.
+//
+// THIS CELL MUST CALL startEngine. The version it replaces did not: it opened a
+// store and called store.RollPartitions directly, so disabling BOTH production
+// roll calls inside startEngine left it green (raised in review). That
+// is precisely the failure the wiring cells exist to catch, in the cell written
+// to catch it — the unit was already covered in core/meta, and what was missing
+// was proof that anything in production calls it.
+//
+// So the current month's partition is DROPPED first, and the assertion is that
+// starting the daemon puts it back.
+func TestStartEngine_RollsPartitionsAtStartup(t *testing.T) {
+	if os.Getenv("TEST_PGURL") == "" {
+		t.Skip("TEST_PGURL not set; partitioning is postgres-only")
+	}
+	ctx := t.Context()
+	store, dsn := pgScratchStore(t)
+	_ = dsn
+
+	now := time.Now().UTC()
+	current := "audit_log_p" + now.Format("2006_01")
+
+	// Remove it, so its presence afterwards can only come from the roll.
+	if _, err := store.Conn().ExecContext(ctx, "DROP TABLE IF EXISTS "+current); err != nil {
+		t.Fatalf("dropping %s to set up the test: %v", current, err)
+	}
+	parts, err := store.PartitionNames(ctx, "audit_log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range parts {
+		if p == current {
+			t.Fatalf("%s is still present after the drop; the cell cannot prove anything", current)
+		}
+	}
+
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	if _, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", "127.0.0.1"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// THE PRODUCTION PATH.
+	eng, _, _, stop, err := startEngine(ctx, execConfig(), store, svc,
+		make(chan struct{}), "", func(string) {})
+	if err != nil {
+		t.Fatalf("startEngine refused to start: %v", err)
+	}
+	t.Cleanup(func() { stop(); _ = eng.Close() })
+
+	parts, err = store.PartitionNames(ctx, "audit_log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range parts {
+		if p == current {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("starting the daemon did not create %s (have %v) — nothing in production "+
+			"rolls partitions, so a daemon crossing a month boundary writes every audit "+
+			"row into DEFAULT, which succeeds silently", current, parts)
+	}
+}
+
+// A daemon must REFUSE to serve a store whose logical ids are not unique.
+//
+// After partitioning, PRIMARY KEY (id, created_at) permits the same id in two
+// months. CheckLogicalIDUniqueness detected that from the start but nothing
+// production called it, so meta.Open accepted the state it was written to
+// refuse (raised in review). Both dependents fail QUIETLY — a by-id read
+// is undefined, and repairPendingHistory's id cursor can skip a row forever —
+// so serving on is worse than not starting.
+func TestStartEngine_RefusesAStoreWithDuplicateLogicalIDs(t *testing.T) {
+	if os.Getenv("TEST_PGURL") == "" {
+		t.Skip("TEST_PGURL not set; partitioning is postgres-only")
+	}
+	ctx := t.Context()
+	store, _ := pgScratchStore(t)
+
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	if _, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", "127.0.0.1"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// The same id in two different months — which the schema ALLOWS.
+	for _, when := range []time.Time{
+		time.Date(2031, 3, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2031, 4, 1, 0, 0, 0, 0, time.UTC),
+	} {
+		if err := store.RollPartitions(ctx, when); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Audit.OnCtx(ctx).
+			Set(meta.AuditID, int64(4242)).Set(meta.AuditUserID, int64(0)).
+			Set(meta.AuditIP, "ip").Set(meta.AuditAction, "dup").Set(meta.AuditDetail, "d").
+			Set(meta.AuditCreatedAt, when.Unix()).Set(meta.AuditTxID, "").Insert(); err != nil {
+			t.Fatalf("the schema refused a duplicate id, so there is nothing to guard "+
+				"against and this cell is stale: %v", err)
+		}
+	}
+
+	eng, _, _, stop, err := startEngine(ctx, execConfig(), store, svc,
+		make(chan struct{}), "", func(string) {})
+	if err == nil {
+		stop()
+		_ = eng.Close()
+		t.Fatal("the daemon STARTED on a store holding duplicate logical ids across " +
+			"partitions — by-id reads are undefined and repairPendingHistory can skip " +
+			"rows, both silently")
+	}
+	if !strings.Contains(err.Error(), "duplicate logical ids") {
+		t.Errorf("the refusal does not name the problem:\n%v", err)
+	}
+}
+
+// pgScratchStore opens a migrated store on its own scratch database.
+func pgScratchStore(t *testing.T) (*meta.Store, string) {
+	t.Helper()
+	base := os.Getenv("TEST_PGURL")
+	ctx := context.Background()
+	admin, err := meta.Open(ctx, config.Meta{Engine: "postgres", DSN: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	name := fmt.Sprintf("autodb_wire_%d", time.Now().UnixNano())
+	if _, err := admin.Conn().ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Skipf("cannot create a scratch database: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Conn().ExecContext(context.Background(),
+			"DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+	})
+	i := strings.Index(base, "?")
+	head, tail := base, ""
+	if i >= 0 {
+		head, tail = base[:i], base[i:]
+	}
+	slash := strings.LastIndex(head, "/")
+	dsn := head[:slash+1] + name + tail
+	s, err := meta.Open(ctx, config.Meta{Engine: "postgres", DSN: dsn, AllowInsecureDSN: true})
+	if err != nil {
+		t.Fatalf("opening the scratch store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s, dsn
+}
+
+// The reload's rules and the config file's rules must AGREE.
+//
+// They are two copies of one rule set, held apart because core/config must not
+// depend on core/exec and core/exec must not depend on core/config. Two copies
+// drift, and the way this one would drift is the dangerous way round: a bound
+// the config file refuses at startup, accepted by a reload at runtime. The
+// operator would then be running a configuration the daemon would refuse to
+// start on, and would discover it at the next restart -- which is to say, at
+// the worst possible moment.
+//
+// This cell is the only thing keeping them honest. It lives here because this
+// is the one package that may import both.
+func TestPolicyRules_TheReloadAgreesWithTheConfigFile(t *testing.T) {
+	t.Parallel()
+
+	// A configuration that validates, as the baseline every case perturbs.
+	base := func() config.Config {
+		var c config.Config
+		c.Exec = config.Exec{
+			MaxStatementBytes:    64 * 1024,
+			MaxSessionsPerUser:   8,
+			MaxSessionsGlobal:    256,
+			SessionIdleTimeout:   config.Duration(10 * time.Minute),
+			IdleInTxTimeout:      config.Duration(2 * time.Hour),
+			MaxTxDuration:        config.Duration(8 * time.Hour),
+			DebugIdleInTxTimeout: config.Duration(2 * time.Hour),
+			MaxTxDurationCeiling: config.Duration(8 * time.Hour),
+			PoolMaxConns:         20,
+			PoolMaxConnIdleTime:  config.Duration(10 * time.Minute),
+			PoolMaxConnLifetime:  config.Duration(60 * time.Minute),
+			JanitorInterval:      config.Duration(9 * time.Second),
+			MaxTargetConns:       25,
+		}
+		c.Meta = config.Meta{Engine: "sqlite", Path: ":memory:"}
+		c.FrontDoor = config.FrontDoor{
+			Enabled: true, Bind: "127.0.0.1:6543", MaxLeases: 4, ResidentBudgetBytes: 1 << 30,
+			TLSCertFile: "/dev/null", TLSKeyFile: "/dev/null",
+			TLSHostNames: []string{"autodb.example"},
+		}
+		return c
+	}
+
+	// THE BASELINE MUST VALIDATE, asserted rather than assumed. If it does
+	// not, every case below compares two refusals and agrees for the wrong
+	// reason -- the cell would pass while testing nothing.
+	if err := base().Validate(); err != nil {
+		t.Fatalf("the baseline configuration does not validate, so every case below would "+
+			"compare two refusals and agree vacuously: %v", err)
+	}
+
+	for _, c := range []struct {
+		name  string
+		apply func(*config.Exec)
+	}{
+		{"the baseline itself", func(*config.Exec) {}},
+		{"a zero idle-in-transaction bound", func(e *config.Exec) { e.IdleInTxTimeout = 0; e.DebugIdleInTxTimeout = 0 }},
+		{"a zero session idle bound", func(e *config.Exec) { e.SessionIdleTimeout = 0 }},
+		{"a maximum above the ceiling", func(e *config.Exec) { e.MaxTxDuration = config.Duration(9 * time.Hour) }},
+		{"a session idle longer than the pool's", func(e *config.Exec) { e.SessionIdleTimeout = config.Duration(11 * time.Minute) }},
+		{"a budget of one", func(e *config.Exec) { e.MaxTargetConns = 1 }},
+		{"an idle bound below the sweep interval", func(e *config.Exec) {
+			e.IdleInTxTimeout = config.Duration(5 * time.Second)
+			e.DebugIdleInTxTimeout = config.Duration(5 * time.Second)
+		}},
+	} {
+		cfg := base()
+		c.apply(&cfg.Exec)
+
+		// The engine is built from the SAME configuration, so both validators
+		// judge one set of numbers rather than two that happen to look alike.
+		eng := coreexec.New(nil, nil, execOptions(cfg, func(string) {})...)
+		sweepCtx, cancel := context.WithCancel(context.Background())
+		eng.StartJanitor(sweepCtx, cfg.Exec.JanitorInterval.Duration())
+		cancel()
+
+		spec := coreexec.PolicySpec{
+			SessionIdleTimeout:   cfg.Exec.SessionIdleTimeout.Duration(),
+			IdleInTxTimeout:      cfg.Exec.IdleInTxTimeout.Duration(),
+			MaxTxDuration:        cfg.Exec.MaxTxDuration.Duration(),
+			MaxTxDurationCeiling: cfg.Exec.MaxTxDurationCeiling.Duration(),
+			MaxTargetConns:       cfg.Exec.MaxTargetConns,
+		}
+
+		cerr := cfg.Validate()
+		configRefused := cerr != nil
+		reloadRefused := eng.ValidatePolicy(spec) != nil
+		if configRefused != reloadRefused {
+			verb := map[bool]string{true: "refuses", false: "accepts"}
+			t.Errorf("%s: the config file %s it but a reload %s it (config said: %v). A bound "+
+				"the daemon will not start on must not be reachable at runtime, and a bound "+
+				"the reload refuses must not be something an operator can put in the file",
+				c.name, verb[configRefused], verb[reloadRefused], cerr)
+		}
+	}
+}
