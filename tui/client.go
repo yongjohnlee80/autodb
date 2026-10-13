@@ -32,7 +32,7 @@ import (
 type Session struct {
 	addr  string
 	log   logger.Logger
-	spawn func() (logHint string, err error) // start `autodb --serve`; nil = never spawn
+	spawn func() (Spawned, error) // start `autodb --serve`; nil = never spawn
 	// locate answers where the daemon serving this config's store listens,
 	// which may not be addr (rpc.Locate). nil = dial addr as configured, with
 	// no store check: a config that may not spawn, or a store with no file
@@ -71,9 +71,24 @@ type Session struct {
 }
 
 // spawnProbeWindow bounds how long Connect keeps dialing after the first
-// failure before giving up (a spawned server that exits
-// early keeps refusing dials, so the bounded window detects it too).
+// failure before giving up. A spawned server that exits is reported when it
+// exits (Spawned.Exited); the window catches one that neither exits nor
+// answers, and a spawner that cannot see its server's exit.
 const spawnProbeWindow = 15 * time.Second
+
+// Spawned is what a spawner reports about the server it started.
+type Spawned struct {
+	// LogPath is where the server's output goes, for the operator to read.
+	LogPath string
+	// Exited is closed when the started process exits. A server that serves
+	// does not exit, so a close while Connect is still dialing means it refused
+	// or failed. nil when the spawner cannot tell: it never fires, and only the
+	// probe window ends the wait.
+	Exited <-chan struct{}
+	// Report says how the process exited and what it wrote before it did: the
+	// refusal itself. Called only after Exited is closed; nil adds nothing.
+	Report func() string
+}
 
 // UserInfo is the logged-in identity as reported by the server.
 type UserInfo struct {
@@ -98,8 +113,26 @@ func NewSessionOn(network, addr string, log logger.Logger, spawn func() (string,
 	if network == "" {
 		network = "tcp"
 	}
-	return &Session{network: network, addr: addr, log: log, spawn: spawn}
+	return &Session{network: network, addr: addr, log: log, spawn: spawnerOf(spawn)}
 }
+
+// spawnerOf adapts a spawner that reports only its log path. Its server's exit
+// cannot be seen, so a refusing server is still only found by the probe window.
+func spawnerOf(f func() (string, error)) func() (Spawned, error) {
+	if f == nil {
+		return nil
+	}
+	return func() (Spawned, error) {
+		logPath, err := f()
+		return Spawned{LogPath: logPath}, err
+	}
+}
+
+// SetSpawner gives the session a spawner that reports when its server exits,
+// so a server that refuses to start is reported at once and in its own words,
+// not as a dial that timed out. nil = never spawn. Set before the first
+// Connect.
+func (s *Session) SetSpawner(f func() (Spawned, error)) { s.spawn = f }
 
 // IdentityEpoch reports the identity epoch: it changes on every sign-in and
 // every sign-out, including a sign-out and back in as the same account.
@@ -343,7 +376,11 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 	var loc rpc.Located
 	backoff := 100 * time.Millisecond
 	spawned := false
-	logHint := ""
+	var started Spawned
+	// gone: the server this Connect started has exited. One more attempt is
+	// made after that, and if it finds nothing either, the server's own words
+	// are the error.
+	gone := false
 	var deadline time.Time
 	for {
 		if s.locate == nil {
@@ -374,28 +411,40 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 		if deadline.IsZero() {
 			deadline = time.Now().Add(spawnProbeWindow)
 		}
+		if gone {
+			return false, exitedError(s.addr, started)
+		}
 		if s.spawn != nil && !spawned {
 			s.log.Log(logger.SeverityInfo, map[string]any{
 				"tui": "session", "event": "spawning server", "addr": s.addr,
 			})
-			hint, serr := s.spawn()
+			sp, serr := s.spawn()
 			if serr != nil {
 				return false, fmt.Errorf("spawn autodb --serve: %w", serr)
 			}
-			logHint = hint
+			started = sp
 			spawned = true
 		}
 		if time.Now().After(deadline) {
 			msg := fmt.Sprintf("connect %s: server did not answer within %s (last: %v)",
 				s.addr, spawnProbeWindow, err)
-			if logHint != "" {
-				msg += " — check " + logHint
+			if started.LogPath != "" {
+				msg += " — check " + started.LogPath
 			}
 			return false, errors.New(msg)
 		}
 		select {
 		case <-ctx.Done():
 			return false, fmt.Errorf("connect %s: %w (last: %v)", s.addr, ctx.Err(), err)
+		case <-started.Exited:
+			// Dial once more before reporting: the exit may be a bind lost to
+			// another frontend's daemon, which then answers. A nil Exited never
+			// fires.
+			gone = true
+			continue
+		// NOTE: backoff. A server that is still starting cannot announce itself
+		// to a client that has no connection to it; its exit, the one event it
+		// can produce, is waited on above.
 		case <-time.After(backoff):
 		}
 		backoff = min(backoff*2, 2*time.Second)
@@ -463,6 +512,21 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 	s.serverAddr = srvAddr
 	s.foundVia = loc.Via
 	return instanceChanged, nil
+}
+
+// exitedError reports a spawned server that exited without serving, in its
+// own words: the refusal it wrote, not a dial that ran out of time.
+func exitedError(addr string, sp Spawned) error {
+	msg := fmt.Sprintf("connect %s: the autodb server started for this session exited without serving", addr)
+	if sp.Report != nil {
+		if said := sp.Report(); said != "" {
+			msg += ": " + said
+		}
+	}
+	if sp.LogPath != "" {
+		msg += " — full log: " + sp.LogPath
+	}
+	return errors.New(msg)
 }
 
 // Disconnect closes the client and bumps the epoch (leader `x`). The

@@ -32,7 +32,7 @@ type remoteState struct {
 // a remote server, for SwitchToLocal to restore.
 type localTransport struct {
 	network, addr string
-	spawn         func() (string, error)
+	spawn         func() (Spawned, error)
 }
 
 // SwitchToRemote moves the session onto a remote server, in place: the
