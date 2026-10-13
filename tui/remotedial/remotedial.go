@@ -115,6 +115,12 @@ type Conn struct {
 	fromNext bool
 	// hello is the server's greeting.
 	hello map[string]any
+	// blockAt, when set, holds a rotation at its stages — inside the key's
+	// lock just before the old key is signed, and again before the new key is
+	// installed — so a test can run Close against a rotation mid-flight,
+	// deterministically. A Close during a hold queues on the lock, which is
+	// exactly the crossing the lock exists for. nil in production.
+	blockAt func(stage string)
 }
 
 // Hello is the server's greeting: its instance, version and so on.
@@ -452,6 +458,9 @@ func (c *Conn) rotate(ctx context.Context, token, passphrase string) error {
 		_ = k.Discard(k.Next()) // the server never saw this key; the file must not keep it
 		return ErrConnClosed
 	}
+	if c.blockAt != nil {
+		c.blockAt("sign") // held under the lock: a concurrent Close queues on it
+	}
 	oldPub := c.device.Public().(ed25519.PublicKey)
 	newPub := next.Public().(ed25519.PublicKey)
 	msg := remote.RotateMessage(c.ssh.SessionID(), c.deviceID, oldPub, newPub)
@@ -467,6 +476,9 @@ func (c *Conn) rotate(ctx context.Context, token, passphrase string) error {
 	}
 	if err := k.Promote(k.Next()); err != nil {
 		return err
+	}
+	if c.blockAt != nil {
+		c.blockAt("install") // the server has the new key; the connection may not
 	}
 	c.keyMu.Lock()
 	defer c.keyMu.Unlock()
