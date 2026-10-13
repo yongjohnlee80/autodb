@@ -77,36 +77,45 @@ func TestStartLogged_ReportsTheExitAndTheChildsOwnReason(t *testing.T) {
 }
 
 // TWO SPAWNS AT ONCE, ONE SHARED LOG: two frontends that find no daemon spawn
-// two servers together, and both append to serve.log, interleaved. Each report
-// must be its own child's refusal and nothing of the other's. A report taken
-// from the log by offset reads the other child's lines as its own.
+// two servers together, both alive, both appending to serve.log. Each report
+// must be its own child's refusal and nothing of the other's.
+//
+// The order is pinned so the hazard is certain rather than likely: A writes
+// and exits, and only then does B write. A report taken from the log by
+// offset, read when it is asked for, is then nothing but B's lines — the
+// other child's noise and the other child's refusal, with A's own refusal
+// pushed out of the tail.
 func TestStartLogged_ConcurrentSpawnsReportOnlyTheirOwnChild(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "serve.log")
-	gate := filepath.Join(dir, "go")
-	a, err := startLogged(reportingChild("A", gate), logPath)
+	gateA, gateB := filepath.Join(dir, "go-a"), filepath.Join(dir, "go-b")
+	a, err := startLogged(reportingChild("A", gateA), logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := startLogged(reportingChild("B", gate), logPath)
+	b, err := startLogged(reportingChild("B", gateB), logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(gate, nil, 0o600); err != nil {
-		t.Fatal(err)
+	for _, gate := range []struct {
+		path string
+		sp   tuiapp.Spawned
+	}{{gateA, a}, {gateB, b}} {
+		if err := os.WriteFile(gate.path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		waitExited(t, gate.sp)
 	}
-	waitExited(t, a)
-	waitExited(t, b)
 	for _, c := range []struct {
 		name, other string
 		sp          tuiapp.Spawned
 	}{{"A", "B", a}, {"B", "A", b}} {
 		got := c.sp.Report()
-		if want := "exit status 69: autodb: " + c.name + " refusing to serve: held by pid 7"; got != want {
-			t.Errorf("%s's report = %q, want %q", c.name, got, want)
-		}
 		if strings.Contains(got, c.other+" ") {
 			t.Errorf("%s's report quotes %s: %q", c.name, c.other, got)
+		}
+		if want := "exit status 69: autodb: " + c.name + " refusing to serve: held by pid 7"; got != want {
+			t.Errorf("%s's report = %q, want %q", c.name, got, want)
 		}
 	}
 	log, _ := os.ReadFile(logPath)
