@@ -6,6 +6,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -252,8 +253,14 @@ func run(ctx context.Context, args []string, o Options, stdout, stderr io.Writer
 			return reportCode(err, stderr)
 		}
 	case *serve:
-		if err := runServe(ctx, *configPath, b); err != nil {
-			return reportCode(err, stderr)
+		// A frontend that spawned this server waits for its reason in a file
+		// of its own (spawn.go): what reportCode prints goes there too.
+		report := takeSpawnReport()
+		if err := runServe(ctx, *configPath, b, report.serving); err != nil {
+			var said bytes.Buffer
+			code := reportCode(err, io.MultiWriter(stderr, &said))
+			report.refused(said.String())
+			return code
 		}
 	case *ui:
 		if err := runUI(ctx, *configPath, *remoteProfile, b); err != nil {
@@ -494,7 +501,10 @@ func checkFlags(fs *flag.FlagSet, serve, ui, guiLaunch, webUI, printEndpoint, mi
 // The context is the caller's: Main's ctx, with SIGINT/SIGTERM layered on
 // top, so a host that embeds autodb stops the daemon by cancelling it, and
 // the CLI (whose ctx is Background) behaves exactly as before.
-func runServe(ctx context.Context, configPath string, b build) error {
+//
+// serving is called once the daemon is up and announced, just before it
+// serves; nil is allowed.
+func runServe(ctx context.Context, configPath string, b build, serving func()) error {
 	// config.Load owns path resolution: an empty path resolves to the
 	// default location, a missing file means defaults, and everything else
 	// (unreadable file, bad TOML, unknown keys) fails loudly — no silent
@@ -775,6 +785,9 @@ func runServe(ctx context.Context, configPath string, b build) error {
 	// that resolved a different socket over the same store. Best effort:
 	// without it this daemon is only unfindable through the record.
 	_ = lease.Announce(ep.Network, ep.Address, srv.Instance(), rpc.Protocol)
+	if serving != nil {
+		serving()
+	}
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", b.version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the

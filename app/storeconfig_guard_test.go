@@ -147,7 +147,7 @@ func TestServe_RefusesAClientConfigBeforeItBindsAnything(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = runServe(context.Background(), p, newBuild(Options{}))
+	err = runServe(context.Background(), p, newBuild(Options{}), nil)
 	if err == nil {
 		t.Fatal("--serve through a client config returned nil: it either bound the port " +
 			"or reported the occupant as an already-running autodb")
