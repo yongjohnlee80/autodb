@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -606,5 +607,111 @@ func TestARotationRacingCloseLeavesNoKeyAndFollowsTheServer(t *testing.T) {
 				t.Fatalf("delay %v: a completed rotation left no key file", delay)
 			}
 		}
+	}
+}
+
+// A Close during a rotation, at each of its two hold points, leaves the same
+// invariants: no key in the connection's memory, no Next file, and the key
+// file following the server. The holds make the crossing deterministic — a
+// Close queued on the key's lock is exactly the crossing the lock exists for.
+func TestARotationHeldMidFlightSurvivesAClose(t *testing.T) {
+	s := newServer(t)
+	d := s.dialer(t)
+	due := func() {
+		if err := s.store.RemoteDevices.OnCtx(t.Context()).With(meta.DevUserID, int64(2)).
+			Set(meta.DevKeyCreatedAt, int64(1)).Update(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Held inside the lock, just before the old key is signed: a Close queued
+	// on the lock must not cross the bytes being signed.
+	due()
+	c, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reached, release := make(chan struct{}), make(chan struct{})
+	c.blockAt = func(stage string) {
+		if stage != "sign" {
+			return
+		}
+		c.blockAt = nil // once only; the install stage runs free
+		close(reached)
+		<-release
+	}
+	var res map[string]any
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		res, err = c.SignIn(ctx(t), alicePass)
+	}()
+	<-reached
+	c.Close()
+	close(release)
+	<-done
+	if err != nil {
+		t.Fatalf("sign-in across a held rotation: %v", err)
+	}
+	if rerr, _ := res["rotation_error"].(string); rerr == "" {
+		t.Fatal("the rotation across a Close reported no error")
+	}
+	if d.Keys.Exists(d.Keys.Next()) {
+		t.Fatal("a rotation refused mid-flight left a Next key")
+	}
+	c.keyMu.Lock()
+	device := c.device
+	c.keyMu.Unlock()
+	if len(device) != 0 {
+		t.Fatal("the closed conn holds a key")
+	}
+
+	// Held just before the new key is installed, with the server already
+	// holding it: the file follows the server, the connection's memory does not.
+	due()
+	c2, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(d.Keys.Key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installReached, installRelease := make(chan struct{}), make(chan struct{})
+	c2.blockAt = func(stage string) {
+		if stage != "install" {
+			return
+		}
+		c2.blockAt = nil
+		close(installReached)
+		<-installRelease
+	}
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		res, err = c2.SignIn(ctx(t), alicePass)
+	}()
+	<-installReached
+	c2.Close()
+	close(installRelease)
+	<-done2
+	if err != nil {
+		t.Fatalf("sign-in across a held install: %v", err)
+	}
+	if rerr, _ := res["rotation_error"].(string); !strings.Contains(rerr, "closed during") {
+		t.Fatalf("the rotation across a held install said %q; want the connection-closed error", rerr)
+	}
+	if d.Keys.Exists(d.Keys.Next()) {
+		t.Fatal("a rotation refused at the install left a Next key")
+	}
+	after, err := os.ReadFile(d.Keys.Key())
+	if err != nil || bytes.Equal(before, after) {
+		t.Fatal("the file did not follow the server's accepted rotation")
+	}
+	c2.keyMu.Lock()
+	device = c2.device
+	c2.keyMu.Unlock()
+	if len(device) != 0 {
+		t.Fatal("the closed conn holds the rotated key")
 	}
 }
