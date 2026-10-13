@@ -184,6 +184,7 @@ func TestSpawn_ARefusedServeIsReportedAtOnceAndNamesTheHolder(t *testing.T) {
 		t.Fatal("Connect succeeded against a store another process holds")
 	}
 	msg := err.Error()
+	t.Logf("Connect reported, after %s: %s", took.Round(time.Millisecond), msg)
 	for _, want := range []string{
 		"exited without serving",
 		fmt.Sprintf("exit status %d", exitAlreadyServing),
