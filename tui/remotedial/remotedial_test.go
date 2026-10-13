@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -484,5 +485,42 @@ func TestDecliningTheKeyPassphraseDialsNothing(t *testing.T) {
 	}
 	if dialed {
 		t.Fatal("the server was dialed although the key could not be opened")
+	}
+}
+
+// A disconnect closes the connection while a session worker copies its device
+// key, and the two must not cross: the copy and the wipe share the key's lock.
+// This hammer overlaps them round after round, and the race detector says
+// whether they crossed.
+func TestTheConnsKeyCopyAndItsCloseWipeDoNotCross(t *testing.T) {
+	for range 50 {
+		priv, err := remoteclient.NewDeviceKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := &Conn{device: priv}
+		var wg sync.WaitGroup
+		begin := make(chan struct{})
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-begin
+				for range 100 {
+					if k := c.DeviceKey(); k != nil && len(k) != ed25519.PrivateKeySize {
+						t.Error("a copied key is torn")
+						return
+					}
+				}
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-begin
+			c.Close()
+		}()
+		close(begin)
+		wg.Wait()
 	}
 }

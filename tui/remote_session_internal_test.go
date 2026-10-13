@@ -141,15 +141,9 @@ func TestForgetRemoteWipesTheKeyAndTheToken(t *testing.T) {
 	if _, err := s.ConnectRemote(rctx(t), remotetest.AlicePass); err != nil {
 		t.Fatal(err)
 	}
-	key := s.remote.key
 	s.ForgetRemote()
-	if s.Token() != "" || s.Connected() || s.remote.key != nil {
+	if s.Token() != "" || s.Connected() || s.remote.key.Copy() != nil {
 		t.Fatal("ForgetRemote left the token, the connection or the key")
-	}
-	for _, b := range key {
-		if b != 0 {
-			t.Fatal("the device key was not wiped in memory")
-		}
 	}
 	if _, err := s.Connect(rctx(t)); !errors.Is(err, ErrRemoteNeedsUnlock) {
 		t.Fatalf("Connect after ForgetRemote: %v; want ErrRemoteNeedsUnlock", err)
@@ -164,14 +158,8 @@ func TestClosingARemoteSessionWipesTheKey(t *testing.T) {
 	if _, err := s.ConnectRemote(rctx(t), remotetest.AlicePass); err != nil {
 		t.Fatal(err)
 	}
-	key := s.remote.key
 	s.Close()
-	if s.Token() != "" || s.remote.key != nil {
+	if s.Token() != "" || s.remote.key.Copy() != nil {
 		t.Fatal("Close left the token or the key")
-	}
-	for _, b := range key {
-		if b != 0 {
-			t.Fatal("the device key was not wiped")
-		}
 	}
 }

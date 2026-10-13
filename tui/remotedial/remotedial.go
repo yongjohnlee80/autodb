@@ -93,7 +93,11 @@ type Conn struct {
 	sshFP  string
 	// device is the device key in memory; staged means it is a first
 	// connect's key, sealed to Pending and to be promoted on sign-in.
+	// keyMu guards the key's two cross-worker touches — the copy DeviceKey
+	// hands the session and the wipe in Close — so a disconnect closing the
+	// connection cannot zero the bytes a session worker is copying.
 	device   ed25519.PrivateKey
+	keyMu    sync.Mutex
 	staged   bool
 	enrolled bool
 	deviceID int64
@@ -120,8 +124,17 @@ func (c *Conn) HostKeyFP() string { return c.hostFP }
 func (c *Conn) SSHKeyFP() string { return c.sshFP }
 
 // DeviceKey is the unsealed device key, kept in memory while connected so a
-// reconnect can resume without the passphrase. Close wipes it.
-func (c *Conn) DeviceKey() ed25519.PrivateKey { return c.device }
+// reconnect can resume without the passphrase: a private copy, for the caller
+// to own and wipe. Close wipes the held one under the same lock, so a copy
+// and a disconnect's wipe cannot cross.
+func (c *Conn) DeviceKey() ed25519.PrivateKey {
+	c.keyMu.Lock()
+	defer c.keyMu.Unlock()
+	if c.device == nil {
+		return nil
+	}
+	return append(ed25519.PrivateKey(nil), c.device...)
+}
 
 // Enrolled reports whether the server already knew this device.
 func (c *Conn) Enrolled() bool { return c.enrolled }
@@ -134,7 +147,10 @@ func (c *Conn) Close() {
 	if c.ssh != nil {
 		_ = c.ssh.Close()
 	}
+	c.keyMu.Lock()
 	remoteclient.Wipe(c.device)
+	c.device = nil
+	c.keyMu.Unlock()
 }
 
 // Dial connects, greets and proves the device. The device key is opened

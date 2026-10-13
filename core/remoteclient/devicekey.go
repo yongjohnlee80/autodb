@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -65,6 +66,47 @@ func Wipe(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+}
+
+// DeviceKey is a machine's device key held in memory while its profile is
+// connected: a reconnect's dial copies it while a disconnect wipes it, both
+// live on the TUI's workers, so the copy and the wipe synchronize here, on
+// the key's own lock. The zero DeviceKey holds no key.
+type DeviceKey struct {
+	mu  sync.Mutex
+	key ed25519.PrivateKey
+}
+
+// Adopt makes priv the held key, wiping whatever was held before.
+func (d *DeviceKey) Adopt(priv ed25519.PrivateKey) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.key != nil {
+		Wipe(d.key)
+	}
+	d.key = priv
+}
+
+// Copy returns a private copy of the held key, for a dial to own and wipe
+// itself; nil when none is held. The copy is taken under the same lock as
+// Wipe, so a disconnect cannot zero the bytes a dial is reading.
+func (d *DeviceKey) Copy() ed25519.PrivateKey {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.key == nil {
+		return nil
+	}
+	return append(ed25519.PrivateKey(nil), d.key...)
+}
+
+// Wipe zeroes the held key and forgets it: the profile disconnected.
+func (d *DeviceKey) Wipe() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.key != nil {
+		Wipe(d.key)
+	}
+	d.key = nil
 }
 
 // Seal seals priv under passphrase, bound to the host key and the SSH key.
