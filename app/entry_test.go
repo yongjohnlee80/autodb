@@ -183,7 +183,7 @@ func TestServe_ACancelledContextEndsARunningDaemon(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", data) // the store the fresh daemon opens
 
-	dir := t.TempDir()
+	dir := runDir(t) // short: macOS's t.TempDir() puts the socket past sun_path
 	sock, cancel, done := serveStarted(t, context.Background(), dir, "ctx-live")
 	defer cancel()
 
@@ -218,7 +218,7 @@ func TestWebUI_ACancelledContextEndsARunningGateway(t *testing.T) {
 	}
 	_ = probe.Close()
 
-	dir := t.TempDir()
+	dir := runDir(t) // short: macOS's t.TempDir() puts the socket past sun_path
 	cfg := serveConfigAt(t, dir)
 	_, stopServe, serveDone := serveStarted(t, context.Background(), dir, "ctx-live")
 	defer stopServe()
