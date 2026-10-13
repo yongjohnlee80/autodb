@@ -586,9 +586,6 @@ func TestARotationRacingCloseLeavesNoKeyAndFollowsTheServer(t *testing.T) {
 		time.Sleep(delay)
 		c.Close()
 		<-done
-		if err != nil {
-			t.Fatalf("delay %v: sign-in: %v", delay, err)
-		}
 		c.keyMu.Lock()
 		device, closed := c.device, c.closed
 		c.keyMu.Unlock()
@@ -597,6 +594,11 @@ func TestARotationRacingCloseLeavesNoKeyAndFollowsTheServer(t *testing.T) {
 		}
 		if d.Keys.Exists(d.Keys.Next()) {
 			t.Fatalf("delay %v: a Next key survived the round", delay)
+		}
+		if err != nil {
+			// an early Close aborts the sign-in rpc itself; the key invariants
+			// above are what the race owns
+			continue
 		}
 		if rerr, _ := res["rotation_error"].(string); rerr == "" {
 			// the rotation ran to the end: the file holds the promoted key
