@@ -145,9 +145,9 @@ func TestServeLogPath(t *testing.T) {
 
 // spawnFor's spawner starts THIS executable with --serve and --config, its
 // output in serve.log. Under `go test` this executable is the test binary,
-// which refuses --serve as an unknown flag and exits 2: so the report quoting
-// that refusal is proof the flag reached the child, the log caught it, and the
-// session would be told.
+// which refuses --serve as an unknown flag, prints its usage and exits 2: the
+// refusal in serve.log is proof the flag reached the child and the log caught
+// its output, and the exit status in the report is proof the session is told.
 func TestSpawnFor_StartsThisExecutableWithServeIntoServeLog(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
@@ -164,8 +164,11 @@ func TestSpawnFor_StartsThisExecutableWithServeIntoServeLog(t *testing.T) {
 		t.Errorf("LogPath %q, want %q", sp.LogPath, want)
 	}
 	waitExited(t, sp)
-	if got := sp.Report(); !strings.HasPrefix(got, "exit status 2: ") || !strings.Contains(got, "-serve") {
-		t.Errorf("Report() = %q; want the test binary's refusal of -serve, exit status 2", got)
+	if got := sp.Report(); !strings.HasPrefix(got, "exit status 2: ") {
+		t.Errorf("Report() = %q; want the test binary's exit status 2 and its last lines", got)
+	}
+	if b, _ := os.ReadFile(sp.LogPath); !strings.Contains(string(b), "flag provided but not defined: -serve") {
+		t.Errorf("serve.log does not hold the child's refusal of -serve:\n%s", b)
 	}
 }
 
