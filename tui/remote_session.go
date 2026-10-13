@@ -18,10 +18,13 @@ var ErrRemoteNeedsUnlock = errors.New("tui: connect to the remote server with yo
 
 // remoteState is a remote session's transport: the connector, the device key
 // held in memory while the profile is connected (so a reconnect resumes
-// without the passphrase), and the connection now in use.
+// without the passphrase), and the connection now in use. The key is held by
+// its remoteclient.DeviceKey: a reconnect dials with a copy of it while a
+// disconnect wipes it, both on this session's workers, and the holder's lock
+// is what keeps the copy from reading half-wiped bytes.
 type remoteState struct {
 	d    *remotedial.Dialer
-	key  ed25519.PrivateKey
+	key  remoteclient.DeviceKey
 	conn *remotedial.Conn
 }
 
@@ -43,7 +46,7 @@ func (s *Session) SwitchToRemote(d *remotedial.Dialer) {
 	old, oldConn := s.client, (*remotedial.Conn)(nil)
 	if s.remote != nil {
 		oldConn = s.remote.conn
-		remoteclient.Wipe(s.remote.key)
+		s.remote.key.Wipe()
 	} else {
 		s.local = &localTransport{network: s.network, addr: s.addr, spawn: s.spawn}
 	}
@@ -67,8 +70,8 @@ func (s *Session) SwitchToLocal() {
 		return
 	}
 	old, oldConn := s.client, s.remote.conn
-	remoteclient.Wipe(s.remote.key)
-	s.remote.key, s.remote.conn = nil, nil
+	s.remote.key.Wipe()
+	s.remote.conn = nil
 	if s.local != nil {
 		s.network, s.addr, s.spawn = s.local.network, s.local.addr, s.local.spawn
 		s.remote, s.local = nil, nil
@@ -161,7 +164,7 @@ func (s *Session) ConnectRemote(ctx context.Context, passphrase string) (hostKey
 	}
 	s.mu.Lock()
 	if s.remote == rs {
-		rs.key = append(ed25519.PrivateKey(nil), conn.DeviceKey()...)
+		rs.key.Adopt(conn.DeviceKey())
 		// Pinned from here on: a reconnect is not asked to confirm the host
 		// key again, and a different one is refused.
 		rs.d.Profile.HostKeyFP = conn.HostKeyFP()
@@ -192,7 +195,10 @@ func (s *Session) connectRemote(ctx context.Context) (bool, error) {
 	rs := s.remote
 	var key ed25519.PrivateKey
 	if rs != nil {
-		key = rs.key
+		// The copy under the holder's lock is the fix: the disconnect path can
+		// wipe the held key while this dial runs, and the dial must own whole
+		// bytes, not read the ones being wiped.
+		key = rs.key.Copy()
 	}
 	token := s.token
 	s.mu.Unlock()
@@ -312,8 +318,7 @@ func (s *Session) ForgetRemote() {
 	}
 	conn := s.remote.conn
 	s.remote.conn, s.client = nil, nil
-	remoteclient.Wipe(s.remote.key)
-	s.remote.key = nil
+	s.remote.key.Wipe()
 	s.gen++
 	if s.token != "" || s.user != (UserInfo{}) {
 		s.token, s.user = "", UserInfo{}
