@@ -137,7 +137,7 @@ jobs:
           # Every package runs even when one fails, so one run shows them all.
           set -o pipefail
           status=0
-          go test -count=1 -v -run '^(TestServe_|TestWebUI_ACancelledContext|TestDiscovery_|TestSpawn_|TestSpawnFor_StartsThisExecutable|TestStartLogged_|TestLogTail_|TestServeLogPath)' ./app/ | tee macos-app.log || status=1
+          go test -count=1 -v -run '^(TestServe_|TestWebUI_ACancelledContext|TestDiscovery_|TestSpawn_|TestSpawnFor_StartsThisExecutable|TestStartLogged_|TestReadSpawnReport_|TestSweepSpawnReports_|TestSpawnReport_|TestServeLogPath)' ./app/ | tee macos-app.log || status=1
           go test -count=1 -v -run '^(TestInstanceLease_|TestLeaseRecord_|TestStoreID_)' ./core/meta/ | tee macos-meta.log || status=1
           go test -count=1 -v -run '^(TestLocate_|TestProbeHello_)' ./rpc/ | tee macos-rpc.log || status=1
           go test -count=1 -v -run '^TestSession_' ./tui/ | tee macos-tui.log || status=1
@@ -151,6 +151,8 @@ jobs:
             TestDiscovery_ASecondServeOnAnotherSocketNamesTheHolder \
             TestDiscovery_PrintEndpointAnswersTheHolderAndItsStore \
             TestSpawn_ARefusedServeIsReportedAtOnceAndNamesTheHolder \
+            TestSpawn_AServingChildWithdrawsItsReport \
+            TestStartLogged_ConcurrentSpawnsReportOnlyTheirOwnChild \
             TestInstanceLease_AcquiresOverAnOpenStore \
             TestInstanceLease_SecondProcessIsRefused \
             TestLeaseRecord_AcquireAnnounceRelease \

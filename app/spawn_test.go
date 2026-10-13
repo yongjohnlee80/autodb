@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -30,16 +31,30 @@ func waitExited(t *testing.T, sp tuiapp.Spawned) {
 	}
 }
 
-// THE REPORT IS THE CHILD'S OWN: how it exited, and what it wrote, and none of
-// what an earlier server left in the shared log.
-func TestStartLogged_ReportsTheExitAndOnlyThisChildsOutput(t *testing.T) {
+// reportingChild is a stand-in for `autodb --serve`: it writes noise to its
+// stdout (serve.log), then its refusal into the report file its spawner named,
+// and exits 69. It waits for gate to exist first, when gate is not empty, so a
+// cell can release several children at once.
+func reportingChild(name, gate string) *exec.Cmd {
+	script := `
+if [ -n "$GATE" ]; then while [ ! -e "$GATE" ]; do sleep 0.01; done; fi
+i=0; while [ $i -lt 40 ]; do echo "$NAME noise $i"; i=$((i+1)); done
+echo "$NAME refusing to serve: held by pid 7" >&2
+printf 'autodb: %s refusing to serve: held by pid 7\n' "$NAME" > "$AUTODB_SPAWN_REPORT"
+exit 69`
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Env = append(os.Environ(), "NAME="+name, "GATE="+gate)
+	return cmd
+}
+
+// THE REPORT IS THE CHILD'S OWN: how it exited and the reason it wrote, not
+// what it or any server logged. The log keeps everything, appended.
+func TestStartLogged_ReportsTheExitAndTheChildsOwnReason(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "serve.log")
 	if err := os.WriteFile(logPath, []byte("an earlier server said this\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/sh", "-c",
-		`echo starting; echo; echo "refusing to serve: held by pid 7" >&2; exit 69`)
-	sp, err := startLogged(cmd, logPath)
+	sp, err := startLogged(reportingChild("A", ""), logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,19 +62,64 @@ func TestStartLogged_ReportsTheExitAndOnlyThisChildsOutput(t *testing.T) {
 		t.Errorf("LogPath %q, want %q", sp.LogPath, logPath)
 	}
 	waitExited(t, sp)
-	want := "exit status 69: starting | refusing to serve: held by pid 7"
+	want := "exit status 69: autodb: A refusing to serve: held by pid 7"
 	if got := sp.Report(); got != want {
 		t.Errorf("Report() = %q, want %q", got, want)
 	}
-	// Appended, never truncated: the earlier server's line is still in the log.
-	if b, _ := os.ReadFile(logPath); !strings.HasPrefix(string(b), "an earlier server said this\n") {
-		t.Errorf("the log lost what was in it before:\n%s", b)
+	b, _ := os.ReadFile(logPath)
+	if !strings.HasPrefix(string(b), "an earlier server said this\n") || !strings.Contains(string(b), "A noise 39") {
+		t.Errorf("the log lost what was in it, or what the child wrote:\n%s", b)
+	}
+	// The report file is read once and removed.
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(logPath), spawnReportPattern)); len(left) != 0 {
+		t.Errorf("report files left behind: %v", left)
 	}
 }
 
-// A child that exits cleanly and says nothing is still reported as an exit.
+// TWO SPAWNS AT ONCE, ONE SHARED LOG: two frontends that find no daemon spawn
+// two servers together, and both append to serve.log, interleaved. Each report
+// must be its own child's refusal and nothing of the other's. A report taken
+// from the log by offset reads the other child's lines as its own.
+func TestStartLogged_ConcurrentSpawnsReportOnlyTheirOwnChild(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "serve.log")
+	gate := filepath.Join(dir, "go")
+	a, err := startLogged(reportingChild("A", gate), logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := startLogged(reportingChild("B", gate), logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitExited(t, a)
+	waitExited(t, b)
+	for _, c := range []struct {
+		name, other string
+		sp          tuiapp.Spawned
+	}{{"A", "B", a}, {"B", "A", b}} {
+		got := c.sp.Report()
+		if want := "exit status 69: autodb: " + c.name + " refusing to serve: held by pid 7"; got != want {
+			t.Errorf("%s's report = %q, want %q", c.name, got, want)
+		}
+		if strings.Contains(got, c.other+" ") {
+			t.Errorf("%s's report quotes %s: %q", c.name, c.other, got)
+		}
+	}
+	log, _ := os.ReadFile(logPath)
+	for _, want := range []string{"A noise 39", "B noise 39", "A refusing", "B refusing"} {
+		if !strings.Contains(string(log), want) {
+			t.Errorf("serve.log lacks %q: the operator's log must keep both children's output", want)
+		}
+	}
+}
+
+// A child that exits cleanly and writes no reason is still reported as an exit.
 func TestStartLogged_ASilentExitSaysHowItExited(t *testing.T) {
-	sp, err := startLogged(exec.Command("/bin/sh", "-c", "exit 0"), filepath.Join(t.TempDir(), "serve.log"))
+	sp, err := startLogged(exec.Command("/bin/sh", "-c", "echo only in the log; exit 0"), filepath.Join(t.TempDir(), "serve.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,17 +130,21 @@ func TestStartLogged_ASilentExitSaysHowItExited(t *testing.T) {
 }
 
 // A log that cannot be opened, or a child that cannot start, is an error from
-// the spawn rather than a session left dialing.
+// the spawn rather than a session left dialing, and leaves no report file.
 func TestStartLogged_FailuresToStartAreErrors(t *testing.T) {
 	if _, err := startLogged(exec.Command("/bin/true"), filepath.Join(t.TempDir(), "missing", "serve.log")); err == nil {
 		t.Error("an unopenable log was accepted")
 	}
-	if _, err := startLogged(exec.Command(filepath.Join(t.TempDir(), "no-such-binary")), filepath.Join(t.TempDir(), "serve.log")); err == nil {
+	dir := t.TempDir()
+	if _, err := startLogged(exec.Command(filepath.Join(dir, "no-such-binary")), filepath.Join(dir, "serve.log")); err == nil {
 		t.Error("a binary that does not exist was started")
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, spawnReportPattern)); len(left) != 0 {
+		t.Errorf("a failed start left report files: %v", left)
 	}
 }
 
-func TestLogTail_Bounds(t *testing.T) {
+func TestReadSpawnReport_Bounds(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) string {
 		p := filepath.Join(dir, name)
@@ -90,34 +154,89 @@ func TestLogTail_Bounds(t *testing.T) {
 		return p
 	}
 
-	// The last reportTailLines non-empty lines, trimmed.
+	// The last reportLines non-empty lines, trimmed; the file is removed.
 	var many strings.Builder
 	for i := 1; i <= 10; i++ {
 		fmt.Fprintf(&many, "  line %d  \n\n", i)
 	}
-	if got, want := logTail(write("many", many.String()), 0), "line 5 | line 6 | line 7 | line 8 | line 9 | line 10"; got != want {
+	p := write("many", many.String())
+	if got, want := readSpawnReport(p), "line 5 | line 6 | line 7 | line 8 | line 9 | line 10"; got != want {
 		t.Errorf("many lines: %q, want %q", got, want)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("the report was not removed after reading: %v", err)
 	}
 
 	// Past the byte bound, the line the bound cut is dropped, not quoted half.
-	long := strings.Repeat("x", reportTailBytes) + "\nlast\n"
-	if got := logTail(write("long", long), 0); got != "last" {
+	long := strings.Repeat("x", reportBytes) + "\nlast\n"
+	if got := readSpawnReport(write("long", long)); got != "last" {
 		t.Errorf("clipped: %q, want %q", got, "last")
 	}
+	// A report the child removed (it served) adds nothing.
+	if got := readSpawnReport(filepath.Join(dir, "absent")); got != "" {
+		t.Errorf("absent report: %q, want empty", got)
+	}
+}
 
-	// From an offset: only what came after it.
-	p := write("offset", "before\nafter\n")
-	if got := logTail(p, int64(len("before\n"))); got != "after" {
-		t.Errorf("from an offset: %q, want %q", got, "after")
+// A spawner that exits before its child leaves the report file; the next
+// spawn removes it once it is stale, and nothing younger.
+func TestSweepSpawnReports_RemovesOnlyStaleOnes(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, ".spawn-old.report")
+	young := filepath.Join(dir, ".spawn-young.report")
+	other := filepath.Join(dir, "serve.log")
+	for _, p := range []string{old, young, other} {
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	// A log shorter than the offset was replaced under us: all of it is new.
-	if got := logTail(p, 1<<20); got != "before | after" {
-		t.Errorf("replaced log: %q, want %q", got, "before | after")
+	now := time.Now()
+	stale := now.Add(-2 * staleSpawnReport)
+	for _, p := range []string{old, other} {
+		if err := os.Chtimes(p, stale, stale); err != nil {
+			t.Fatal(err)
+		}
 	}
-	// An unreadable log adds nothing.
-	if got := logTail(filepath.Join(dir, "absent"), 0); got != "" {
-		t.Errorf("absent log: %q, want empty", got)
+	sweepSpawnReports(dir, now)
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("a stale report survived the sweep: %v", err)
 	}
+	for _, p := range []string{young, other} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("the sweep removed %s: %v", p, err)
+		}
+	}
+}
+
+// THE CHILD'S SIDE: it takes the path out of its environment, writes only into
+// a file its spawner made, and withdraws the file once it serves.
+func TestSpawnReport_TheChildsSide(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".spawn-x.report")
+	if err := os.WriteFile(p, []byte("stale words"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(spawnReportEnv, p)
+	r := takeSpawnReport()
+	if _, set := os.LookupEnv(spawnReportEnv); set || r.path != p {
+		t.Fatalf("took %q, env still set: %v", r.path, set)
+	}
+	r.refused("autodb: refusing\n")
+	if b, _ := os.ReadFile(p); string(b) != "autodb: refusing\n" {
+		t.Errorf("report holds %q, want only the refusal", b)
+	}
+	r.serving()
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("serving left the report: %v", err)
+	}
+	r.refused("autodb: much later\n") // the file is gone: never recreated
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("a refusal after serving recreated the report: %v", err)
+	}
+	// A server nobody spawned has no report, and both calls are no-ops.
+	none := takeSpawnReport()
+	none.refused("x")
+	none.serving()
 }
 
 func TestServeLogPath(t *testing.T) {
@@ -164,8 +283,10 @@ func TestSpawnFor_StartsThisExecutableWithServeIntoServeLog(t *testing.T) {
 		t.Errorf("LogPath %q, want %q", sp.LogPath, want)
 	}
 	waitExited(t, sp)
-	if got := sp.Report(); !strings.HasPrefix(got, "exit status 2: ") {
-		t.Errorf("Report() = %q; want the test binary's exit status 2 and its last lines", got)
+	// The test binary knows nothing of the report file, so the report is the
+	// exit alone; what it printed is in serve.log.
+	if got := sp.Report(); got != "exit status 2" {
+		t.Errorf("Report() = %q; want the test binary's exit status 2", got)
 	}
 	if b, _ := os.ReadFile(sp.LogPath); !strings.Contains(string(b), "flag provided but not defined: -serve") {
 		t.Errorf("serve.log does not hold the child's refusal of -serve:\n%s", b)
@@ -227,6 +348,45 @@ func TestSpawn_ARefusedServeIsReportedAtOnceAndNamesTheHolder(t *testing.T) {
 	// Well inside the 15s probe window: the exit ended the wait, not the clock.
 	if took > 10*time.Second {
 		t.Errorf("Connect took %s; the server's exit should have ended it", took)
+	}
+}
+
+// A SPAWNED SERVER THAT SERVES WITHDRAWS ITS REPORT: there is no refusal to
+// give, and when it stops much later its exit is nobody's answer. The real
+// binary, through startLogged.
+func TestSpawn_AServingChildWithdrawsItsReport(t *testing.T) {
+	e := newDiscoveryEnv(t)
+	run := runDir(t)
+	logPath := filepath.Join(e.data, "serve.log")
+	sp, err := startLogged(e.cmd(run, "--serve"), logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(run, "autodb.sock")
+	var hello rpc.Hello
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		hello, err = rpc.ProbeHello(ctx, "unix", sock)
+		cancel()
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the spawned daemon never answered: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// It announces, withdraws the report, then serves: an answered hello
+	// means the withdrawal has happened.
+	if left, _ := filepath.Glob(filepath.Join(e.data, spawnReportPattern)); len(left) != 0 {
+		t.Errorf("a serving daemon left its report file: %v", left)
+	}
+	if err := syscall.Kill(int(hello.PID), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitExited(t, sp)
+	if got := sp.Report(); strings.Contains(got, ": ") {
+		t.Errorf("a daemon that served and was stopped reported a reason: %q", got)
 	}
 }
 
