@@ -111,6 +111,53 @@ jobs:
           echo "$pkgs"
           go test -race -count=2 $pkgs
 
+  # macOS SERVES. Every darwin release before v0.4.4 refused its own --serve
+  # (the lease flocked meta.db, which darwin refuses while SQLite holds fcntl
+  # locks on it), and nothing caught it: CI ran on linux only, and the tap's
+  # macOS check runs `autodb --version`, which never starts a server. This job
+  # runs the real binary on a Mac: --serve answers on its socket and runs a
+  # query; two processes whose $TMPDIR differ (a shell, tmux, a GUI launch)
+  # meet over one store, and the second --serve's refusal names the holder's
+  # socket and pid; a spawned server that refuses is reported in its own
+  # words. Plus the lease and lease-record cells that hold the darwin fix.
+  #
+  # THE NAMED CELLS MUST HAVE RUN AND PASSED. A -run pattern that matches
+  # nothing, or a cell that skips, exits 0; the last step fails on either.
+  macos:
+    name: macos (serve)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - run: go build ./...
+      - name: serve, dial, query; the two-context split; the refusal report
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run '^(TestServe_|TestDiscovery_|TestSpawn_|TestStartLogged_|TestLogTail_|TestServeLogPath)' ./app/ | tee macos-app.log
+          go test -count=1 -v -run '^(TestInstanceLease_|TestLeaseRecord_|TestStoreID_)' ./core/meta/ | tee macos-meta.log
+          go test -count=1 -v -run '^(TestLocate_|TestProbeHello_)' ./rpc/ | tee macos-rpc.log
+          go test -count=1 -v -run '^TestSession_' ./tui/ | tee macos-tui.log
+      - name: the darwin cells ran and passed
+        run: |
+          fail=0
+          for cell in \
+            TestServe_ADaemonRunsAQueryOverItsSocket \
+            TestDiscovery_ASecondServeOnAnotherSocketNamesTheHolder \
+            TestDiscovery_PrintEndpointAnswersTheHolderAndItsStore \
+            TestSpawn_ARefusedServeIsReportedAtOnceAndNamesTheHolder \
+            TestInstanceLease_AcquiresOverAnOpenStore \
+            TestInstanceLease_SecondProcessIsRefused \
+            TestLeaseRecord_AcquireAnnounceRelease \
+            TestSession_ASpawnedServerThatExitsIsReportedInItsOwnWords; do
+            if ! grep -q -- "--- PASS: $cell " macos-*.log; then
+              echo "::error::$cell did not run and pass on macOS"
+              fail=1
+            fi
+          done
+          exit $fail
+
   # The neovim smoke suite. A separate job because it needs neovim and the
   # auto-core.nvim plugin, and because it was in NEITHER the Makefile nor CI —
   # so its 45 real-daemon/UI assertions, including the handshake and

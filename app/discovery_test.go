@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,8 +23,11 @@ import (
 //
 // The split this exists for: two processes over one meta store resolving
 // different sockets — a launch without $TMPDIR, a config with its own
-// [server] socket. Here each process gets its own XDG_RUNTIME_DIR and the
-// same XDG_DATA_HOME, which is exactly that split.
+// [server] socket. Here each process gets its own runtime directory and the
+// same XDG_DATA_HOME, which is exactly that split. The runtime directory is
+// the variable the platform's socket actually follows (contextEnv): $TMPDIR on
+// macOS, where a shell, tmux and a GUI launch can each see a different one,
+// and $XDG_RUNTIME_DIR elsewhere.
 
 type discoveryEnv struct {
 	bin  string
@@ -53,9 +57,26 @@ func runDir(t *testing.T) string {
 
 func (e discoveryEnv) cmd(run string, args ...string) *exec.Cmd {
 	c := exec.Command(e.bin, append([]string{"--config", e.cfg}, args...)...)
-	c.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+run, "XDG_DATA_HOME="+e.data,
+	c.Env = append(contextEnv(run), "XDG_DATA_HOME="+e.data,
 		"XDG_STATE_HOME="+e.data, "XDG_CONFIG_HOME="+filepath.Join(e.data, "config"))
 	return c
+}
+
+// contextEnv is this environment with its socket directory moved to run, the
+// way the platform resolves it (config's runtimeDir). On darwin that is
+// $TMPDIR with no $XDG_RUNTIME_DIR, which is how macOS launches autodb: setting
+// $XDG_RUNTIME_DIR there would test a path no Mac takes.
+func contextEnv(run string) []string {
+	if runtime.GOOS != "darwin" {
+		return append(os.Environ(), "XDG_RUNTIME_DIR="+run)
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "XDG_RUNTIME_DIR=") && !strings.HasPrefix(kv, "TMPDIR=") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "TMPDIR="+run)
 }
 
 // serve starts a daemon and waits until it answers a hello.

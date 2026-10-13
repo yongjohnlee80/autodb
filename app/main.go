@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -1184,7 +1183,7 @@ func isAddrInUse(err error) bool {
 // config must never spawn: it would start a daemon as whoever holds the file,
 // against the meta store that file resolves to, on the port the real service
 // binds.
-func spawnFor(cfg config.Config, configPath string) func() (string, error) {
+func spawnFor(cfg config.Config, configPath string) func() (tuiapp.Spawned, error) {
 	// AND NOT FROM ANY FILE AT ALL ON A HOST THAT RUNS AUTODB AS A SERVICE.
 	//
 	// ClientOnly covers the file the installer hands out. It cannot cover a
@@ -1220,7 +1219,7 @@ func spawnFor(cfg config.Config, configPath string) func() (string, error) {
 	if !cfg.MaySpawnDaemon() {
 		return nil
 	}
-	return func() (string, error) { return spawnServe(configPath) }
+	return func() (tuiapp.Spawned, error) { return spawnServe(configPath) }
 }
 
 // locatorFor is how a TUI session finds this store's daemon (rpc.Locate), or
@@ -1288,7 +1287,8 @@ func runUIOn(ctx context.Context, backend tuicore.Backend, network string, cfg c
 	//
 	// nil spawn means Session.Connect reports that nothing is listening rather
 	// than becoming what listens.
-	session := tuiapp.NewSessionOn(network, addr, logger.Nop{}, spawnFor(cfg, configPath))
+	session := tuiapp.NewSessionOn(network, addr, logger.Nop{}, nil)
+	session.SetSpawner(spawnFor(cfg, configPath))
 	defer session.Close()
 	// Where this store's daemon answers, which may not be the configured
 	// address (a different $TMPDIR, a swept socket): see locatorFor.
@@ -1468,8 +1468,9 @@ func configPathFor(explicit string) string {
 
 // spawnServe starts a detached `autodb --serve` with stdio redirected to an
 // owned append-only log (a stderr line into the alternate
-// screen would corrupt raw mode). It returns the log path so the session's
-// bounded probe window can point the operator at the failure diagnostics.
+// screen would corrupt raw mode). What it returns tells the session where that
+// log is and when the server exits, so a server that refuses to serve is
+// reported at once in its own words (startLogged).
 //
 // Detached Child Process Hierarchy:
 //
@@ -1482,47 +1483,20 @@ func configPathFor(explicit string) string {
 //	     |
 //	     v
 //	autodb --serve (Detached Daemon, survives TUI exit)
-func spawnServe(configPath string) (string, error) {
+func spawnServe(configPath string) (tuiapp.Spawned, error) {
 	self, err := os.Executable()
 	if err != nil {
-		return "", err
+		return tuiapp.Spawned{}, err
 	}
-	stateDir := os.Getenv("XDG_STATE_HOME")
-	if stateDir == "" {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			return "", herr
-		}
-		stateDir = filepath.Join(home, ".local", "state")
-	}
-	logDir := filepath.Join(stateDir, "autodb")
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		return "", err
-	}
-	logPath := filepath.Join(logDir, "serve.log")
-	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	logPath, err := serveLogPath()
 	if err != nil {
-		return "", err
+		return tuiapp.Spawned{}, err
 	}
-	defer logFile.Close()
-
 	args := []string{"--serve"}
 	if configPath != "" {
 		args = append(args, "--config", configPath)
 	}
-	cmd := exec.Command(self, args...)
-	cmd.Stdin = nil
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-	// Reap the child if it exits (it normally outlives us; a startup
-	// failure keeps refusing dials until the session's bounded probe
-	// window expires with this log path in the error).
-	go func() { _ = cmd.Wait() }()
-	return logPath, nil
+	return startLogged(exec.Command(self, args...), logPath)
 }
 
 // listen binds the endpoint, clearing a stale unix socket first.
