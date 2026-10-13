@@ -143,6 +143,32 @@ func TestServeLogPath(t *testing.T) {
 	}
 }
 
+// spawnFor's spawner starts THIS executable with --serve and --config, its
+// output in serve.log. Under `go test` this executable is the test binary,
+// which refuses --serve as an unknown flag and exits 2: so the report quoting
+// that refusal is proof the flag reached the child, the log caught it, and the
+// session would be told.
+func TestSpawnFor_StartsThisExecutableWithServeIntoServeLog(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	var cfg config.Config
+	spawn := spawnFor(cfg, filepath.Join(t.TempDir(), "config.toml"))
+	if spawn == nil {
+		t.Skip("this host has a service config, so no frontend here may spawn")
+	}
+	sp, err := spawn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(state, "autodb", "serve.log"); sp.LogPath != want {
+		t.Errorf("LogPath %q, want %q", sp.LogPath, want)
+	}
+	waitExited(t, sp)
+	if got := sp.Report(); !strings.HasPrefix(got, "exit status 2: ") || !strings.Contains(got, "-serve") {
+		t.Errorf("Report() = %q; want the test binary's refusal of -serve, exit status 2", got)
+	}
+}
+
 // THE BUG, END TO END THROUGH THE REAL BINARY: the store is held by a process
 // with no address to attach to, so the session spawns a server, and that
 // server refuses. The session used to dial for its whole probe window and then
