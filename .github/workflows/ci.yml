@@ -135,7 +135,7 @@ jobs:
       - name: serve, dial, query; the two-context split; the refusal report
         run: |
           set -o pipefail
-          go test -count=1 -v -run '^(TestServe_|TestDiscovery_|TestSpawn_|TestStartLogged_|TestLogTail_|TestServeLogPath)' ./app/ | tee macos-app.log
+          go test -count=1 -v -run '^(TestServe_|TestWebUI_ACancelledContext|TestDiscovery_|TestSpawn_|TestStartLogged_|TestLogTail_|TestServeLogPath)' ./app/ | tee macos-app.log
           go test -count=1 -v -run '^(TestInstanceLease_|TestLeaseRecord_|TestStoreID_)' ./core/meta/ | tee macos-meta.log
           go test -count=1 -v -run '^(TestLocate_|TestProbeHello_)' ./rpc/ | tee macos-rpc.log
           go test -count=1 -v -run '^TestSession_' ./tui/ | tee macos-tui.log
