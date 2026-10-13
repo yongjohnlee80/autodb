@@ -76,6 +76,10 @@ type Dialer struct {
 // ErrKeyPassphraseWrong: the SSH key file's passphrase did not open it.
 var ErrKeyPassphraseWrong = errors.New("remotedial: that passphrase does not open the ssh key")
 
+// ErrConnClosed: the connection was closed while a device key rotation was
+// under way. The file on disk follows the server, which this tells apart.
+var ErrConnClosed = errors.New("remotedial: the connection closed during the device key rotation")
+
 // Unlock is how the device key is had: opened from its file with the autodb
 // passphrase, or, for a reconnect, the key already in memory.
 type Unlock struct {
@@ -93,11 +97,15 @@ type Conn struct {
 	sshFP  string
 	// device is the device key in memory; staged means it is a first
 	// connect's key, sealed to Pending and to be promoted on sign-in.
-	// keyMu guards the key's two cross-worker touches — the copy DeviceKey
-	// hands the session and the wipe in Close — so a disconnect closing the
-	// connection cannot zero the bytes a session worker is copying.
+	// keyMu guards the key's cross-worker touches — the copy DeviceKey hands
+	// the session, the wipe in Close, and rotation's signing and swap, which
+	// the session can close the connection in the middle of — so a disconnect
+	// cannot zero the bytes a sign or a copy is reading, nor let a rotation
+	// install a key on a connection that is already gone. closed, under the
+	// same lock, is what the rotation checks.
 	device   ed25519.PrivateKey
 	keyMu    sync.Mutex
+	closed   bool
 	staged   bool
 	enrolled bool
 	deviceID int64
@@ -150,6 +158,7 @@ func (c *Conn) Close() {
 	c.keyMu.Lock()
 	remoteclient.Wipe(c.device)
 	c.device = nil
+	c.closed = true
 	c.keyMu.Unlock()
 }
 
@@ -417,9 +426,19 @@ func (c *Conn) Resume(ctx context.Context, token string) (map[string]any, error)
 // rotate replaces the device key: the new key is sealed to Next first, the
 // server swaps it (both keys sign), then Next becomes Key. If the server
 // refuses, Next is discarded and the old key stays; if the TUI dies between
-// the swap and the rename, the next connect proves the Next key.
+// the swap and the rename, the next connect proves the Next key. A Close can
+// run in the middle — the connection is installed before sign-in, and a
+// disconnect closes it — so the old key is signed under the key's lock, and
+// the swap installs only on a connection that still lives; the file always
+// follows the server, whatever became of this connection's memory.
 func (c *Conn) rotate(ctx context.Context, token, passphrase string) error {
 	k := c.d.Keys
+	c.keyMu.Lock()
+	if c.closed {
+		c.keyMu.Unlock()
+		return ErrConnClosed
+	}
+	c.keyMu.Unlock()
 	next, err := remoteclient.NewDeviceKey()
 	if err != nil {
 		return err
@@ -427,17 +446,35 @@ func (c *Conn) rotate(ctx context.Context, token, passphrase string) error {
 	if err := k.Write(k.Next(), next, passphrase, c.hostFP, c.sshFP); err != nil {
 		return err
 	}
+	c.keyMu.Lock()
+	if c.closed {
+		c.keyMu.Unlock()
+		_ = k.Discard(k.Next()) // the server never saw this key; the file must not keep it
+		return ErrConnClosed
+	}
 	oldPub := c.device.Public().(ed25519.PublicKey)
 	newPub := next.Public().(ed25519.PublicKey)
 	msg := remote.RotateMessage(c.ssh.SessionID(), c.deviceID, oldPub, newPub)
+	// signed under the lock: a concurrent Close wipes the key, and the bytes
+	// must not serve both.
+	oldSig := ed25519.Sign(c.device, msg)
+	c.keyMu.Unlock()
 	if _, err := c.cli.Call(ctx, "remote.rotate_device", token, []byte(newPub),
-		ed25519.Sign(c.device, msg), ed25519.Sign(next, msg)); err != nil {
+		oldSig, ed25519.Sign(next, msg)); err != nil {
 		_ = k.Discard(k.Next())
 		remoteclient.Wipe(next)
 		return fmt.Errorf("remotedial: rotating the device key: %w", err)
 	}
 	if err := k.Promote(k.Next()); err != nil {
 		return err
+	}
+	c.keyMu.Lock()
+	defer c.keyMu.Unlock()
+	if c.closed {
+		// Close wiped the old key; the new one belongs to no live connection.
+		// The file was promoted: the server knows only the new key.
+		remoteclient.Wipe(next)
+		return ErrConnClosed
 	}
 	remoteclient.Wipe(c.device)
 	c.device = next

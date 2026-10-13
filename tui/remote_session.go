@@ -205,6 +205,10 @@ func (s *Session) connectRemote(ctx context.Context) (bool, error) {
 	if key == nil {
 		return false, ErrRemoteNeedsUnlock
 	}
+	// remoteDial copies the key into the connection's own memory before it
+	// returns, so the snapshot has no owner past that point: every path, the
+	// error ones included, wipes it. The holder keeps its own copy.
+	defer remoteclient.Wipe(key)
 	conn, myGen, err := s.remoteDial(ctx, rs, remotedial.Unlock{Key: key})
 	if err != nil {
 		return false, err
