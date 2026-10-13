@@ -569,6 +569,16 @@ func TestARotationOnAClosedConnIsRefusedBeforeAnything(t *testing.T) {
 func TestARotationRacingCloseLeavesNoKeyAndFollowsTheServer(t *testing.T) {
 	s := newServer(t)
 	d := s.dialer(t)
+	// the first connect enrolls the device with today's date; the age is set
+	// after that, per round, or the enrollment overwrites it again
+	c0, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c0.SignIn(ctx(t), alicePass); err != nil {
+		t.Fatal(err)
+	}
+	c0.Close()
 	for _, delay := range []time.Duration{0, time.Millisecond, 5 * time.Millisecond, 20 * time.Millisecond} {
 		if err := s.store.RemoteDevices.OnCtx(t.Context()).With(meta.DevUserID, int64(2)).
 			Set(meta.DevKeyCreatedAt, int64(1)).Update(); err != nil {
@@ -617,6 +627,16 @@ func TestARotationRacingCloseLeavesNoKeyAndFollowsTheServer(t *testing.T) {
 func TestARotationHeldMidFlightSurvivesAClose(t *testing.T) {
 	s := newServer(t)
 	d := s.dialer(t)
+	// the first connect enrolls the device with today's date; the age is set
+	// after that, before each rotating dial, or the enrollment overwrites it
+	c0, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c0.SignIn(ctx(t), alicePass); err != nil {
+		t.Fatal(err)
+	}
+	c0.Close()
 	due := func() {
 		if err := s.store.RemoteDevices.OnCtx(t.Context()).With(meta.DevUserID, int64(2)).
 			Set(meta.DevKeyCreatedAt, int64(1)).Update(); err != nil {
@@ -647,9 +667,17 @@ func TestARotationHeldMidFlightSurvivesAClose(t *testing.T) {
 		res, err = c.SignIn(ctx(t), alicePass)
 	}()
 	<-reached
-	c.Close()
+	// Close the connection while the rotation holds the key's lock: it
+	// queues there, which is the crossing the lock exists for.
+	closedC := make(chan struct{})
+	go func() {
+		defer close(closedC)
+		c.Close()
+	}()
+	time.Sleep(50 * time.Millisecond) // let the Close reach the lock and queue
 	close(release)
 	<-done
+	<-closedC
 	if err != nil {
 		t.Fatalf("sign-in across a held rotation: %v", err)
 	}
