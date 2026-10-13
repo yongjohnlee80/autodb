@@ -12,6 +12,18 @@ import (
 
 func sqliteAt(path string) config.Meta { return config.Meta{Engine: "sqlite", Path: path} }
 
+// realPath is p with every symlink resolved: the spelling the lease record
+// stores. On macOS t.TempDir() lives under /var, a symlink to /private/var, so
+// the spelling a cell created is not the one the record holds.
+func realPath(t *testing.T, p string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 // ONE STORE, ONE IDENTITY, WHATEVER PATH NAMES IT. A symlink and a hardlink
 // reach the same store, so they must report the same id — and the id must be
 // the one the lease lock is named by, or a frontend and the lock would
@@ -46,8 +58,8 @@ func TestStoreID_EverySpellingOfOneStoreIsOneID(t *testing.T) {
 	if suffix := strings.TrimPrefix(want, "sqlite:"); !strings.HasSuffix(lock, ".autodb-lease-"+suffix) {
 		t.Errorf("the lock %s is not named by the store id %s", lock, want)
 	}
-	if resolved != path {
-		t.Errorf("resolved = %s, want %s", resolved, path)
+	if want := realPath(t, path); resolved != want {
+		t.Errorf("resolved = %s, want %s", resolved, want)
 	}
 
 	// A copy is a new store: its own file, its own lease, its own record.
@@ -101,7 +113,7 @@ func TestLeaseRecord_AcquireAnnounceRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if h.Role != "serve" || h.Version != "v-test" || h.PID != os.Getpid() || h.StoreID != id ||
-		h.StorePath != path || h.Since.IsZero() || h.Addr != "" || h.Instance != "" {
+		h.StorePath != realPath(t, path) || h.Since.IsZero() || h.Addr != "" || h.Instance != "" {
 		t.Errorf("record after acquisition = %+v", h)
 	}
 

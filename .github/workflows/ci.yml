@@ -134,12 +134,16 @@ jobs:
       - run: go build ./...
       - name: serve, dial, query; the two-context split; the refusal report
         run: |
+          # Every package runs even when one fails, so one run shows them all.
           set -o pipefail
-          go test -count=1 -v -run '^(TestServe_|TestWebUI_ACancelledContext|TestDiscovery_|TestSpawn_|TestStartLogged_|TestLogTail_|TestServeLogPath)' ./app/ | tee macos-app.log
-          go test -count=1 -v -run '^(TestInstanceLease_|TestLeaseRecord_|TestStoreID_)' ./core/meta/ | tee macos-meta.log
-          go test -count=1 -v -run '^(TestLocate_|TestProbeHello_)' ./rpc/ | tee macos-rpc.log
-          go test -count=1 -v -run '^TestSession_' ./tui/ | tee macos-tui.log
+          status=0
+          go test -count=1 -v -run '^(TestServe_|TestWebUI_ACancelledContext|TestDiscovery_|TestSpawn_|TestStartLogged_|TestLogTail_|TestServeLogPath)' ./app/ | tee macos-app.log || status=1
+          go test -count=1 -v -run '^(TestInstanceLease_|TestLeaseRecord_|TestStoreID_)' ./core/meta/ | tee macos-meta.log || status=1
+          go test -count=1 -v -run '^(TestLocate_|TestProbeHello_)' ./rpc/ | tee macos-rpc.log || status=1
+          go test -count=1 -v -run '^TestSession_' ./tui/ | tee macos-tui.log || status=1
+          exit $status
       - name: the darwin cells ran and passed
+        if: always()
         run: |
           fail=0
           for cell in \
