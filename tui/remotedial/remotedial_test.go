@@ -524,3 +524,85 @@ func TestTheConnsKeyCopyAndItsCloseWipeDoNotCross(t *testing.T) {
 		wg.Wait()
 	}
 }
+
+// A rotation on a connection that is already closed is refused before anything
+// is written or sent: no Next key file, no rotation reaching the server, the
+// key on disk unchanged.
+func TestARotationOnAClosedConnIsRefusedBeforeAnything(t *testing.T) {
+	s := newServer(t)
+	d := s.dialer(t)
+	c, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SignIn(ctx(t), alicePass); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(d.Keys.Key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollments := s.count(t, "remote_device_enrolled")
+	c.Close()
+	if err := c.rotate(ctx(t), "a-token", alicePass); !errors.Is(err, ErrConnClosed) {
+		t.Fatalf("rotate on a closed conn: %v; want ErrConnClosed", err)
+	}
+	if got := s.count(t, "remote_device_enrolled"); got != enrollments {
+		t.Fatalf("a closed conn sent the rotation anyway: %d -> %d", enrollments, got)
+	}
+	if d.Keys.Exists(d.Keys.Next()) {
+		t.Fatal("a closed conn left a Next key on disk")
+	}
+	after, err := os.ReadFile(d.Keys.Key())
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("the key file changed: %v", err)
+	}
+}
+
+// A rotation racing a Close never crosses the key's bytes, and never installs
+// a key on a connection that is already gone: whichever way the race lands,
+// the connection ends with no key in memory and no Next file, and a rotation
+// that completed without error left the promoted key on disk. The delays sweep
+// so both orders land: the rotation finishing before the Close, and the Close
+// arriving in the rotation's unlocked middle.
+func TestARotationRacingCloseLeavesNoKeyAndFollowsTheServer(t *testing.T) {
+	s := newServer(t)
+	d := s.dialer(t)
+	for _, delay := range []time.Duration{0, time.Millisecond, 5 * time.Millisecond, 20 * time.Millisecond} {
+		if err := s.store.RemoteDevices.OnCtx(t.Context()).With(meta.DevUserID, int64(2)).
+			Set(meta.DevKeyCreatedAt, int64(1)).Update(); err != nil {
+			t.Fatal(err)
+		}
+		c, err := d.Dial(ctx(t), Unlock{Passphrase: alicePass})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var res map[string]any
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			res, err = c.SignIn(ctx(t), alicePass)
+		}()
+		time.Sleep(delay)
+		c.Close()
+		<-done
+		if err != nil {
+			t.Fatalf("delay %v: sign-in: %v", delay, err)
+		}
+		c.keyMu.Lock()
+		device, closed := c.device, c.closed
+		c.keyMu.Unlock()
+		if len(device) != 0 || !closed {
+			t.Fatalf("delay %v: the closed conn holds a key: %d bytes (closed %v)", delay, len(device), closed)
+		}
+		if d.Keys.Exists(d.Keys.Next()) {
+			t.Fatalf("delay %v: a Next key survived the round", delay)
+		}
+		if rerr, _ := res["rotation_error"].(string); rerr == "" {
+			// the rotation ran to the end: the file holds the promoted key
+			if !d.Keys.Exists(d.Keys.Key()) {
+				t.Fatalf("delay %v: a completed rotation left no key file", delay)
+			}
+		}
+	}
+}
