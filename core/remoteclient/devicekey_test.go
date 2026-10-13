@@ -30,6 +30,7 @@ func TestADeviceKeyIsCopiedHeldAndWiped(t *testing.T) {
 	if d.key[0] == got[0] {
 		t.Fatal("the holder's key changed with the copy's")
 	}
+	held := d.key // the very slice the holder holds, to see Wipe zero it
 	d.Wipe()
 	if got := d.Copy(); got != nil {
 		t.Fatal("a wiped holder still copied a key")
@@ -37,7 +38,7 @@ func TestADeviceKeyIsCopiedHeldAndWiped(t *testing.T) {
 	if len(d.key) != 0 {
 		t.Fatal("Wipe did not forget the key")
 	}
-	for _, b := range d.key {
+	for _, b := range held {
 		if b != 0 {
 			t.Fatal("Wipe left key bytes in memory")
 		}
@@ -56,12 +57,11 @@ func TestAdoptingASecondKeyWipesTheFirst(t *testing.T) {
 	}
 	var d DeviceKey
 	d.Adopt(first)
-	old := append(ed25519.PrivateKey(nil), first...)
 	d.Adopt(second)
 	if !bytes.Equal(d.key, second) {
 		t.Fatal("Adopt did not install the second key")
 	}
-	for _, b := range old {
+	for _, b := range first { // the very slice the holder held
 		if b != 0 {
 			t.Fatal("the first key's bytes survived the adoption")
 		}
