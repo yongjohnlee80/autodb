@@ -298,6 +298,7 @@ type lexRules struct {
 	nestedComments   bool // /* … /* … */ … */ nests
 	bracketIdents    bool // […] is an identifier running to the first ]
 	tclParameters    bool // $name, @name, :name, #name, with a (…) suffix
+	backticks        bool // `…` is a quoted identifier
 }
 
 // rulesFor is the named engine's lexical rules.
@@ -309,6 +310,7 @@ func rulesFor(eng engine.Name) lexRules {
 		nestedComments:   eng.NestedBlockComments(),
 		bracketIdents:    eng.BracketQuotedIdentifiers(),
 		tclParameters:    eng.TclVariables(),
+		backticks:        eng.BacktickQuotedIdentifiers(),
 	}
 }
 
@@ -483,7 +485,7 @@ func scanScript(sqlText string, lex lexRules, mode scanMode) (Statement, []strin
 			execComment = false
 			i += 2
 
-		case c == '\'' || c == '"' || c == '`':
+		case c == '\'' || c == '"' || (c == '`' && lex.backticks):
 			if err := content(); err != nil {
 				return st, parts, spans, err
 			}
