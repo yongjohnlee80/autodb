@@ -380,8 +380,7 @@ func (e *Engine) cursorPage(ctx context.Context, s *session, pol UnitPolicy, con
 func (e *Engine) cursorExchange(ctx context.Context, pc golibpg.PinnedConn, c *sessionCursor,
 	ops []golibpg.ExtendedOp, n int, res *Result) (more, completed bool, targetErr, runErr error) {
 	if c.carry != nil {
-		res.Rows = append(res.Rows, c.carry)
-		c.carry = nil
+		res.Rows = append(res.Rows, c.carry) // replaced below when another page follows
 	}
 	want := uint32(n - len(res.Rows) + 1)
 	for _, op := range append(ops, golibpg.ExecuteOp(c.portal, want)) {
