@@ -3,6 +3,8 @@ package exec
 import (
 	"strings"
 	"testing"
+
+	"github.com/yongjohnlee80/autodb/core/engine"
 )
 
 // Which scripts take the transactional path. This is asked of the CLASSIFIER,
@@ -45,7 +47,7 @@ func TestScriptOpensATransaction(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := scriptOpensATransaction(tc.parts, false); got != tc.want {
+			if got := scriptOpensATransaction(tc.parts, engine.Postgres); got != tc.want {
 				t.Errorf("scriptOpensATransaction(%q) = %v, want %v", tc.parts, got, tc.want)
 			}
 		})

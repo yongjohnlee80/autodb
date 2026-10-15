@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -46,7 +47,7 @@ func (e *Engine) ExecuteScript(ctx context.Context, token string, connID int64, 
 		return nil, auth.ErrDenied // never disclose which connections exist
 	}
 
-	parts, err := SplitStatements(sqlText, connRow.Engine.BackslashEscapes())
+	parts, err := splitStatementsFor(sqlText, connRow.Engine)
 	if err != nil {
 		return nil, err
 	}
@@ -107,15 +108,14 @@ func (e *Engine) ExecuteScriptAtomic(ctx context.Context, token string, connID i
 	if err != nil {
 		return nil, auth.ErrDenied // never disclose which connections exist
 	}
-	backslashEscapes := connRow.Engine.BackslashEscapes()
-	parts, err := SplitStatements(sqlText, backslashEscapes)
+	parts, err := splitStatementsFor(sqlText, connRow.Engine)
 	if err != nil {
 		return nil, err
 	}
 	if len(parts) == 0 {
 		return nil, ErrEmptyStatement
 	}
-	if !scriptOpensATransaction(parts, backslashEscapes) {
+	if !scriptOpensATransaction(parts, connRow.Engine) {
 		return e.ExecuteScript(ctx, token, connID, sqlText, ip)
 	}
 
@@ -200,9 +200,9 @@ func (e *Engine) atomicFailure(sess *session, idx, total, appliedOutside int, ca
 // one path and executed down another. A statement that will not classify is
 // treated as not-a-boundary and left to fail on its own merits further down,
 // where the error can name the statement.
-func scriptOpensATransaction(parts []string, backslashEscapes bool) bool {
+func scriptOpensATransaction(parts []string, eng engine.Name) bool {
 	for _, stmt := range parts {
-		st, err := Classify(stmt, backslashEscapes)
+		st, err := classifyFor(stmt, eng)
 		if err != nil {
 			continue
 		}

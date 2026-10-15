@@ -621,7 +621,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, admitErr)
 	}
 
-	stmt, err := Classify(sqlText, connRow.Engine.BackslashEscapes())
+	stmt, err := classifyFor(sqlText, connRow.Engine)
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}

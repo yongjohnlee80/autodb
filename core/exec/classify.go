@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/yongjohnlee80/autodb/core/engine"
 )
 
 // Class buckets a statement for authorization (maps 1:1 onto auth actions).
@@ -182,8 +184,12 @@ type FunctionCall struct {
 
 // Classify tokenizes one SQL script and returns its statement verdict.
 // backslashEscapes selects MySQL string semantics (backslash escapes inside
-// quotes, '#' line comments, /*! executable comments); leave false for
-// postgres/sqlite.
+// quotes, '#' line comments, /*! executable comments); false selects
+// PostgreSQL's, in which E'…' is a string whose backslashes escape.
+//
+// The engine's paths call classifyFor, never this: SQLite also answers false
+// to BackslashEscapes and has no E'…' strings, so a bool cannot name its
+// grammar.
 //
 // Classification Pipeline:
 //
@@ -224,7 +230,13 @@ type FunctionCall struct {
 // refusal it replaces stood in for a guard that could not see inside a CTE,
 // and refused the guarded ones too.
 func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
-	st, _, _, err := scanScript(sqlText, backslashEscapes, false)
+	st, _, _, err := scanScript(sqlText, backslashEscapes, !backslashEscapes, false)
+	return st, err
+}
+
+// classifyFor is Classify under the lexical rules of the named engine.
+func classifyFor(sqlText string, eng engine.Name) (Statement, error) {
+	st, _, _, err := scanScript(sqlText, eng.BackslashEscapes(), eng.EscapeStringConstants(), false)
 	return st, err
 }
 
@@ -235,8 +247,18 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 // Each returned statement is classified, authorized, WHERE-guarded and
 // audited on its own when executed; splitting changes how much you can
 // submit at once, never what the core will run.
+//
+// Like Classify, the bool names MySQL or PostgreSQL; the engine's paths call
+// splitStatementsFor.
 func SplitStatements(sqlText string, backslashEscapes bool) ([]string, error) {
-	_, parts, _, err := scanScript(sqlText, backslashEscapes, true)
+	_, parts, _, err := scanScript(sqlText, backslashEscapes, !backslashEscapes, true)
+	return parts, err
+}
+
+// splitStatementsFor is SplitStatements under the lexical rules of the named
+// engine.
+func splitStatementsFor(sqlText string, eng engine.Name) ([]string, error) {
+	_, parts, _, err := scanScript(sqlText, eng.BackslashEscapes(), eng.EscapeStringConstants(), true)
 	return parts, err
 }
 
@@ -249,14 +271,16 @@ func SplitStatements(sqlText string, backslashEscapes bool) ([]string, error) {
 // gate saw rather than a re-joined rendering of them.
 type stmtSpan struct{ start, end int }
 
-// splitStatementSpans is SplitStatements with each statement's byte range in
-// the original text alongside its trimmed form. Same lexer, same boundaries.
-func splitStatementSpans(sqlText string, backslashEscapes bool) ([]string, []stmtSpan, error) {
-	_, parts, spans, err := scanScript(sqlText, backslashEscapes, true)
+// splitStatementSpans is splitStatementsFor with each statement's byte range
+// in the original text alongside its trimmed form. Same lexer, same
+// boundaries.
+func splitStatementSpans(sqlText string, eng engine.Name) ([]string, []stmtSpan, error) {
+	_, parts, spans, err := scanScript(sqlText, eng.BackslashEscapes(), eng.EscapeStringConstants(), true)
 	return parts, spans, err
 }
 
-func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, []string, []stmtSpan, error) {
+// escapeStrings selects PostgreSQL's E'…' reading: see the E-prefix case.
+func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool) (Statement, []string, []stmtSpan, error) {
 	var st Statement
 	var parts []string
 	var spans []stmtSpan
@@ -423,6 +447,31 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			// a perfectly ordinary PostgreSQL column-alias list — still saw
 			// AS as the nearest word when the paren opened, and the alias
 			// list was read as a statement body.
+			w1, w2, w3 = "", "", ""
+			i = j
+
+		case escapeStrings && (c == 'E' || c == 'e') && i+1 < n && sqlText[i+1] == '\'' &&
+			(i == 0 || !isWordChar(sqlText[i-1])):
+			// A PostgreSQL escape string. Inside E'…' a backslash escapes the
+			// next byte, so E'\'' is the one-character string "'" and the
+			// literal goes on; an ordinary '…' keeps the standard reading, in
+			// which a backslash is a plain byte. Read as a word and a standard
+			// string, `SELECT E'\''; CREATE TABLE t (x int); --'` was one
+			// statement here and two on the server.
+			//
+			// Only an E that begins a token opens one: the e that ends
+			// `name'…'` or follows the digits of `1e'…'` does not. The E is
+			// the string's first byte, not a word, so it is handled exactly as
+			// the quote case handles a string: one token, ending the run of
+			// words and any callee candidate before it.
+			if err := content(); err != nil {
+				return st, parts, spans, err
+			}
+			j, err := scanQuoted(sqlText, i+1, '\'', true)
+			if err != nil {
+				return st, parts, spans, err
+			}
+			identLive, qualPending = false, false
 			w1, w2, w3 = "", "", ""
 			i = j
 
@@ -670,7 +719,8 @@ func opensStatementBody(w1, w2, w3 string) bool {
 
 // scanQuoted advances past a quoted region opened at s[i] and returns the
 // index after the closing quote. Doubling always escapes; backslash escapes
-// apply in MySQL mode to '-' and '"'-quoted strings (never backticks).
+// apply in MySQL mode to '-' and '"'-quoted strings (never backticks), and to
+// a PostgreSQL E'…' string, whose caller passes true.
 func scanQuoted(s string, i int, quote byte, backslashEscapes bool) (int, error) {
 	j := i + 1
 	n := len(s)

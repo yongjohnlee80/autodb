@@ -217,7 +217,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	if admitErr != nil {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
-	stmt, cerr := Classify(sqlText, connRow.Engine.BackslashEscapes())
+	stmt, cerr := classifyFor(sqlText, connRow.Engine)
 	if errors.Is(cerr, ErrEmptyStatement) {
 		// AN EMPTY STATEMENT IS LEGAL, and the matrix row for Query already
 		// says so — "Empty query -> EmptyQueryResponse + ReadyForQuery". The

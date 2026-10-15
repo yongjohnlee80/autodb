@@ -207,7 +207,7 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 	if admitErr != nil {
 		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, admitErr)
 	}
-	stmt, cerr := Classify(part, connRow.Engine.BackslashEscapes())
+	stmt, cerr := classifyFor(part, connRow.Engine)
 	if cerr != nil {
 		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, cerr)
 	}
@@ -315,7 +315,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 	if admitErr != nil {
 		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
-	parts, spans, err := splitStatementSpans(sqlText, false)
+	parts, spans, err := splitStatementSpans(sqlText, connRow.Engine)
 	if err != nil && !errors.Is(err, ErrEmptyStatement) {
 		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
 	}
