@@ -106,7 +106,7 @@ func (e *Engine) SessionQuery(ctx context.Context, token string, id SessionID, s
 	s.mu.Lock()
 	phase, hasCursor := s.txPhase, s.cursor != nil
 	s.mu.Unlock()
-	stmt, cerr := Classify(sqlText, connRow.Engine.BackslashEscapes())
+	stmt, cerr := classifyFor(sqlText, connRow.Engine)
 	if hasCursor {
 		return nil, "", e.rejectSession(ctx, s, ident, ip, sqlText, ErrCursorOpen)
 	}
