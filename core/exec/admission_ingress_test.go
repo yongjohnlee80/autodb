@@ -49,6 +49,7 @@ var ingressNonStatementDispatchExempt = map[string]string{
 	"Engine.ReconcileConnection":    "internal transaction-outcome recovery",
 	"Engine.ReconcileOutcomes":      "internal transaction-outcome recovery",
 	"Engine.SetConnectionExposure":  "engine-authored backend reset as withdrawn sessions end; executes no client SQL",
+	"Engine.SessionCloseCursor":     "ends the cursor's read-only transaction with the engine's own COMMIT and its backend's reset; executes no client SQL",
 	"Engine.SetConnectionProfile":   "engine-authored backend reset as withdrawn sessions end; executes no client SQL",
 	"Engine.StartJanitor":           "engine-authored backend reset as swept sessions end; executes no client SQL",
 	"Engine.StartOutcomeReconciler": "internal transaction-outcome recovery loop",

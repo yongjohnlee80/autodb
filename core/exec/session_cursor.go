@@ -110,10 +110,19 @@ func (e *Engine) SessionQuery(ctx context.Context, token string, id SessionID, s
 	s.mu.Lock()
 	phase, hasCursor := s.txPhase, s.cursor != nil
 	s.mu.Unlock()
-	stmt, cerr := classifyFor(sqlText, connRow.Engine)
 	if hasCursor {
 		return nil, "", e.rejectSession(ctx, s, ident, ip, sqlText, ErrCursorOpen)
 	}
+	// Size before classification, as on every path, so the record equals what
+	// ran; a statement path repeats it, and a text that passed once passes.
+	admitErr, opErr := e.runSizeAdmission(admission.PhysSession, sqlText)
+	if opErr != nil {
+		return nil, "", opErr
+	}
+	if admitErr != nil {
+		return nil, "", e.rejectSession(ctx, s, ident, ip, sqlText, admitErr)
+	}
+	stmt, cerr := classifyFor(sqlText, connRow.Engine)
 	if cerr != nil || stmt.Class != ClassRead || phase != txNone || !connRow.Engine.SpeaksPostgresWire() {
 		res, rerr := e.sessionExecuteClaimed(ctx, ident, s, sqlText, ip, closeAfterRelease)
 		return res, "", rerr
@@ -122,13 +131,6 @@ func (e *Engine) SessionQuery(ctx context.Context, token string, id SessionID, s
 	pol, perr := e.resolveUnitPolicy(ctx, s.authority, s.userID, s.connID)
 	if perr != nil {
 		return nil, "", e.rejectSession(ctx, s, ident, ip, sqlText, perr)
-	}
-	admitErr, opErr := e.runSizeAdmission(admission.PhysSession, sqlText)
-	if opErr != nil {
-		return nil, "", opErr
-	}
-	if admitErr != nil {
-		return nil, "", e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
 
 	// The pin first: beginTx opens the transaction through a pinned handle when
@@ -331,6 +333,13 @@ func (e *Engine) cursorPage(ctx context.Context, s *session, pol UnitPolicy, con
 	runCtx, endRun := s.runContext(ctx)
 	defer endRun()
 
+	// One row past the page, less the one carried from the last: see carry.
+	want := n + 1
+	if c.carry != nil {
+		want--
+	}
+	ops = append(ops[:len(ops):len(ops)], golibpg.ExecuteOp(c.portal, uint32(want)))
+
 	start := e.now()
 	res = &Result{Verb: c.stmt.Verb, Class: c.stmt.Class}
 	more, completed, targetErr, runErr := e.cursorExchange(runCtx, pc, c, ops, n, res)
@@ -370,7 +379,8 @@ func (e *Engine) cursorPage(ctx context.Context, s *session, pol UnitPolicy, con
 	return res, more, false, nil
 }
 
-// cursorExchange is one page on the wire: the frames, one Flush, the backend's
+// cursorExchange is one page on the wire: the frames (cursorPage's, its
+// Execute last), one Flush, the backend's
 // answers through the Execute's terminal (PortalSuspended: the row limit;
 // CommandComplete or EmptyQueryResponse: the end; ErrorResponse: the
 // statement's error), then Sync, which is what leaves the connection idle for
@@ -382,8 +392,7 @@ func (e *Engine) cursorExchange(ctx context.Context, pc golibpg.PinnedConn, c *s
 	if c.carry != nil {
 		res.Rows = append(res.Rows, c.carry) // replaced below when another page follows
 	}
-	want := uint32(n - len(res.Rows) + 1)
-	for _, op := range append(ops, golibpg.ExecuteOp(c.portal, want)) {
+	for _, op := range ops {
 		if err := pc.Send(ctx, op); err != nil {
 			return false, false, nil, err
 		}

@@ -14,8 +14,9 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// LIVE CELLS FOR SESSION CURSORS (ADR 1792078052 §4.4, §5 cells 1 and 2),
-// gated on TEST_PGURL like the rest of the session cells.
+// LIVE CELLS FOR SESSION CURSORS: paging is exact, and a cursor's transaction
+// is the session's and never outlives it. Gated on TEST_PGURL like the rest of
+// the session cells.
 
 // sessionOf is the engine's own record of session sid.
 func sessionOf(t *testing.T, f *fixture, sid SessionID) *session {

@@ -1041,8 +1041,8 @@ func All() []Mutation {
 		{
 			Name: "pressure-the-protocol-bump-is-not-optional", Package: "./rpc/",
 			File:        "rpc/server.go",
-			Anchor:      "const Protocol int64 = 13",
-			Replacement: "const Protocol int64 = 12",
+			Anchor:      "const Protocol int64 = 14",
+			Replacement: "const Protocol int64 = 13",
 			Test:        "TestProtocol_TheVerbSurfaceIsPinned",
 			Fails:       "does not record",
 			Guarantee:   "that a verb cannot be added on an unchanged protocol number, which is exactly what happened to sys.pressure while a cell pinning the number to 5 stayed green",
