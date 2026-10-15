@@ -103,6 +103,15 @@ type capabilities struct {
 	dollarQuotedStrings   bool
 	nestedBlockComments   bool
 	escapeStringConstants bool
+
+	// SQLite's own: [ … ] is a delimited identifier running to the first ],
+	// and $name, @name, :name and #name are parameters whose name may end in
+	// a (…) suffix running to the first ). Inside either, a quote, a comment
+	// opener or a semicolon is a byte of the token, so an engine without the
+	// rule reads a string, a comment or a statement boundary where the target
+	// reads a name.
+	bracketQuotedIdentifiers bool
+	tclVariables             bool
 }
 
 // The table. Every Name declared in this package must appear here, and
@@ -124,6 +133,8 @@ var capsByName = map[Name]capabilities{
 		dollarQuotedStrings:          true,
 		nestedBlockComments:          true,
 		escapeStringConstants:        true,
+		bracketQuotedIdentifiers:     false,
+		tclVariables:                 false,
 	},
 	MySQL: {
 		backslashEscapes: true,
@@ -148,6 +159,13 @@ var capsByName = map[Name]capabilities{
 		declarativePartitioning:      false,
 		routineCatalog:               false,
 		postgresWire:                 false,
+		// Its comments do not nest — the first */ ends one — and `$` opens a
+		// parameter, never a string: `$$x` is the parameter named `$x`.
+		dollarQuotedStrings:      false,
+		nestedBlockComments:      false,
+		escapeStringConstants:    false,
+		bracketQuotedIdentifiers: true,
+		tclVariables:             true,
 	},
 }
 
@@ -269,3 +287,13 @@ func (n Name) NestedBlockComments() bool { return capsByName[n].nestedBlockComme
 // EscapeStringConstants reports whether E'…' is a string in which a backslash
 // escapes the next character.
 func (n Name) EscapeStringConstants() bool { return capsByName[n].escapeStringConstants }
+
+// BracketQuotedIdentifiers reports whether […] is a delimited identifier that
+// runs to the first ], with no escape inside it.
+func (n Name) BracketQuotedIdentifiers() bool { return capsByName[n].bracketQuotedIdentifiers }
+
+// TclVariables reports whether $name, @name, :name and #name are parameters
+// whose name may carry :: separators and end in a (…) suffix running to the
+// first ) — SQLite's Tcl-variable form, inside which any byte but whitespace
+// and ) belongs to the parameter.
+func (n Name) TclVariables() bool { return capsByName[n].tclVariables }

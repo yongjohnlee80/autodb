@@ -188,8 +188,9 @@ type FunctionCall struct {
 // PostgreSQL's, in which E'…' is a string whose backslashes escape.
 //
 // The engine's paths call classifyFor, never this: SQLite also answers false
-// to BackslashEscapes and has no E'…' strings, so a bool cannot name its
-// grammar.
+// to BackslashEscapes, yet its comments do not nest, `$` opens a parameter
+// rather than a string, and `[…]` is an identifier — so a bool cannot name
+// its grammar.
 //
 // Classification Pipeline:
 //
@@ -230,13 +231,13 @@ type FunctionCall struct {
 // refusal it replaces stood in for a guard that could not see inside a CTE,
 // and refused the guarded ones too.
 func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
-	st, _, _, err := scanScript(sqlText, backslashEscapes, !backslashEscapes, false)
+	st, _, _, err := scanScript(sqlText, boolRules(backslashEscapes), false)
 	return st, err
 }
 
 // classifyFor is Classify under the lexical rules of the named engine.
 func classifyFor(sqlText string, eng engine.Name) (Statement, error) {
-	st, _, _, err := scanScript(sqlText, eng.BackslashEscapes(), eng.EscapeStringConstants(), false)
+	st, _, _, err := scanScript(sqlText, rulesFor(eng), false)
 	return st, err
 }
 
@@ -251,21 +252,17 @@ func classifyFor(sqlText string, eng engine.Name) (Statement, error) {
 // Like Classify, the bool names MySQL or PostgreSQL; the engine's paths call
 // splitStatementsFor.
 func SplitStatements(sqlText string, backslashEscapes bool) ([]string, error) {
-	_, parts, _, err := scanScript(sqlText, backslashEscapes, !backslashEscapes, true)
+	_, parts, _, err := scanScript(sqlText, boolRules(backslashEscapes), true)
 	return parts, err
 }
 
 // splitStatementsFor is SplitStatements under the lexical rules of the named
 // engine.
 func splitStatementsFor(sqlText string, eng engine.Name) ([]string, error) {
-	_, parts, _, err := scanScript(sqlText, eng.BackslashEscapes(), eng.EscapeStringConstants(), true)
+	_, parts, _, err := scanScript(sqlText, rulesFor(eng), true)
 	return parts, err
 }
 
-// scanScript is the one tokenizer. With split=false it enforces the
-// one-statement rule (ErrMultiStatement) and returns the statement's
-// verdict; with split=true it records statement boundaries instead and
-// returns their texts.
 // stmtSpan is one statement's byte range in the original script, separators
 // included, so a run of statements can be dispatched as the EXACT bytes the
 // gate saw rather than a re-joined rendering of them.
@@ -275,12 +272,48 @@ type stmtSpan struct{ start, end int }
 // in the original text alongside its trimmed form. Same lexer, same
 // boundaries.
 func splitStatementSpans(sqlText string, eng engine.Name) ([]string, []stmtSpan, error) {
-	_, parts, spans, err := scanScript(sqlText, eng.BackslashEscapes(), eng.EscapeStringConstants(), true)
+	_, parts, spans, err := scanScript(sqlText, rulesFor(eng), true)
 	return parts, spans, err
 }
 
-// escapeStrings selects PostgreSQL's E'…' reading: see the E-prefix case.
-func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool) (Statement, []string, []stmtSpan, error) {
+// lexRules are the lexical rules a script is read by: each is one engine's
+// answer to a question about where a token — and so a statement — ends. A
+// rule the target does not have, applied anyway, ends a token somewhere the
+// target does not, and the text after it is then read as something else.
+type lexRules struct {
+	backslashEscapes bool // MySQL strings, `#` comments, /*! … */, `--` needs a space
+	escapeStrings    bool // E'…' strings in which a backslash escapes
+	dollarQuotes     bool // $$…$$ and $tag$…$tag$ strings
+	nestedComments   bool // /* … /* … */ … */ nests
+	bracketIdents    bool // […] is an identifier running to the first ]
+	tclParameters    bool // $name, @name, :name, #name, with a (…) suffix
+}
+
+// rulesFor is the named engine's lexical rules.
+func rulesFor(eng engine.Name) lexRules {
+	return lexRules{
+		backslashEscapes: eng.BackslashEscapes(),
+		escapeStrings:    eng.EscapeStringConstants(),
+		dollarQuotes:     eng.DollarQuotedStrings(),
+		nestedComments:   eng.NestedBlockComments(),
+		bracketIdents:    eng.BracketQuotedIdentifiers(),
+		tclParameters:    eng.TclVariables(),
+	}
+}
+
+// boolRules is what the bool forms name: true MySQL, false PostgreSQL.
+func boolRules(backslashEscapes bool) lexRules {
+	if backslashEscapes {
+		return rulesFor(engine.MySQL)
+	}
+	return rulesFor(engine.Postgres)
+}
+
+// scanScript is the one tokenizer. With split=false it enforces the
+// one-statement rule (ErrMultiStatement) and returns the statement's
+// verdict; with split=true it records statement boundaries instead and
+// returns their texts.
+func scanScript(sqlText string, lex lexRules, split bool) (Statement, []string, []stmtSpan, error) {
 	var st Statement
 	var parts []string
 	var spans []stmtSpan
@@ -368,7 +401,7 @@ func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool
 			// comment. Postgres/sqlite treat any `--` as a comment. Modeling
 			// the target's rule prevents a `--`-hidden tail on MySQL from
 			// being wrongly commented out.
-			if backslashEscapes && i+2 < n && !isSpace(sqlText[i+2]) {
+			if lex.backslashEscapes && i+2 < n && !isSpace(sqlText[i+2]) {
 				if err := content(); err != nil {
 					return st, parts, spans, err
 				}
@@ -379,7 +412,7 @@ func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool
 				i++
 			}
 
-		case c == '#' && backslashEscapes:
+		case c == '#' && lex.backslashEscapes:
 			for i < n && sqlText[i] != '\n' {
 				i++
 			}
@@ -389,7 +422,7 @@ func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool
 			// the body, so its tokens are live, not commented out. Skip only
 			// the opener + optional version digits; the matching */ is
 			// handled as whitespace below.
-			if backslashEscapes && i+2 < n && sqlText[i+2] == '!' {
+			if lex.backslashEscapes && i+2 < n && sqlText[i+2] == '!' {
 				j := i + 3
 				for j < n && sqlText[j] >= '0' && sqlText[j] <= '9' {
 					j++
@@ -398,10 +431,12 @@ func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool
 				i = j
 				continue
 			}
-			// PostgreSQL nests block comments; MySQL does not. Model the
-			// target so a MySQL `/* a /* b */` doesn't leave a live tail
-			// (found in review).
-			nests := !backslashEscapes
+			// PostgreSQL nests block comments; MySQL and SQLite do not, and
+			// there the FIRST */ ends the comment. Model the target: read as
+			// nesting, SQLite's `SELECT 1 /* /* */ ; DROP TABLE t; -- */` was
+			// one statement here — the comment swallowing the DROP — and two
+			// on the server, which runs every statement a call carries.
+			nests := lex.nestedComments
 			level, j := 1, i+2
 			for j < n && level > 0 {
 				switch {
@@ -428,7 +463,7 @@ func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool
 			if err := content(); err != nil {
 				return st, parts, spans, err
 			}
-			j, err := scanQuoted(sqlText, i, c, backslashEscapes)
+			j, err := scanQuoted(sqlText, i, c, lex.backslashEscapes)
 			if err != nil {
 				return st, parts, spans, err
 			}
@@ -450,7 +485,7 @@ func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool
 			w1, w2, w3 = "", "", ""
 			i = j
 
-		case escapeStrings && (c == 'E' || c == 'e') && i+1 < n && sqlText[i+1] == '\'' &&
+		case lex.escapeStrings && (c == 'E' || c == 'e') && i+1 < n && sqlText[i+1] == '\'' &&
 			(i == 0 || !isWordChar(sqlText[i-1])):
 			// A PostgreSQL escape string. Inside E'…' a backslash escapes the
 			// next byte, so E'\'' is the one-character string "'" and the
@@ -475,7 +510,7 @@ func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool
 			w1, w2, w3 = "", "", ""
 			i = j
 
-		case c == '$' && !backslashEscapes:
+		case c == '$' && lex.dollarQuotes:
 			if err := content(); err != nil {
 				return st, parts, spans, err
 			}
@@ -488,6 +523,43 @@ func scanScript(sqlText string, backslashEscapes, escapeStrings bool, split bool
 			}
 			w1, w2, w3 = "", "", ""
 			identLive, qualPending = false, false
+
+		case lex.tclParameters && (c == '$' || c == '@' || c == ':' || c == '#'):
+			// A SQLite parameter. Its name may end in a (…) suffix that runs
+			// to the first ) with nothing escaped inside it, so a quote, a
+			// comment opener or a semicolon there is a byte of the parameter.
+			// Read as an operator and a word, `SELECT $a(x'y); DROP TABLE t;
+			// --'` was one statement here, its quote opening a string that ran
+			// to the end, and two on the server. And since `$` is a name
+			// character, `$$x` is a parameter too: SQLite has no dollar-quoted
+			// strings, and `$$x;y$$` is two statements there.
+			if err := content(); err != nil {
+				return st, parts, spans, err
+			}
+			j, err := scanTclParameter(sqlText, i)
+			if err != nil {
+				return st, parts, spans, err
+			}
+			w1, w2, w3 = "", "", ""
+			identLive, qualPending = false, false
+			i = j
+
+		case c == '[' && lex.bracketIdents:
+			// A SQLite delimited identifier, which runs to the FIRST ] with
+			// no escape inside it. Read as a lone [, `SELECT 1 AS [a'b];
+			// DROP TABLE t; --'` was one statement here — the quote opening a
+			// string that ran to the end — and two on the server; and the
+			// semicolon in `[a;b]` is a byte of a name, not a boundary.
+			if err := content(); err != nil {
+				return st, parts, spans, err
+			}
+			end := strings.IndexByte(sqlText[i+1:], ']')
+			if end < 0 {
+				return st, parts, spans, fmt.Errorf("%w: unterminated \"[\"-quoted identifier", ErrMalformedStatement)
+			}
+			w1, w2, w3 = "", "", ""
+			identLive, qualPending = false, false
+			i += end + 2
 
 		case c == '(':
 			if err := content(); err != nil {
@@ -760,6 +832,45 @@ func scanDollarQuote(s string, i int) (int, bool, error) {
 		return 0, false, fmt.Errorf("%w: unterminated dollar-quoted region %s", ErrMalformedStatement, delim)
 	}
 	return j + 1 + end + len(delim), true, nil
+}
+
+// scanTclParameter advances past a SQLite named parameter opened at s[i] by
+// $, @, : or #, read as SQLite's tokenizer reads one: name characters and ::
+// separators, then — after at least one name character — an optional (…)
+// suffix ending at the first ), which may not contain whitespace. A prefix
+// with no name, and a suffix cut off by whitespace or the end of the text,
+// are tokens SQLite refuses; so does this.
+func scanTclParameter(s string, i int) (int, error) {
+	n := len(s)
+	named := false
+	j := i + 1
+	for j < n {
+		c := s[j]
+		if isWordChar(c) {
+			named = true
+			j++
+			continue
+		}
+		if c == ':' && j+1 < n && s[j+1] == ':' {
+			j += 2
+			continue
+		}
+		if c == '(' && named {
+			k := j + 1
+			for k < n && !isSpace(s[k]) && s[k] != ')' {
+				k++
+			}
+			if k >= n || s[k] != ')' {
+				return 0, fmt.Errorf("%w: unterminated parameter name", ErrMalformedStatement)
+			}
+			return k + 1, nil
+		}
+		break
+	}
+	if !named {
+		return 0, fmt.Errorf("%w: parameter %q has no name", ErrMalformedStatement, s[i:i+1])
+	}
+	return j, nil
 }
 
 func isSpace(c byte) bool {
