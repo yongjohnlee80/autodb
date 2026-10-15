@@ -56,6 +56,10 @@ type sessionCursor struct {
 	sql    string
 	portal string // named, so a simple Query or an unnamed portal cannot destroy it
 	fields []golibpg.ExtendedFieldDescription
+	// carry is the row read past the last page: each page asks for one row
+	// more than it returns, because PostgreSQL suspends a portal at its row
+	// limit even when no row follows, and More must say whether one does.
+	carry []any
 }
 
 // cursorOpen reports whether the session has an open cursor.
@@ -164,9 +168,12 @@ func (e *Engine) SessionQuery(ctx context.Context, token string, id SessionID, s
 	cur := &sessionCursor{id: cid, txID: s.txID, stmt: stmt, sql: sqlText, portal: string(cid)}
 	s.mu.Unlock()
 
+	// The unnamed statement: a named one would outlive the transaction on the
+	// backend, and the portal bound from it lives to the transaction's end
+	// whatever later replaces the unnamed statement (nothing does, here).
 	open := []golibpg.ExtendedOp{
-		golibpg.ParseOp(cur.portal, sqlText, nil),
-		golibpg.BindOp(cur.portal, cur.portal, nil, nil, nil),
+		golibpg.ParseOp("", sqlText, nil),
+		golibpg.BindOp(cur.portal, "", nil, nil, nil),
 		golibpg.DescribePortalOp(cur.portal),
 	}
 	res, more, lost, rerr := e.cursorPage(ctx, s, pol, connRow, cur, open, page, ip)
@@ -364,13 +371,20 @@ func (e *Engine) cursorPage(ctx context.Context, s *session, pol UnitPolicy, con
 }
 
 // cursorExchange is one page on the wire: the frames, one Flush, the backend's
-// answers through the Execute's terminal (PortalSuspended: more rows;
+// answers through the Execute's terminal (PortalSuspended: the row limit;
 // CommandComplete or EmptyQueryResponse: the end; ErrorResponse: the
 // statement's error), then Sync, which is what leaves the connection idle for
-// the transaction's own finalizers between pages.
+// the transaction's own finalizers between pages. The page is the carried row
+// and up to n-1 more; one row past n is carried to the next page, and more is
+// whether there was one.
 func (e *Engine) cursorExchange(ctx context.Context, pc golibpg.PinnedConn, c *sessionCursor,
 	ops []golibpg.ExtendedOp, n int, res *Result) (more, completed bool, targetErr, runErr error) {
-	for _, op := range append(ops, golibpg.ExecuteOp(c.portal, uint32(n))) {
+	if c.carry != nil {
+		res.Rows = append(res.Rows, c.carry)
+		c.carry = nil
+	}
+	want := uint32(n - len(res.Rows) + 1)
+	for _, op := range append(ops, golibpg.ExecuteOp(c.portal, want)) {
 		if err := pc.Send(ctx, op); err != nil {
 			return false, false, nil, err
 		}
@@ -391,7 +405,6 @@ read:
 		case "DataRow":
 			res.Rows = append(res.Rows, decodeRow(m, c.fields, msg.Values))
 		case "PortalSuspended":
-			more = true
 			break read
 		case "CommandComplete", "EmptyQueryResponse":
 			completed = true
@@ -408,6 +421,9 @@ read:
 	}
 	if _, err := pc.Sync(ctx); err != nil {
 		return false, false, targetErr, err
+	}
+	if len(res.Rows) > n {
+		c.carry, res.Rows, more = res.Rows[n], res.Rows[:n], true
 	}
 	return more, completed, targetErr, nil
 }

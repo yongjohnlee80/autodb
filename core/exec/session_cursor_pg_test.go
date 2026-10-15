@@ -171,6 +171,18 @@ func TestSessionCursorPG_AWholeFirstPageLeavesNoCursor(t *testing.T) {
 		t.Errorf("rows %d, More %v, cursor %q; want 5 rows, no More, no cursor", len(res.Rows), res.More, cur)
 	}
 	assertCursorGone(t, s, "a whole first page")
+
+	// PostgreSQL suspends a portal at its row limit even with no row after it:
+	// a last page that is exactly full still says there is no more.
+	_, cur = openCursor(t, f, sid, seriesSQL(20), 10)
+	last, err := f.eng.SessionFetch(context.Background(), f.rootTok, sid, cur, 10, testIP)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if got := rowInts(t, last); len(got) != 10 || got[0] != 11 || last.More {
+		t.Errorf("an exactly full last page: rows %v, More %v; want 11..20 and no More", got, last.More)
+	}
+	assertCursorGone(t, s, "an exactly full last page")
 }
 
 // A write, and a read inside the caller's own transaction, run as statements.
@@ -385,9 +397,11 @@ func TestSessionCursorPG_TheBackendGoesBackClean(t *testing.T) {
 		t.Error("the release gate did not return the cursor's backend to the pool")
 	}
 
-	const probe = "SELECT pg_backend_pid(), (SELECT count(*) FROM pg_cursors), " +
-		"(SELECT count(*) FROM pg_prepared_statements), current_setting('idle_in_transaction_session_timeout'), " +
-		"current_setting('transaction_read_only')"
+	// The probe's own portal and pgx's statement for it are on the backend
+	// too, so only the cursor's names count.
+	const probe = "SELECT pg_backend_pid(), (SELECT count(*) FROM pg_cursors WHERE name <> ''), " +
+		"(SELECT count(*) FROM pg_prepared_statements WHERE name LIKE 'cur-%'), " +
+		"current_setting('idle_in_transaction_session_timeout'), current_setting('transaction_read_only')"
 	for try := 0; try < 40; try++ {
 		res, err := f.eng.Execute(ctx, f.rootTok, connID, probe, testIP)
 		if err != nil {
