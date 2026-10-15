@@ -169,7 +169,11 @@ func (e *Engine) SessionQuery(ctx context.Context, token string, id SessionID, s
 		golibpg.BindOp(cur.portal, cur.portal, nil, nil, nil),
 		golibpg.DescribePortalOp(cur.portal),
 	}
-	res, more, rerr := e.cursorPage(ctx, s, pol, connRow, cur, open, page, ip)
+	res, more, lost, rerr := e.cursorPage(ctx, s, pol, connRow, cur, open, page, ip)
+	if lost {
+		*closeAfterRelease = s.transferClose(ip, reasonRawFaceLost)
+		return nil, "", rerr
+	}
 	if rerr != nil {
 		e.endCursorTx(ctx, s, ident, ip, false)
 		return nil, "", rerr
@@ -201,7 +205,7 @@ func (e *Engine) SessionFetch(ctx context.Context, token string, id SessionID, c
 	if err != nil {
 		return nil, err
 	}
-	release, _, err := e.claimSession(ctx, s)
+	release, closeAfterRelease, err := e.claimSession(ctx, s)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +227,11 @@ func (e *Engine) SessionFetch(ctx context.Context, token string, id SessionID, c
 		e.endCursorTx(ctx, s, ident, ip, false)
 		return nil, e.rejectSession(ctx, s, ident, ip, c.sql, perr)
 	}
-	res, more, rerr := e.cursorPage(ctx, s, pol, connRow, c, nil, n, ip)
+	res, more, lost, rerr := e.cursorPage(ctx, s, pol, connRow, c, nil, n, ip)
+	if lost {
+		*closeAfterRelease = s.transferClose(ip, reasonRawFaceLost)
+		return nil, rerr
+	}
 	if rerr != nil {
 		e.endCursorTx(ctx, s, ident, ip, false)
 		return nil, rerr
@@ -277,39 +285,47 @@ func (e *Engine) cursorOf(ctx context.Context, s *session, cur CursorID, ipAddr 
 // n rows, reads the group through the Execute's terminal, and Syncs. Each page
 // is re-admitted against the statement classified at open, with a fresh
 // policy, and is one attempt in the history, suspended while rows remain.
+//
+// lost reports a wire that failed or was cancelled mid-exchange: the
+// transaction cannot be ended on it, so the caller closes the session, whose
+// close rolls back and releases the backend. A target's ErrorResponse is not a
+// lost wire: Sync ends it, and the caller rolls the transaction back.
 func (e *Engine) cursorPage(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection,
-	c *sessionCursor, ops []golibpg.ExtendedOp, n int, ipAddr string) (*Result, bool, error) {
+	c *sessionCursor, ops []golibpg.ExtendedOp, n int, ipAddr string) (res *Result, more, lost bool, err error) {
 	pc := s.pinnedConn()
 	if pc == nil {
-		return nil, false, ErrNoSuchCursor
+		return nil, false, false, ErrNoSuchCursor
+	}
+	if h := e.hookCursorWire; h != nil {
+		pc = h(pc)
 	}
 	admitErr, opErr := e.runWireGrammarAdmission(s)
 	if opErr == nil && admitErr == nil {
 		admitErr, opErr = e.runClassAdmission(pol, admission.PhysSession, c.stmt, c.sql)
 	}
 	if opErr != nil {
-		return nil, false, opErr
+		return nil, false, false, opErr
 	}
 	if admitErr != nil {
-		return nil, false, e.rejectSession(ctx, s, pol.Ident, ipAddr, c.sql, admitErr)
+		return nil, false, false, e.rejectSession(ctx, s, pol.Ident, ipAddr, c.sql, admitErr)
 	}
 	s.mu.Lock()
 	phase, txID := s.txPhase, s.txID
 	s.mu.Unlock()
 	if phase != txActive || txID != c.txID {
-		return nil, false, ErrNoSuchCursor
+		return nil, false, false, ErrNoSuchCursor
 	}
 
 	tag := s.auditTag()
 	att, aerr := e.recordAttemptTagged(ctx, s, pol.Ident, connRow.ID, ipAddr, c.sql, txID, tag)
 	if aerr != nil {
-		return nil, false, aerr
+		return nil, false, false, aerr
 	}
 	runCtx, endRun := s.runContext(ctx)
 	defer endRun()
 
 	start := e.now()
-	res := &Result{Verb: c.stmt.Verb, Class: c.stmt.Class}
+	res = &Result{Verb: c.stmt.Verb, Class: c.stmt.Class}
 	more, completed, targetErr, runErr := e.cursorExchange(runCtx, pc, c, ops, n, res)
 	res.Duration = e.now().Sub(start)
 
@@ -324,20 +340,27 @@ func (e *Engine) cursorPage(ctx context.Context, s *session, pol UnitPolicy, con
 	}
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	if werr := e.writeOutcomeSuspended(recCtx, pol.Ident, connRow.ID, ipAddr, att, res.Duration,
-		int64(len(res.Rows)), status, errText, txID, tag, more); werr != nil {
-		return nil, false, werr
+	werr := e.writeOutcomeSuspended(recCtx, pol.Ident, connRow.ID, ipAddr, att, res.Duration,
+		int64(len(res.Rows)), status, errText, txID, tag, more)
+	if h := e.hookCursorRecord; h != nil && werr == nil {
+		werr = h()
 	}
 	stmtErr := runErr
 	if targetErr != nil {
 		stmtErr = targetErr
 	}
 	s.noteStatementOutcome(stmtErr)
+	if runErr != nil {
+		return nil, false, true, runErr
+	}
+	if werr != nil {
+		return nil, false, false, werr
+	}
 	if stmtErr != nil {
-		return nil, false, stmtErr
+		return nil, false, false, stmtErr
 	}
 	res.More = more
-	return res, more, nil
+	return res, more, false, nil
 }
 
 // cursorExchange is one page on the wire: the frames, one Flush, the backend's

@@ -112,6 +112,11 @@ type Engine struct {
 	// transaction admission is held and before anything reaches the target.
 	// Test-only: it is how the shutdown interleaving is driven deterministically.
 	hookAfterTxAdmit func()
+	// hookCursorWire substitutes the handle a cursor page runs on, and
+	// hookCursorRecord fails a page's outcome write: test-only, so a cell can
+	// fail a page at each step without a target that misbehaves.
+	hookCursorWire   func(golibpg.PinnedConn) golibpg.PinnedConn
+	hookCursorRecord func() error
 	// hookBeforeWireAdmit pauses a wire open after its durable exposure read
 	// but before its registry reservation. Test-only race-window control.
 	hookBeforeWireAdmit func()
