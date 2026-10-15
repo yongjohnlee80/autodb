@@ -707,7 +707,7 @@ func runGateBehaviorCell(t *testing.T, tc gateBehaviorCase, surface string) erro
 			_, err := Classify(tc.sql, false)
 			return err
 		case "wire simple":
-			parts, _, err := splitStatementSpans(tc.sql, false)
+			parts, _, err := splitStatementSpans(tc.sql, engine.Postgres)
 			if errors.Is(err, ErrEmptyStatement) || len(parts) == 0 {
 				return nil
 			}

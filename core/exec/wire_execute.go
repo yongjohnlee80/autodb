@@ -137,7 +137,7 @@ func (e *Engine) executeSessionUnit(
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
 
-	stmt, cerr := Classify(sqlText, connRow.Engine.BackslashEscapes())
+	stmt, cerr := classifyFor(sqlText, connRow.Engine)
 	if cerr != nil {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, cerr)
 	}

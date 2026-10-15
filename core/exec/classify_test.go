@@ -2,6 +2,13 @@ package exec
 
 import (
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/core/engine"
@@ -138,6 +145,29 @@ func TestClassify(t *testing.T) {
 		// string ends at the backslash-quote, exposing a second statement.
 		{name: "mysql backslash swallows", sql: `SELECT 'a\'; DROP TABLE t -- ' `, mysql: true, verb: "SELECT", class: ClassRead},
 		{name: "pg backslash is literal", sql: `SELECT 'a\'; DROP TABLE t --'`, err: ErrMultiStatement},
+		{name: "pg backslash is literal before a second statement", sql: `SELECT 'C:\'; SELECT 2`, err: ErrMultiStatement},
+
+		// PostgreSQL escape strings: inside E'…' a backslash escapes the next
+		// byte, and the server reads the string to where IT ends.
+		{name: "pg estring escaped quote exposes second statement", sql: `SELECT E'\''; DROP TABLE t; --'`, err: ErrMultiStatement},
+		{name: "pg estring escaped quote hides semicolon", sql: `SELECT E'a\'b;c'`, verb: "SELECT", class: ClassRead},
+		{name: "pg lowercase estring", sql: `SELECT e'\''; DROP TABLE t`, err: ErrMultiStatement},
+		{name: "pg lowercase estring hides semicolon", sql: `SELECT e'a\';b'`, verb: "SELECT", class: ClassRead},
+		{name: "pg empty estring", sql: `SELECT E''`, verb: "SELECT", class: ClassRead},
+		{name: "pg estring doubled quote", sql: `SELECT E'it''s; fine'`, verb: "SELECT", class: ClassRead},
+		{name: "pg estring escaped backslash ends at the quote", sql: `SELECT E'\\'; DROP TABLE t`, err: ErrMultiStatement},
+		{name: "pg estring backslash escapes its closing quote", sql: `SELECT E'abc\'`, err: ErrMalformedStatement},
+		{name: "pg estring guards where", sql: `DELETE FROM t WHERE k = E'\'' -- '`, verb: "DELETE", class: ClassWrite, where: true},
+		// Only an E that begins a token opens one. `name` is a type, so
+		// `name'\'` is a standard string on the server; the e after a digit
+		// is not a prefix either.
+		{name: "pg identifier ending in e is not a prefix", sql: `SELECT name'\'; DROP TABLE t`, err: ErrMultiStatement},
+		{name: "pg identifier ending in e reads a standard string", sql: `SELECT name'C:\'`, verb: "SELECT", class: ClassRead},
+		{name: "pg e after a digit is not a prefix", sql: `SELECT 1e'\'; DROP TABLE t`, err: ErrMultiStatement},
+		{name: "pg e before a quoted identifier is a word", sql: `SELECT e"x" FROM t`, verb: "SELECT", class: ClassRead},
+		// MySQL's reading is unchanged: there every string escapes, and E is
+		// an identifier.
+		{name: "mysql estring reads as before", sql: `SELECT E'a\';b'`, mysql: true, verb: "SELECT", class: ClassRead},
 	}
 
 	for _, tc := range cases {
@@ -209,5 +239,106 @@ func TestBackslashEscapesReachesTheLexer(t *testing.T) {
 	if _, err := SplitStatements(script, engine.Postgres.BackslashEscapes()); err == nil {
 		t.Error("postgres read the script as mysql does; the two engines are " +
 			"selecting the same grammar, so the predicate distinguishes nothing")
+	}
+}
+
+// AN E-STRING IS ONE STRING TOKEN, NOT A WORD FOLLOWED BY ONE.
+//
+// The E is the literal's first byte. Read as a word it would take a statement
+// body's verb position, or stand as a callee candidate, where an ordinary
+// string never does — so every fact the classifier reports must be the same
+// with E'…' as with '…' in the same place. The escape string carries an
+// escaped quote, so a reading that ends it early has a different tail.
+func TestClassify_EscapeStringReadsAsAString(t *testing.T) {
+	t.Parallel()
+	for _, tmpl := range []string{
+		"UPDATE t SET a = %s WHERE id = 1",
+		"SELECT lower(%s) FROM t",
+		"WITH d AS (DELETE FROM t WHERE k = %s RETURNING id) SELECT * FROM d",
+		"WITH d AS (%s) SELECT 1",
+		"INSERT INTO t (a) VALUES (%s)",
+	} {
+		plain := fmt.Sprintf(tmpl, "'x'")
+		escaped := fmt.Sprintf(tmpl, `E'x\'y'`)
+		t.Run(escaped, func(t *testing.T) {
+			t.Parallel()
+			want, werr := Classify(plain, false)
+			got, gerr := Classify(escaped, false)
+			if (werr == nil) != (gerr == nil) || (werr != nil && werr.Error() != gerr.Error()) {
+				t.Fatalf("errors differ: plain %v, escape string %v", werr, gerr)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("escape string read as %+v, the plain string as %+v", got, want)
+			}
+		})
+	}
+}
+
+// THE ENGINE'S GRAMMAR NAMES THE E'…' RULE, AND ONLY POSTGRESQL HAS IT.
+//
+// SQLite answers false to BackslashEscapes as PostgreSQL does, but it has no
+// escape strings: `e'\'` there is a column followed by the standard string
+// '\', and its driver runs every statement a call carries. Read with
+// PostgreSQL's rule, the script below is one unterminated string; read with
+// SQLite's own it is two statements, and it must be read as SQLite reads it.
+func TestEscapeStringRuleFollowsTheEngine(t *testing.T) {
+	t.Parallel()
+	const script = `SELECT e'\'; SELECT 2`
+
+	if _, err := splitStatementsFor(script, engine.Postgres); !errors.Is(err, ErrMalformedStatement) {
+		t.Errorf("postgres: err = %v, want ErrMalformedStatement — the backslash escapes the "+
+			"closing quote inside E'…', so the literal never ends", err)
+	}
+	parts, err := splitStatementsFor(script, engine.SQLite)
+	if err != nil || len(parts) != 2 {
+		t.Errorf("sqlite: got %q, %v, want two statements — SQLite has no escape strings", parts, err)
+	}
+	if _, err := classifyFor(script, engine.SQLite); !errors.Is(err, ErrMultiStatement) {
+		t.Errorf("sqlite: Classify err = %v, want ErrMultiStatement", err)
+	}
+	if _, err := classifyFor(`SELECT E'\''; SELECT 2`, engine.Postgres); !errors.Is(err, ErrMultiStatement) {
+		t.Errorf("postgres: Classify err = %v, want ErrMultiStatement", err)
+	}
+}
+
+// THE ENGINE'S PATHS READ STATEMENTS BY THE ENGINE, NEVER BY A BOOL.
+//
+// Classify and SplitStatements take a bool, and false names PostgreSQL — so a
+// production caller passing BackslashEscapes() for a SQLite target would read
+// it with a rule SQLite does not have. The source is walked rather than
+// grepped, so prose naming the functions does not count as a call.
+func TestProductionCallersClassifyByEngine(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("parsing core/exec: %v", err)
+	}
+	byEngine := 0
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			ast.Inspect(file, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				switch id.Name {
+				case "Classify", "SplitStatements":
+					t.Errorf("%s: %s reads by a bool; call the engine form so the "+
+						"target's own lexical rules apply", fset.Position(call.Pos()), id.Name)
+				case "classifyFor", "splitStatementsFor", "splitStatementSpans":
+					byEngine++
+				}
+				return true
+			})
+		}
+	}
+	if byEngine == 0 {
+		t.Fatal("no engine-form call was found; the walk observed nothing")
 	}
 }
