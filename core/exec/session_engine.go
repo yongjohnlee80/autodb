@@ -137,6 +137,19 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 	if s.get() != sessOpen {
 		return nil, ErrSessionNotFound
 	}
+	return e.sessionExecuteClaimed(ctx, ident, s, sqlText, ip, closeAfterRelease)
+}
+
+// sessionExecuteClaimed is SessionExecute after the claim and the state
+// check: the part SessionQuery shares for a statement that opens no cursor.
+func (e *Engine) sessionExecuteClaimed(ctx context.Context, ident auth.Identity, s *session, sqlText, ip string, closeAfterRelease *bool) (*Result, error) {
+	// A cursor IS the session's transaction: nothing else may run in it.
+	if s.cursorOpen() {
+		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, ErrCursorOpen)
+	}
+	// A cursor's pin whose transaction ended some other way goes back before
+	// this statement can run on it.
+	e.releaseStaleCursorPin(ctx, s, ip)
 
 	// Resolve authority ONCE after the slot/state check and carry that exact
 	// answer through preflight, control routing, authorization and execution.

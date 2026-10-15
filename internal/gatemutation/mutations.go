@@ -1078,8 +1078,8 @@ func All() []Mutation {
 		{
 			Name: "pressure-the-shipped-frontend-agrees", Package: "./rpc/",
 			File:        "lua/autodb/client.lua",
-			Anchor:      "M.PROTOCOL = 13",
-			Replacement: "M.PROTOCOL = 12",
+			Anchor:      "M.PROTOCOL = 14",
+			Replacement: "M.PROTOCOL = 13",
 			Test:        "TestProtocol_TheShippedFrontendSpeaksTheSameNumber",
 			Fails:       "refuse each other",
 			Guarantee:   "that the plugin and the daemon built from one commit speak one number, since a mismatch between them produces the message a STALE pairing gives and sends the user to refresh a binary that is already correct",

@@ -15,7 +15,7 @@ import (
 
 // thisBumpAdded is the verb the CURRENT protocol number bought. Update it with
 // the number, in the same change: the pair is what makes a bump accountable.
-const thisBumpAdded = "notes.list"
+const thisBumpAdded = "exec.session_query"
 
 // adminOnlyVerbs are the verbs whose answer describes the whole server, so
 // only an admin reads them: sys.inflight (what a restart would interrupt,
@@ -185,12 +185,21 @@ func TestProtocol_AClientAtTheCurrentVersionReachesTheNewVerb(t *testing.T) {
 	f := newFixture(t, rpc.WithNotesDir(t.TempDir()))
 	c := f.session(t) // hello at rpc.Protocol
 
-	errVal, result := c.call(thisBumpAdded, f.rootTok, int64(1))
-	if errVal != nil {
-		t.Fatalf("a current client was refused %s: %#v", thisBumpAdded, errVal)
+	// The verb is reached when its own refusal answers (no such session), not
+	// the server's answer for a method it does not have.
+	code := func(v any) any {
+		if m, ok := v.(map[string]any); ok {
+			return m["code"]
+		}
+		return v
 	}
-	if _, ok := result.([]any); !ok {
-		t.Fatalf("%s result shape: %#v; want a list", thisBumpAdded, result)
+	unknownErr, _ := c.call("no.such.verb", f.rootTok)
+	errVal, _ := c.call(thisBumpAdded, f.rootTok, "no-such-session", "SELECT 1", int64(10))
+	if errVal == nil || unknownErr == nil {
+		t.Fatalf("%s on no session answered %#v; an unknown method %#v", thisBumpAdded, errVal, unknownErr)
+	}
+	if fmt.Sprint(code(errVal)) == fmt.Sprint(code(unknownErr)) {
+		t.Fatalf("a current client was answered as for an unknown method: %#v", errVal)
 	}
 }
 

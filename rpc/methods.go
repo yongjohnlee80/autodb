@@ -268,6 +268,10 @@ var publicErrs = []struct {
 	{exec.ErrNoOpenTx, CodeTxState},
 	{exec.ErrTxAborted, CodeTxState},
 	{exec.ErrTxChainUnsupported, CodeTxState},
+	// A cursor holds the session's transaction; the next move is to fetch it
+	// to its end or close it, the same kind of answer as the states above.
+	{exec.ErrCursorOpen, CodeTxState},
+	{exec.ErrNoSuchCursor, CodeTxState},
 
 	// The session-state gate (SET / LOCK). These are refusals of a specific
 	// statement, like the classification gate above, so they carry its code
@@ -1920,6 +1924,90 @@ func (s *Server) register() {
 			return nil, s.wireErrFor(req, rerr)
 		}
 		return resultMap(res), nil
+	})
+
+	// Session cursors (protocol 14). A read on a PostgreSQL session with no
+	// transaction of its own opens a cursor: the first page, and the cursor's
+	// id while rows remain. The cursor is its own read-only transaction, so the
+	// session takes nothing else until it is fetched to its end or closed.
+	s.handle("exec.session_query", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 4); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		sid, err := argStr(req.Params, 1, "session_id")
+		if err != nil {
+			return nil, err
+		}
+		sqlText, err := argStr(req.Params, 2, "sql")
+		if err != nil {
+			return nil, err
+		}
+		page, err := argInt(req.Params, 3, "page")
+		if err != nil {
+			return nil, err
+		}
+		res, cur, qerr := s.eng.SessionQuery(ctx, token, exec.SessionID(sid), sqlText, peerIP(req), int(page))
+		if qerr != nil {
+			return nil, s.wireErrFor(req, qerr)
+		}
+		out := resultMap(res)
+		if cur != "" {
+			out["cursor"] = string(cur)
+		}
+		return out, nil
+	})
+
+	s.handle("exec.session_fetch", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 4); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		sid, err := argStr(req.Params, 1, "session_id")
+		if err != nil {
+			return nil, err
+		}
+		cur, err := argStr(req.Params, 2, "cursor")
+		if err != nil {
+			return nil, err
+		}
+		n, err := argInt(req.Params, 3, "n")
+		if err != nil {
+			return nil, err
+		}
+		res, ferr := s.eng.SessionFetch(ctx, token, exec.SessionID(sid), exec.CursorID(cur), int(n), peerIP(req))
+		if ferr != nil {
+			return nil, s.wireErrFor(req, ferr)
+		}
+		return resultMap(res), nil
+	})
+
+	s.handle("exec.session_cursor_close", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		sid, err := argStr(req.Params, 1, "session_id")
+		if err != nil {
+			return nil, err
+		}
+		cur, err := argStr(req.Params, 2, "cursor")
+		if err != nil {
+			return nil, err
+		}
+		if cerr := s.eng.SessionCloseCursor(ctx, token, exec.SessionID(sid), exec.CursorID(cur), peerIP(req)); cerr != nil {
+			return nil, s.wireErrFor(req, cerr)
+		}
+		return map[string]any{"closed": true}, nil
 	})
 
 	// tx.status is the poll verb for asynchronous outcome delivery.
