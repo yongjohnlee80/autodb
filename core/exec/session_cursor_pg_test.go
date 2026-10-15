@@ -590,15 +590,26 @@ func TestSessionCursorPG_TheOpenedRowPrecedesTheTargetsBegin(t *testing.T) {
 // failingWire is a cursor's handle with one step made to fail.
 type failingWire struct {
 	golibpg.PinnedConn
-	onReceive func()
-	syncErr   error
+	cancel  func() // the caller's cancel, pressed at the first Receive
+	syncErr error
 }
 
+// Receive presses the caller's cancel and answers once the page's own context
+// has seen it, as a Receive bounded by that context does. The cancel reaches
+// the page's context asynchronously, so a real Receive started at once could
+// still win the race and answer a row; waiting makes the cell observe the
+// cancel every time.
 func (w *failingWire) Receive(ctx context.Context) (golibpg.ExtendedMessage, error) {
-	if w.onReceive != nil {
-		w.onReceive()
+	if w.cancel == nil {
+		return w.PinnedConn.Receive(ctx)
 	}
-	return w.PinnedConn.Receive(ctx)
+	w.cancel()
+	select {
+	case <-ctx.Done():
+		return golibpg.ExtendedMessage{}, ctx.Err()
+	case <-time.After(5 * time.Second):
+		return golibpg.ExtendedMessage{}, errors.New("the caller's cancel never reached the page's context")
+	}
 }
 
 func (w *failingWire) Sync(ctx context.Context) (byte, error) {
@@ -691,7 +702,7 @@ func TestSessionCursorPG_ALostWireClosesTheSession(t *testing.T) {
 		wrap func(cancel func()) func(golibpg.PinnedConn) golibpg.PinnedConn
 	}{
 		{"a cancelled fetch", func(cancel func()) func(golibpg.PinnedConn) golibpg.PinnedConn {
-			return func(pc golibpg.PinnedConn) golibpg.PinnedConn { return &failingWire{PinnedConn: pc, onReceive: cancel} }
+			return func(pc golibpg.PinnedConn) golibpg.PinnedConn { return &failingWire{PinnedConn: pc, cancel: cancel} }
 		}},
 		{"a failed Sync", func(func()) func(golibpg.PinnedConn) golibpg.PinnedConn {
 			return func(pc golibpg.PinnedConn) golibpg.PinnedConn {
