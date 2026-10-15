@@ -35,6 +35,11 @@ and no model; it is on from the first launch:
   and session-state statements (`BEGIN`, `SET`, `LOCK`, `PRAGMA`) are refused
   off a session — on a pooled connection they would leave their state behind
   for whoever gets that connection next.
+- **Each target is read by its own lexical rules**, because a token that ends
+  somewhere the target's does not hides the statement after it: PostgreSQL's
+  block comments nest and `$$…$$` is a string; SQLite's comments end at the
+  first `*/`, `$` opens a parameter, `[…]` is an identifier and a parameter
+  may carry a `(…)` suffix; MySQL's backslashes escape inside strings.
 - Unterminated strings, comments and quotes are rejected as malformed rather
   than guessed at.
 - Scripts over the size cap are rejected *before* execution.
