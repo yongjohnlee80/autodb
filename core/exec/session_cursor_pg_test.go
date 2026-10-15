@@ -591,6 +591,7 @@ func TestSessionCursorPG_TheOpenedRowPrecedesTheTargetsBegin(t *testing.T) {
 type failingWire struct {
 	golibpg.PinnedConn
 	cancel  func() // the caller's cancel, pressed at the first Receive
+	missed  *bool  // set when the cancel never reached the page's context
 	syncErr error
 }
 
@@ -608,6 +609,7 @@ func (w *failingWire) Receive(ctx context.Context) (golibpg.ExtendedMessage, err
 	case <-ctx.Done():
 		return golibpg.ExtendedMessage{}, ctx.Err()
 	case <-time.After(5 * time.Second):
+		*w.missed = true
 		return golibpg.ExtendedMessage{}, errors.New("the caller's cancel never reached the page's context")
 	}
 }
@@ -699,12 +701,14 @@ func lastTxID(t *testing.T, f *fixture) string {
 func TestSessionCursorPG_ALostWireClosesTheSession(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		wrap func(cancel func()) func(golibpg.PinnedConn) golibpg.PinnedConn
+		wrap func(cancel func(), missed *bool) func(golibpg.PinnedConn) golibpg.PinnedConn
 	}{
-		{"a cancelled fetch", func(cancel func()) func(golibpg.PinnedConn) golibpg.PinnedConn {
-			return func(pc golibpg.PinnedConn) golibpg.PinnedConn { return &failingWire{PinnedConn: pc, cancel: cancel} }
+		{"a cancelled fetch", func(cancel func(), missed *bool) func(golibpg.PinnedConn) golibpg.PinnedConn {
+			return func(pc golibpg.PinnedConn) golibpg.PinnedConn {
+				return &failingWire{PinnedConn: pc, cancel: cancel, missed: missed}
+			}
 		}},
-		{"a failed Sync", func(func()) func(golibpg.PinnedConn) golibpg.PinnedConn {
+		{"a failed Sync", func(func(), *bool) func(golibpg.PinnedConn) golibpg.PinnedConn {
 			return func(pc golibpg.PinnedConn) golibpg.PinnedConn {
 				return &failingWire{PinnedConn: pc, syncErr: errors.New("injected: the socket closed")}
 			}
@@ -718,9 +722,13 @@ func TestSessionCursorPG_ALostWireClosesTheSession(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			f.eng.hookCursorWire = tc.wrap(cancel)
+			var missed bool
+			f.eng.hookCursorWire = tc.wrap(cancel, &missed)
 			_, err := f.eng.SessionFetch(ctx, f.rootTok, sid, cur, 10, testIP)
 			f.eng.hookCursorWire = nil
+			if missed {
+				t.Fatal("the caller's cancel never reached the page's context: a cancelled fetch would run on")
+			}
 			if err == nil {
 				t.Fatal("a fetch on a lost wire succeeded")
 			}
