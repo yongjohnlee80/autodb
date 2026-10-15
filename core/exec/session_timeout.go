@@ -294,6 +294,9 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 	})
 	e.auditBounded(ctx, s.userID, "", "tx_"+string(outcome),
 		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
+	// A cursor's transaction ends here like any other; the backend it pinned
+	// goes back through the release gate, carrying the rollback's verdict.
+	e.releaseCursorPin(ctx, s, "", rerr)
 }
 
 // reasonAuthorityDemoted is the audited reason for a transaction ended because

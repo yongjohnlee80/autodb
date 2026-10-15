@@ -53,13 +53,16 @@ import (
 // interrupted, for an update to take effect).
 // Protocol 8 added sys.inflight -- what a restart would interrupt, which the
 // restart confirmation has to name before it asks.
+// Protocol 14 added the session cursor verbs — exec.session_query,
+// exec.session_fetch and exec.session_cursor_close — a read paged across
+// calls in a read-only transaction of the cursor's own.
 // Protocol 13 added the notes.* verbs, 12 the remote.ssh_key_*, device_*, blocks_*, control_* and activity_search verbs, 11 remote.resume and remote.rotate_device, 10 remote.attest (4 added exec.run_script, 3 history.list and sys.shutdown). BUMP THIS whenever the
 // verb surface changes: the handshake is what tells a NEWER frontend that
 // it is talking to an OLDER server (the shared server outlives frontends
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 13
+const Protocol int64 = 14
 
 // Session keys the gate and the hello handler share.
 //

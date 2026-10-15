@@ -222,6 +222,13 @@ type session struct {
 	// forward, and otherwise the physical connection is closed. Handing it
 	// back unproved is how one developer's settings become another's.
 	pc golibpg.PinnedConn
+	// cursor is the session's open cursor (session_cursor.go): it IS the
+	// session's transaction, and clearTxLocked drops it with the transaction.
+	cursor *sessionCursor
+	// cursorPinned says the session pinned pc for a cursor, so the pin goes back
+	// through the release gate when the cursor's transaction ends rather than
+	// staying for the session's life.
+	cursorPinned bool
 	// tokenSeq issues recvToken values. Monotonic, so a retired offer can never
 	// be confused with a later one.
 	tokenSeq uint64
@@ -315,6 +322,8 @@ func (s *session) clearTxLocked() {
 	if s.ext != nil {
 		s.ext.dropAllPortals()
 	}
+	// A cursor is its transaction's: the backend destroyed its portal with it.
+	s.cursor = nil
 	if s.tx != nil {
 		// Safe under s.mu: this takes the leaf lock only. See txMu.
 		s.reg.noteTxEnded(s.reservation.LeaseConn, s.id)
