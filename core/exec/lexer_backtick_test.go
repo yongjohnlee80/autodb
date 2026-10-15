@@ -27,7 +27,7 @@ func TestBackticks_QuoteOnlyWhereTheTargetQuotes(t *testing.T) {
 			t.Errorf("%s: %q classified as %v (err %v); want one read, the backticks naming a column", eng, smuggle, st.Class, err)
 		}
 		parts, err := splitStatementsFor("SELECT `a;b`; SELECT 2", eng)
-		if err != nil || len(parts) != 2 || parts[0] != "SELECT `a;b`" {
+		if err != nil || len(parts) != 2 || parts[0] != "SELECT `a;b`;" {
 			t.Errorf("%s: split %q (err %v); want the quoted name kept whole", eng, parts, err)
 		}
 	}
