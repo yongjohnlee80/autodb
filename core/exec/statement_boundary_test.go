@@ -59,7 +59,7 @@ func golibStarts(sp gsql.SQL, script string) (starts []int, errClass string) {
 
 // autodbStarts is this package's statement starts for script, read the same way.
 func autodbStarts(script string, eng engine.Name) (starts []int, errClass string) {
-	_, spans, err := splitStatementSpans(boundaryProbe+script, eng)
+	spans, err := splitBoundaries(boundaryProbe+script, eng)
 	if err != nil {
 		if errors.Is(err, ErrMalformedStatement) {
 			return nil, "lexical"
