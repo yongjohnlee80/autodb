@@ -67,6 +67,15 @@ func ValidateDSN(engineName engine.Name, dsn string) error {
 		if err != nil {
 			return fmt.Errorf("exec: invalid postgres DSN: %w", err)
 		}
+		// The simple protocol is postgres's multiStatements: one Query
+		// message may carry any number of statements and the server runs
+		// them all, where the extended protocol's Parse refuses a second one.
+		// It also interpolates arguments client-side. The mode pgx PARSED is
+		// read, never the DSN's text, so a password that merely contains the
+		// words is not refused.
+		if cfg.ConnConfig.DefaultQueryExecMode == pgx.QueryExecModeSimpleProtocol {
+			return fmt.Errorf("exec: postgres DSN must not set default_query_exec_mode=simple_protocol: multi-statement execution defeats the one-statement-per-call gate")
+		}
 		rp := cfg.ConnConfig.RuntimeParams
 		for key, val := range rp {
 			switch strings.ToLower(key) {
