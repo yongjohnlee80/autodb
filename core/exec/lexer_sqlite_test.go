@@ -165,20 +165,18 @@ func TestSplitStatementsFor_SQLiteExposesTheStatementAfterIt(t *testing.T) {
 	}
 }
 
-// `$$x;y$$` is a string on PostgreSQL and two statements on SQLite: the
-// parameter `$$x`, then the identifier `y$$`, which is no statement at all.
+// `$$x; SELECT 2 $$` is one dollar-quoted string on PostgreSQL and two
+// statements on SQLite, where `$` is a name character: the parameter `$$x`
+// ends the first, and the second selects 2 into the parameter `$$`.
 func TestSplitStatementsFor_SQLiteDollarIsAParameter(t *testing.T) {
 	t.Parallel()
-	const script = "SELECT $$x;y$$"
+	const script = "SELECT $$x; SELECT 2 $$"
 	parts, err := splitStatementsFor(script, engine.SQLite)
 	if err != nil {
 		t.Fatalf("sqlite: split: %v", err)
 	}
-	if want := []string{"SELECT $$x;", "y$$"}; !reflect.DeepEqual(parts, want) {
+	if want := []string{"SELECT $$x;", "SELECT 2 $$"}; !reflect.DeepEqual(parts, want) {
 		t.Fatalf("sqlite: got %q, want %q", parts, want)
-	}
-	if _, err := classifyFor(parts[1], engine.SQLite); !errors.Is(err, ErrStatementUnsupported) {
-		t.Errorf("sqlite: %q err = %v, want ErrStatementUnsupported", parts[1], err)
 	}
 	if pg, err := splitStatementsFor(script, engine.Postgres); err != nil || len(pg) != 1 {
 		t.Errorf("postgres: got %q (%v), want one dollar-quoted statement", pg, err)
@@ -194,8 +192,8 @@ func TestSplitStatementsFor_SQLiteBracketHoldsASemicolon(t *testing.T) {
 	if parts, err := splitStatementsFor(script, engine.SQLite); err != nil || len(parts) != 1 {
 		t.Errorf("sqlite: got %q (%v), want one statement", parts, err)
 	}
-	if parts, err := splitStatementsFor(script, engine.Postgres); err != nil || len(parts) != 2 {
-		t.Errorf("postgres: got %q (%v), want two statements", parts, err)
+	if _, err := classifyFor(script, engine.Postgres); !errors.Is(err, ErrMultiStatement) {
+		t.Errorf("postgres: err = %v, want ErrMultiStatement", err)
 	}
 }
 
@@ -272,11 +270,13 @@ func TestEngine_SQLiteLexicalRulesCannotSmuggleAStatement(t *testing.T) {
 
 	// SQLite's own readings, which the cells below rely on: the first */
 	// ends the comment, so the alias after it names the column; and a quote
-	// inside brackets is a byte of the name.
-	if res := f.exec(t, f.rootTok, "SELECT 1 /* /* */ AS x"); len(res.Columns) != 1 || res.Columns[0] != "x" {
+	// inside brackets is a byte of the name. Each statement is one statement
+	// under either set of rules — the trailing comment closes what the other
+	// reading opened — so the premise holds whichever way the lexer reads it.
+	if res := f.exec(t, f.rootTok, "SELECT 1 /* /* */ AS x -- */"); len(res.Columns) != 1 || res.Columns[0] != "x" {
 		t.Fatalf("columns %q, want [x]: SQLite did not end the comment at the first */", res.Columns)
 	}
-	if res := f.exec(t, f.rootTok, "SELECT 1 AS [a'b]"); len(res.Columns) != 1 || res.Columns[0] != "a'b" {
+	if res := f.exec(t, f.rootTok, "SELECT 1 AS [a'b] --'"); len(res.Columns) != 1 || res.Columns[0] != "a'b" {
 		t.Fatalf("columns %q, want [a'b]: SQLite did not read the bracket as one name", res.Columns)
 	}
 
