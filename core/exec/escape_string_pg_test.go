@@ -149,8 +149,10 @@ func TestEngine_PostgresEscapeStringCannotSmuggleAStatement(t *testing.T) {
 	}
 	table := pgEscapeTable(t, f, connID)
 
-	// The server's own reading of the literal: one character, a quote.
-	res, err := f.eng.Execute(ctx, f.rootTok, connID, `SELECT E'\'' AS q`, testIP)
+	// The server's own reading of the literal: one character, a quote. The
+	// trailing comment closes the string under either reading, so this
+	// premise holds whichever way the lexer reads it.
+	res, err := f.eng.Execute(ctx, f.rootTok, connID, `SELECT E'\'' AS q --'`, testIP)
 	if err != nil {
 		t.Fatalf("SELECT E'\\'': %v", err)
 	}
