@@ -103,7 +103,9 @@ func loadIngressFuncs(t *testing.T) (map[string]*ingressFunc, map[string][]strin
 					n.calls[name] = true
 					n.targets[ingressCallTarget(call, fn)] = true
 				}
-				if name == "Classify" {
+				// The engine's paths classify by engine; the bool form is
+				// the same lexer and counts too.
+				if name == "Classify" || name == "classifyFor" {
 					n.classifies = true
 					n.classifyAt = call.Pos()
 				}
