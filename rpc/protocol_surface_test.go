@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
+
 	"github.com/yongjohnlee80/autodb/core/pressure"
 	"github.com/yongjohnlee80/autodb/rpc"
 )
@@ -308,5 +310,18 @@ func TestProtocol_TheShippedFrontendSpeaksTheSameNumber(t *testing.T) {
 			"They come out of one commit, so at runtime they will refuse each other "+
 			"with the message a STALE pairing produces — and the user is sent to "+
 			"refresh a binary that is already correct", lua, rpc.Protocol)
+	}
+}
+
+// A cursor's page size outside the wire's int range, or negative, is refused
+// as a parameter, never wrapped into a row limit.
+func TestCursorVerbs_RefuseAPageSizeTheyCannotHold(t *testing.T) {
+	f := newFixture(t, rpc.WithNotesDir(t.TempDir()))
+	c := f.session(t)
+	for _, n := range []int64{-1, 1 << 31, 4294967296} {
+		errVal, _ := c.call("exec.session_query", f.rootTok, "no-such-session", "SELECT 1", n)
+		mustErr(t, errVal, golibrpc.CodeInvalidParams)
+		errVal, _ = c.call("exec.session_fetch", f.rootTok, "no-such-session", "cur-x", n)
+		mustErr(t, errVal, golibrpc.CodeInvalidParams)
 	}
 }

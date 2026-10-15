@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"math"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/yongjohnlee80/golib/dao"
@@ -82,9 +83,7 @@ func newCursorID() (CursorID, error) {
 // up to page rows comes back with the cursor's id when rows remain (none
 // when the result was whole). Anything else runs as SessionExecute does.
 func (e *Engine) SessionQuery(ctx context.Context, token string, id SessionID, sqlText, ip string, page int) (*Result, CursorID, error) {
-	if page <= 0 {
-		page = e.maxRows
-	}
+	page = e.cursorPageSize(page)
 	ident, err := e.auth.ValidateToken(ctx, token)
 	if err != nil {
 		return nil, "", err
@@ -189,7 +188,9 @@ func (e *Engine) SessionQuery(ctx context.Context, token string, id SessionID, s
 	}
 	if !more {
 		// The whole result fit in the first page: no cursor outlives the call.
-		e.endCursorTx(ctx, s, ident, ip, true)
+		if err := e.endCursorTx(ctx, s, ident, ip, true); err != nil {
+			return nil, "", err
+		}
 		return res, "", nil
 	}
 	s.mu.Lock()
@@ -203,9 +204,7 @@ func (e *Engine) SessionQuery(ctx context.Context, token string, id SessionID, s
 // SessionFetch returns up to n more rows of cursor cur. More false ends the
 // cursor, and with it its transaction.
 func (e *Engine) SessionFetch(ctx context.Context, token string, id SessionID, cur CursorID, n int, ip string) (*Result, error) {
-	if n <= 0 {
-		n = e.maxRows
-	}
+	n = e.cursorPageSize(n)
 	ident, err := e.auth.ValidateToken(ctx, token)
 	if err != nil {
 		return nil, err
@@ -246,7 +245,9 @@ func (e *Engine) SessionFetch(ctx context.Context, token string, id SessionID, c
 		return nil, rerr
 	}
 	if !more {
-		e.endCursorTx(ctx, s, ident, ip, true)
+		if err := e.endCursorTx(ctx, s, ident, ip, true); err != nil {
+			return nil, err
+		}
 	}
 	return res, nil
 }
@@ -272,8 +273,18 @@ func (e *Engine) SessionCloseCursor(ctx context.Context, token string, id Sessio
 	if _, err := e.cursorOf(ctx, s, cur, ip); err != nil {
 		return err
 	}
-	e.endCursorTx(ctx, s, ident, ip, true)
-	return nil
+	return e.endCursorTx(ctx, s, ident, ip, true)
+}
+
+// cursorPageSize is a requested page size bounded by the per-call row cap: a
+// page is one call's answer, and no answer is larger than a statement's. The
+// bound also keeps the Execute row limit, one past the page, inside uint32,
+// where 0 would mean every row.
+func (e *Engine) cursorPageSize(n int) int {
+	if n <= 0 || n > e.maxRows {
+		n = e.maxRows
+	}
+	return min(n, math.MaxInt32)
 }
 
 // cursorOf is the session's open cursor named cur, in the session's current
@@ -464,21 +475,25 @@ func decodeRow(m *pgtype.Map, fields []golibpg.ExtendedFieldDescription, vals []
 // commit changes nothing, and its reads are recorded as completed), ROLLBACK
 // on any failure — then gives the cursor's pin back. finishTx's terminal
 // transition, audit and clearTxLocked are the same as a client's.
-func (e *Engine) endCursorTx(ctx context.Context, s *session, ident auth.Identity, ipAddr string, clean bool) {
+//
+// The finalizer's error is returned: a clean end that failed to commit, or to
+// record its outcome, is reported, not answered as a finished read. A caller
+// already failing reports its own error; the finalizer's still decides the
+// backend's fate at the release gate.
+func (e *Engine) endCursorTx(ctx context.Context, s *session, ident auth.Identity, ipAddr string, clean bool) error {
 	verb := "ROLLBACK"
 	if clean {
 		verb = "COMMIT"
 	}
-	var residue error
+	var err error
 	s.mu.Lock()
 	open := s.tx != nil
 	s.mu.Unlock()
 	if open {
-		if _, err := e.finishTx(context.WithoutCancel(ctx), s, ident, ipAddr, verb, clean); err != nil {
-			residue = err
-		}
+		_, err = e.finishTx(context.WithoutCancel(ctx), s, ident, ipAddr, verb, clean)
 	}
-	e.releaseCursorPin(ctx, s, ipAddr, residue)
+	e.releaseCursorPin(ctx, s, ipAddr, err)
+	return err
 }
 
 // releaseCursorPin gives the backend a cursor pinned back to the pool through

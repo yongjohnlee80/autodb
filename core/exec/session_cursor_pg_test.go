@@ -18,6 +18,15 @@ import (
 // is the session's and never outlives it. Gated on TEST_PGURL like the rest of
 // the session cells.
 
+// cursorSession is pgSession with a row cap of 1000: a page is bounded by the
+// cap, and the fixture's own cap of 3 would bound every page these cells read.
+func cursorSession(t *testing.T) (*fixture, int64, SessionID, string) {
+	t.Helper()
+	f, connID, sid, table := pgSession(t)
+	f.eng.maxRows = 1000
+	return f, connID, sid, table
+}
+
 // sessionOf is the engine's own record of session sid.
 func sessionOf(t *testing.T, f *fixture, sid SessionID) *session {
 	t.Helper()
@@ -105,7 +114,7 @@ func openCursor(t *testing.T, f *fixture, sid SessionID, sqlText string, page in
 // Every row once, in order, across pages of an uneven size; the last page ends
 // the cursor and its transaction and gives the pin back.
 func TestSessionCursorPG_PagesEveryRowOnceInOrder(t *testing.T) {
-	f, _, sid, _ := pgSession(t)
+	f, _, sid, _ := cursorSession(t)
 	ctx := context.Background()
 	const total = 10000
 	s := sessionOf(t, f, sid)
@@ -161,7 +170,7 @@ func TestSessionCursorPG_PagesEveryRowOnceInOrder(t *testing.T) {
 
 // A result that fits the first page opens nothing that outlives the call.
 func TestSessionCursorPG_AWholeFirstPageLeavesNoCursor(t *testing.T) {
-	f, _, sid, _ := pgSession(t)
+	f, _, sid, _ := cursorSession(t)
 	s := sessionOf(t, f, sid)
 
 	res, cur, err := f.eng.SessionQuery(context.Background(), f.rootTok, sid, seriesSQL(5), testIP, 5)
@@ -188,7 +197,7 @@ func TestSessionCursorPG_AWholeFirstPageLeavesNoCursor(t *testing.T) {
 
 // A write, and a read inside the caller's own transaction, run as statements.
 func TestSessionCursorPG_OnlyAReadOutsideATransactionOpensACursor(t *testing.T) {
-	f, connID, sid, table := pgSession(t)
+	f, connID, sid, table := cursorSession(t)
 	ctx := context.Background()
 
 	res, cur, err := f.eng.SessionQuery(ctx, f.rootTok, sid, "INSERT INTO "+table+" (note) VALUES ('a')", testIP, 1)
@@ -201,7 +210,7 @@ func TestSessionCursorPG_OnlyAReadOutsideATransactionOpensACursor(t *testing.T) 
 	}
 
 	mustSession(t, f, sid, "BEGIN")
-	res, cur, err = f.eng.SessionQuery(ctx, f.rootTok, sid, seriesSQL(50), testIP, 10)
+	res, cur, err = f.eng.SessionQuery(ctx, f.rootTok, sid, seriesSQL(5000), testIP, 10)
 	if err != nil || cur != "" {
 		t.Fatalf("a read in the caller's transaction: cursor %q, err %v; want a statement's answer", cur, err)
 	}
@@ -241,7 +250,7 @@ func TestSessionCursor_ANonPostgresTargetAnswersCappedWithoutACursor(t *testing.
 
 // The cursor's transaction is READ ONLY, whatever the session's role allows.
 func TestSessionCursorPG_TheCursorsTransactionIsReadOnly(t *testing.T) {
-	f, _, sid, _ := pgSession(t)
+	f, _, sid, _ := cursorSession(t)
 	first, cur := openCursor(t, f, sid,
 		"SELECT current_setting('transaction_read_only') AS ro, g FROM generate_series(1, 20) AS g", 5)
 	if got := fmt.Sprint(first.Rows[0][0]); got != "on" {
@@ -256,7 +265,7 @@ func TestSessionCursorPG_TheCursorsTransactionIsReadOnly(t *testing.T) {
 // second cursor is refused, the slot is free between pages, a fetch stamps
 // lastUsed, and a fetch naming another cursor changes nothing.
 func TestSessionCursorPG_TheCursorOwnsTheSession(t *testing.T) {
-	f, _, sid, _ := pgSession(t)
+	f, _, sid, _ := cursorSession(t)
 	ctx := context.Background()
 	s := sessionOf(t, f, sid)
 
@@ -296,7 +305,7 @@ func TestSessionCursorPG_TheCursorOwnsTheSession(t *testing.T) {
 // Closing a cursor, and reading it to its end, end its transaction through
 // finishTx with a terminal row under the cursor's txID; the session works after.
 func TestSessionCursorPG_CloseAndEndFinishTheTransaction(t *testing.T) {
-	f, _, sid, _ := pgSession(t)
+	f, _, sid, _ := cursorSession(t)
 	ctx := context.Background()
 	s := sessionOf(t, f, sid)
 
@@ -331,7 +340,7 @@ func TestSessionCursorPG_CloseAndEndFinishTheTransaction(t *testing.T) {
 // Closing the session with a cursor open rolls its transaction back and gives
 // the backend back.
 func TestSessionCursorPG_CloseSessionRollsTheCursorBack(t *testing.T) {
-	f, _, sid, _ := pgSession(t)
+	f, _, sid, _ := cursorSession(t)
 	ctx := context.Background()
 	s := sessionOf(t, f, sid)
 
@@ -366,7 +375,7 @@ func TestSessionCursorPG_TheJanitorEndsAnIdleOrOldCursor(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f, _, sid, _ := pgSession(t)
+			f, _, sid, _ := cursorSession(t)
 			ctx := context.Background()
 			s := sessionOf(t, f, sid)
 
@@ -397,7 +406,7 @@ func TestSessionCursorPG_TheJanitorEndsAnIdleOrOldCursor(t *testing.T) {
 // borrower of that backend sees no portal, no prepared statement and the
 // default settings.
 func TestSessionCursorPG_TheBackendGoesBackClean(t *testing.T) {
-	f, connID, sid, _ := pgSession(t)
+	f, connID, sid, _ := cursorSession(t)
 	ctx := context.Background()
 	s := sessionOf(t, f, sid)
 
@@ -436,7 +445,7 @@ func TestSessionCursorPG_TheBackendGoesBackClean(t *testing.T) {
 // With the engine's own deadline never run, PostgreSQL's belt ends a backend
 // holding a suspended portal, and the next fetch closes the session.
 func TestSessionCursorPG_TheServerBeltEndsAnAbandonedCursor(t *testing.T) {
-	f, connID, sid, _ := pgSession(t)
+	f, connID, sid, _ := cursorSession(t)
 	ctx := context.Background()
 	s := sessionOf(t, f, sid)
 
@@ -476,7 +485,7 @@ func TestSessionCursorPG_TheServerBeltEndsAnAbandonedCursor(t *testing.T) {
 // cursor having started nothing.
 func TestSessionCursorPG_ShutdownCountsOrRefusesTheCursor(t *testing.T) {
 	t.Run("admitted first", func(t *testing.T) {
-		f, _, sid, _ := pgSession(t)
+		f, _, sid, _ := cursorSession(t)
 		ctx := context.Background()
 		parked, proceed := make(chan struct{}), make(chan struct{})
 		f.eng.hookAfterTxAdmit = func() { close(parked); <-proceed }
@@ -518,7 +527,7 @@ func TestSessionCursorPG_ShutdownCountsOrRefusesTheCursor(t *testing.T) {
 		}
 	})
 	t.Run("shutdown first", func(t *testing.T) {
-		f, _, sid, _ := pgSession(t)
+		f, _, sid, _ := cursorSession(t)
 		ctx := context.Background()
 		s := sessionOf(t, f, sid)
 		before, err := f.store.TxOutcomes.OnCtx(ctx).Count()
@@ -547,7 +556,7 @@ func TestSessionCursorPG_ShutdownCountsOrRefusesTheCursor(t *testing.T) {
 // The opened row is durable before the target's BEGIN: a crash in between
 // leaves the opened row, a terminal for it, and nothing on the target.
 func TestSessionCursorPG_TheOpenedRowPrecedesTheTargetsBegin(t *testing.T) {
-	f, _, sid, _ := pgSession(t)
+	f, _, sid, _ := cursorSession(t)
 	ctx := context.Background()
 	s := sessionOf(t, f, sid)
 
@@ -615,7 +624,7 @@ func TestSessionCursorPG_AFailedPageEndsTheCursorAndKeepsTheSession(t *testing.T
 		{name: "the outcome write", sql: seriesSQL(100), record: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f, _, sid, _ := pgSession(t)
+			f, _, sid, _ := cursorSession(t)
 			ctx := context.Background()
 			s := sessionOf(t, f, sid)
 			if tc.record {
@@ -691,7 +700,7 @@ func TestSessionCursorPG_ALostWireClosesTheSession(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f, _, sid, _ := pgSession(t)
+			f, _, sid, _ := cursorSession(t)
 			s := sessionOf(t, f, sid)
 			_, cur := openCursor(t, f, sid, seriesSQL(100), 10)
 			txID := openTxID(s)
@@ -716,6 +725,83 @@ func TestSessionCursorPG_ALostWireClosesTheSession(t *testing.T) {
 			if _, err := f.eng.SessionFetch(context.Background(), f.rootTok, sid, cur, 10, testIP); !errors.Is(err, ErrSessionNotFound) {
 				t.Errorf("a fetch after the close = %v, want ErrSessionNotFound", err)
 			}
+		})
+	}
+}
+
+// A page is bounded by the row cap however large the size asked for; the
+// largest uint32 would otherwise wrap the Execute row limit to 0, every row.
+func TestSessionCursorPG_APageIsBoundedByTheRowCap(t *testing.T) {
+	f, _, sid, _ := cursorSession(t)
+	ctx := context.Background()
+	const huge = 4294967295
+
+	first, cur := openCursor(t, f, sid, seriesSQL(5000), huge)
+	if len(first.Rows) != f.eng.maxRows || !first.More {
+		t.Fatalf("a first page of %d asked: %d rows, More %v; want the cap %d and More", huge, len(first.Rows), first.More, f.eng.maxRows)
+	}
+	next, err := f.eng.SessionFetch(ctx, f.rootTok, sid, cur, huge, testIP)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if got := rowInts(t, next); len(got) != f.eng.maxRows || got[0] != int64(f.eng.maxRows+1) || !next.More {
+		t.Errorf("a fetch of %d asked: %d rows from %v, More %v; want the cap from %d and More", huge, len(got), got[:1], next.More, f.eng.maxRows+1)
+	}
+	if err := f.eng.SessionCloseCursor(ctx, f.rootTok, sid, cur, testIP); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// failingCommit is a cursor's transaction whose COMMIT fails: it rolls back and
+// says so, as a driver does when the server confirms a rollback.
+type failingCommit struct{ dao.ContextTxConn }
+
+func (c failingCommit) CommitContext(ctx context.Context) error {
+	_ = c.ContextTxConn.RollbackContext(ctx)
+	return fmt.Errorf("%w: injected at COMMIT", dao.ErrTxRolledBack)
+}
+
+// A clean end whose COMMIT fails is reported, not answered as a finished read:
+// a whole first page, the last fetch and a close each return the finalizer's
+// error, and leave the session cleared and usable.
+func TestSessionCursorPG_AFailedCommitAtACleanEndIsReported(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(f *fixture, sid SessionID) error
+	}{
+		{"a whole first page", func(f *fixture, sid SessionID) error {
+			_, _, err := f.eng.SessionQuery(context.Background(), f.rootTok, sid, seriesSQL(5), testIP, 10)
+			return err
+		}},
+		{"the last fetch", func(f *fixture, sid SessionID) error {
+			_, cur := openCursor(t, f, sid, seriesSQL(15), 10)
+			_, err := f.eng.SessionFetch(context.Background(), f.rootTok, sid, cur, 10, testIP)
+			return err
+		}},
+		{"a close", func(f *fixture, sid SessionID) error {
+			_, cur := openCursor(t, f, sid, seriesSQL(15), 10)
+			return f.eng.SessionCloseCursor(context.Background(), f.rootTok, sid, cur, testIP)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _, sid, _ := cursorSession(t)
+			s := sessionOf(t, f, sid)
+			f.eng.hookBeginProxiedTx = func(ctx context.Context, pc golibpg.PinnedConn, opts dao.TxOptions) (dao.ContextTxConn, error) {
+				tx, err := pc.BeginSessionTx(ctx, opts)
+				if err != nil {
+					return nil, err
+				}
+				return failingCommit{tx}, nil
+			}
+			t.Cleanup(func() { f.eng.hookBeginProxiedTx = nil })
+
+			err := tc.end(f, sid)
+			if !errors.Is(err, dao.ErrTxRolledBack) {
+				t.Fatalf("a clean end whose COMMIT failed returned %v; want the finalizer's error", err)
+			}
+			assertCursorGone(t, s, "a failed COMMIT")
+			f.eng.hookBeginProxiedTx = nil
+			mustSession(t, f, sid, "SELECT 1")
 		})
 	}
 }

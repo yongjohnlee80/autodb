@@ -497,6 +497,21 @@ func argInt(p []any, i int, name string) (int64, error) {
 	return n, nil
 }
 
+// pageArg is a cursor's page size: 0 asks for the server's row cap, and the
+// engine bounds any other size by that cap. A size the wire's int range cannot
+// hold, or a negative one, is refused rather than wrapped.
+func pageArg(p []any, i int, name string) (int, error) {
+	n, err := argInt(p, i, name)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 || n > math.MaxInt32 {
+		return 0, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+			Message: fmt.Sprintf("argument %d (%s): %d is not a page size (0 to %d)", i, name, n, math.MaxInt32)}
+	}
+	return int(n), nil
+}
+
 func argBool(p []any, i int, name string) (bool, error) {
 	if i >= len(p) {
 		return false, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
@@ -1946,11 +1961,11 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		page, err := argInt(req.Params, 3, "page")
+		page, err := pageArg(req.Params, 3, "page")
 		if err != nil {
 			return nil, err
 		}
-		res, cur, qerr := s.eng.SessionQuery(ctx, token, exec.SessionID(sid), sqlText, peerIP(req), int(page))
+		res, cur, qerr := s.eng.SessionQuery(ctx, token, exec.SessionID(sid), sqlText, peerIP(req), page)
 		if qerr != nil {
 			return nil, s.wireErrFor(req, qerr)
 		}
@@ -1977,11 +1992,11 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		n, err := argInt(req.Params, 3, "n")
+		n, err := pageArg(req.Params, 3, "n")
 		if err != nil {
 			return nil, err
 		}
-		res, ferr := s.eng.SessionFetch(ctx, token, exec.SessionID(sid), exec.CursorID(cur), int(n), peerIP(req))
+		res, ferr := s.eng.SessionFetch(ctx, token, exec.SessionID(sid), exec.CursorID(cur), n, peerIP(req))
 		if ferr != nil {
 			return nil, s.wireErrFor(req, ferr)
 		}
