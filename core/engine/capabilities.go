@@ -112,6 +112,12 @@ type capabilities struct {
 	// reads a name.
 	bracketQuotedIdentifiers bool
 	tclVariables             bool
+
+	// `…` is a quoted identifier on MySQL and on SQLite, which accepts it for
+	// MySQL's sake. PostgreSQL reads a backtick as an operator character, so
+	// there a ';' after one ends the statement: read as a quote, `a; DROP
+	// TABLE t; --` was one statement to the gate and three to the server.
+	backtickQuotedIdentifiers bool
 }
 
 // The table. Every Name declared in this package must appear here, and
@@ -135,6 +141,7 @@ var capsByName = map[Name]capabilities{
 		escapeStringConstants:        true,
 		bracketQuotedIdentifiers:     false,
 		tclVariables:                 false,
+		backtickQuotedIdentifiers:    false,
 	},
 	MySQL: {
 		backslashEscapes: true,
@@ -147,6 +154,7 @@ var capsByName = map[Name]capabilities{
 		declarativePartitioning:      false,
 		routineCatalog:               false,
 		postgresWire:                 false,
+		backtickQuotedIdentifiers:    true,
 	},
 	SQLite: {
 		backslashEscapes: false,
@@ -161,11 +169,12 @@ var capsByName = map[Name]capabilities{
 		postgresWire:                 false,
 		// Its comments do not nest — the first */ ends one — and `$` opens a
 		// parameter, never a string: `$$x` is the parameter named `$x`.
-		dollarQuotedStrings:      false,
-		nestedBlockComments:      false,
-		escapeStringConstants:    false,
-		bracketQuotedIdentifiers: true,
-		tclVariables:             true,
+		dollarQuotedStrings:       false,
+		nestedBlockComments:       false,
+		escapeStringConstants:     false,
+		bracketQuotedIdentifiers:  true,
+		tclVariables:              true,
+		backtickQuotedIdentifiers: true,
 	},
 }
 
@@ -291,6 +300,10 @@ func (n Name) EscapeStringConstants() bool { return capsByName[n].escapeStringCo
 // BracketQuotedIdentifiers reports whether […] is a delimited identifier that
 // runs to the first ], with no escape inside it.
 func (n Name) BracketQuotedIdentifiers() bool { return capsByName[n].bracketQuotedIdentifiers }
+
+// BacktickQuotedIdentifiers reports whether `…` is a quoted identifier; where it
+// is not, a backtick is an ordinary byte of the statement.
+func (n Name) BacktickQuotedIdentifiers() bool { return capsByName[n].backtickQuotedIdentifiers }
 
 // TclVariables reports whether $name, @name, :name and #name are parameters
 // whose name may carry :: separators and end in a (…) suffix running to the
