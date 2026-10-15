@@ -231,13 +231,13 @@ type FunctionCall struct {
 // refusal it replaces stood in for a guard that could not see inside a CTE,
 // and refused the guarded ones too.
 func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
-	st, _, _, err := scanScript(sqlText, boolRules(backslashEscapes), false)
+	st, _, _, err := scanScript(sqlText, boolRules(backslashEscapes), scanClassify)
 	return st, err
 }
 
 // classifyFor is Classify under the lexical rules of the named engine.
 func classifyFor(sqlText string, eng engine.Name) (Statement, error) {
-	st, _, _, err := scanScript(sqlText, rulesFor(eng), false)
+	st, _, _, err := scanScript(sqlText, rulesFor(eng), scanClassify)
 	return st, err
 }
 
@@ -252,14 +252,14 @@ func classifyFor(sqlText string, eng engine.Name) (Statement, error) {
 // Like Classify, the bool names MySQL or PostgreSQL; the engine's paths call
 // splitStatementsFor.
 func SplitStatements(sqlText string, backslashEscapes bool) ([]string, error) {
-	_, parts, _, err := scanScript(sqlText, boolRules(backslashEscapes), true)
+	_, parts, _, err := scanScript(sqlText, boolRules(backslashEscapes), scanSplit)
 	return parts, err
 }
 
 // splitStatementsFor is SplitStatements under the lexical rules of the named
 // engine.
 func splitStatementsFor(sqlText string, eng engine.Name) ([]string, error) {
-	_, parts, _, err := scanScript(sqlText, rulesFor(eng), true)
+	_, parts, _, err := scanScript(sqlText, rulesFor(eng), scanSplit)
 	return parts, err
 }
 
@@ -272,8 +272,19 @@ type stmtSpan struct{ start, end int }
 // in the original text alongside its trimmed form. Same lexer, same
 // boundaries.
 func splitStatementSpans(sqlText string, eng engine.Name) ([]string, []stmtSpan, error) {
-	_, parts, spans, err := scanScript(sqlText, rulesFor(eng), true)
+	_, parts, spans, err := scanScript(sqlText, rulesFor(eng), scanSplit)
 	return parts, spans, err
+}
+
+// splitBoundaries is where each statement of sqlText begins and ends under the
+// named engine's lexical rules, and nothing else: a statement this package
+// would refuse to classify is still a statement. A lexical error (an
+// unterminated string, quote or comment) is still an error. It is what an
+// editor's splitter must agree with, so a cursor never selects text the gate
+// reads as something else.
+func splitBoundaries(sqlText string, eng engine.Name) ([]stmtSpan, error) {
+	_, _, spans, err := scanScript(sqlText, rulesFor(eng), scanBounds)
+	return spans, err
 }
 
 // lexRules are the lexical rules a script is read by: each is one engine's
@@ -309,11 +320,24 @@ func boolRules(backslashEscapes bool) lexRules {
 	return rulesFor(engine.Postgres)
 }
 
-// scanScript is the one tokenizer. With split=false it enforces the
-// one-statement rule (ErrMultiStatement) and returns the statement's
-// verdict; with split=true it records statement boundaries instead and
-// returns their texts.
-func scanScript(sqlText string, lex lexRules, split bool) (Statement, []string, []stmtSpan, error) {
+// scanMode is what scanScript reads a script for.
+type scanMode int
+
+const (
+	// scanClassify enforces the one-statement rule (ErrMultiStatement) and
+	// returns the statement's verdict.
+	scanClassify scanMode = iota
+	// scanSplit records statement boundaries and returns their texts, refusing
+	// a statement it cannot classify.
+	scanSplit
+	// scanBounds is scanSplit without the classification refusals: only the
+	// lexical rules decide, so the boundaries are the lexer's alone.
+	scanBounds
+)
+
+// scanScript is the one tokenizer, read for mode.
+func scanScript(sqlText string, lex lexRules, mode scanMode) (Statement, []string, []stmtSpan, error) {
+	split := mode != scanClassify
 	var st Statement
 	var parts []string
 	var spans []stmtSpan
@@ -661,7 +685,7 @@ func scanScript(sqlText string, lex lexRules, split bool) (Statement, []string, 
 				// DDL below top level is not valid SQL in any target dialect;
 				// it stays refused outright rather than being handed to a
 				// guard that has no rule for it.
-				if statementBody && cls == ClassDDL {
+				if statementBody && cls == ClassDDL && mode != scanBounds {
 					return st, parts, spans, fmt.Errorf("%w: data-modifying subquery/CTE (%s at nesting depth %d)", ErrStatementUnsupported, word, depth)
 				}
 				// A mutation below top level is recorded WITH ITS DEPTH, so
@@ -716,6 +740,9 @@ func scanScript(sqlText string, lex lexRules, split bool) (Statement, []string, 
 						// because the splitter shares this scanner.
 						st.Verb = word
 						searching = false
+						continue
+					}
+					if mode == scanBounds {
 						continue
 					}
 					return st, parts, spans, fmt.Errorf("%w: %s", ErrStatementUnsupported, word)
