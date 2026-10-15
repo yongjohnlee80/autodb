@@ -111,7 +111,9 @@ listen with an identity it cannot prove.
 Targets today: **PostgreSQL**, **MySQL**, **SQLite**. DSNs are validated on the
 way in, and settings that would change parsing semantics under the classifier's
 feet — `sql_mode`, `standard_conforming_strings`, `init_command`, disabled
-autocommit — are rejected rather than silently honoured.
+autocommit — are rejected rather than silently honoured, as are the modes that
+let one call carry several statements (MySQL `multiStatements`, PostgreSQL
+`default_query_exec_mode=simple_protocol`).
 
 Target access goes through [`golib/dao`](https://github.com/yongjohnlee80/golib),
 which owns the dialect and driver abstraction. That layer already ships a
