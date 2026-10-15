@@ -238,6 +238,19 @@ func TestSessionCursor_ANonPostgresTargetAnswersCappedWithoutACursor(t *testing.
 
 // ---- cell 2: the cursor's transaction is the session's -----------------------
 
+// The cursor's transaction is READ ONLY, whatever the session's role allows.
+func TestSessionCursorPG_TheCursorsTransactionIsReadOnly(t *testing.T) {
+	f, _, sid, _ := pgSession(t)
+	first, cur := openCursor(t, f, sid,
+		"SELECT current_setting('transaction_read_only') AS ro, g FROM generate_series(1, 20) AS g", 5)
+	if got := fmt.Sprint(first.Rows[0][0]); got != "on" {
+		t.Errorf("transaction_read_only inside the cursor = %q, want on", got)
+	}
+	if err := f.eng.SessionCloseCursor(context.Background(), f.rootTok, sid, cur, testIP); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // While a cursor is open it is the session's transaction: a statement or a
 // second cursor is refused, the slot is free between pages, a fetch stamps
 // lastUsed, and a fetch naming another cursor changes nothing.
