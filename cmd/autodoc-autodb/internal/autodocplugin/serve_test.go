@@ -3,6 +3,7 @@ package autodocplugin
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +110,108 @@ func TestTheRunAndItsPagesCrossTheRealLink(t *testing.T) {
 	if q := db.queries(); len(q) != 1 || q[0] != "SELECT n FROM t" {
 		t.Fatalf("the command ran %q, want the statement of the note it carried", q)
 	}
+	send(plugin.MethodClose, plugin.EmptyParams())
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return after plugin.close")
+	}
+}
+
+// Over AutoDoc's own SDK and link: q typed in the name is a letter, drawn in the field with no
+// host.close before it; q on the connection pick, and again when connected, is host.close.
+func TestQIsHostCloseOffTheFieldsOverTheRealLink(t *testing.T) {
+	db := newFakeDB(t)
+	p := newPlugin("v0.0.1", t.TempDir())
+	p.find = func(context.Context) (autodb.Binary, []autodb.Tried, error) {
+		return autodb.Binary{Path: "autodb"}, nil, nil
+	}
+	p.start = func(ctx context.Context, _ autodb.Binary) (*autodb.Client, error) {
+		return autodb.Dial(ctx, "tcp", db.addr, "test")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hostEnd, pluginEnd := net.Pipe()
+	served := make(chan error, 1)
+	go func() { served <- plugin.ServeConn(ctx, pluginEnd, p) }()
+	got := make(chan note, 256)
+	link, err := plugin.NewLink(ctx, hostEnd, func(method string, params []any) { got <- note{method, params} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer link.Close()
+	send := func(method string, params []any) {
+		t.Helper()
+		if err := link.Notify(ctx, method, params); err != nil {
+			t.Fatalf("send %s: %v", method, err)
+		}
+	}
+	key := func(k string) { send(plugin.MethodKey, plugin.KeyParams(plugin.Key{Key: k, Text: k})) }
+	// next is the next notification of method; a host.close met first fails the cell, unless
+	// host.close is what is waited for
+	next := func(method string, match func(note) bool) note {
+		t.Helper()
+		// NOTE: a test's deadline: a plugin that never answers fails the cell rather than hang it.
+		deadline := time.After(10 * time.Second)
+		for {
+			select {
+			case n := <-got:
+				if n.method == method && (match == nil || match(n)) {
+					return n
+				}
+				if n.method == plugin.MethodHostClose {
+					t.Fatalf("host.close while waiting for %s", method)
+				}
+			case <-deadline:
+				t.Fatalf("no %s within 10 s", method)
+			}
+		}
+	}
+	// framed is a frame whose text holds s
+	framed := func(s string) func(note) bool {
+		return func(n note) bool {
+			rows, _, err := plugin.ReadFrame(n.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range rows {
+				var b strings.Builder
+				for _, run := range r {
+					b.WriteString(run.Text)
+				}
+				if strings.Contains(b.String(), s) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+
+	send(plugin.MethodOpen, plugin.OpenParams(plugin.Open{Protocol: 4, Width: 48, Height: 20}))
+	next(plugin.MethodReady, nil)
+	key("q")
+	next(plugin.MethodFrame, framed(" q█"))
+	send(plugin.MethodKey, plugin.KeyParams(plugin.Key{Key: "Backspace"}))
+	for _, r := range "admin" {
+		key(string(r))
+	}
+	send(plugin.MethodKey, plugin.KeyParams(plugin.Key{Key: "Tab"}))
+	for _, r := range "right" {
+		key(string(r))
+	}
+	send(plugin.MethodKey, plugin.KeyParams(plugin.Key{Key: "Enter"})) // sign in
+	next(plugin.MethodFrame, framed("Choose a connection"))
+	key("q")
+	next(plugin.MethodHostClose, nil)
+	send(plugin.MethodKey, plugin.KeyParams(plugin.Key{Key: "Enter"})) // the one connection
+	next(plugin.MethodFrame, framed("Connected"))
+	key("q")
+	next(plugin.MethodHostClose, nil)
+
 	send(plugin.MethodClose, plugin.EmptyParams())
 	select {
 	case err := <-served:

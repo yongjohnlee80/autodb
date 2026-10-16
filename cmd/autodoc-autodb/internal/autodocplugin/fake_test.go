@@ -143,6 +143,8 @@ type fakeHost struct {
 	tables []plugin.TableOpen
 	rows   []sentRows
 	ends   []sentEnd
+	frames int // host.frame sent
+	closes int // host.close sent
 }
 
 type sentRows struct {
@@ -156,6 +158,7 @@ type sentEnd struct{ id, why string }
 func (h *fakeHost) Frame(f *plugin.Frame) error {
 	h.mu.Lock()
 	h.frame = f
+	h.frames++
 	h.mu.Unlock()
 	return nil
 }
@@ -183,6 +186,54 @@ func (h *fakeHost) TableEnd(id string, err error) error {
 	h.ends = append(h.ends, sentEnd{id, why})
 	h.mu.Unlock()
 	return nil
+}
+
+func (h *fakeHost) Close() error {
+	h.mu.Lock()
+	h.closes++
+	h.mu.Unlock()
+	return nil
+}
+
+// closed is how many times the plugin asked to close the card.
+func (h *fakeHost) closed() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closes
+}
+
+// lines are the last frame's rows as text, the margins trimmed.
+func (h *fakeHost) lines() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.frame == nil {
+		return nil
+	}
+	var out []string
+	for _, row := range h.frame.Rows() {
+		var b strings.Builder
+		for _, r := range row {
+			b.WriteString(r.Text)
+		}
+		out = append(out, strings.TrimSpace(b.String()))
+	}
+	return out
+}
+
+// styleOf is the style of the first cell of the last frame's row y that holds text, its text
+// trimmed of spaces at the start.
+func (h *fakeHost) styleOf(y int, text string) (plugin.Style, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.frame == nil || y < 0 || y >= len(h.frame.Rows()) {
+		return plugin.Style{}, false
+	}
+	for _, r := range h.frame.Rows()[y] {
+		if strings.Contains(r.Text, text) {
+			return r.Style, true
+		}
+	}
+	return plugin.Style{}, false
 }
 
 // card is the last frame's text, its rows joined.
@@ -230,10 +281,10 @@ func connected(t *testing.T, db *fakeDB) (*Plugin, *fakeHost) {
 	return p, h
 }
 
-// signIn types the name "admin" and pass into the card and presses Enter.
+// signIn types the name "admin" and pass into the card and presses Enter in the passphrase.
 func signIn(p *Plugin, pass string) {
-	p.name = p.name[:0]
-	p.field = 0
+	p.field = focusName
+	p.Key(plugin.Key{Key: "u", Ctrl: true}) // a name left from an earlier sign-in goes
 	for _, r := range "admin" {
 		p.Key(plugin.Key{Key: string(r), Text: string(r)})
 	}
