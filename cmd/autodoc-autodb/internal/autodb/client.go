@@ -164,6 +164,8 @@ type Connection struct {
 	ID     int64
 	Name   string
 	Engine string
+	// Workspace is the workspace conn.list names the connection under; "" when it names none.
+	Workspace string
 }
 
 // Connections are the connections the token may see.
@@ -182,7 +184,8 @@ func (c *Client) Connections(ctx context.Context, token string) ([]Connection, e
 		}
 		name, _ := m["name"].(string)
 		eng, _ := m["engine"].(string)
-		out = append(out, Connection{ID: id, Name: name, Engine: eng})
+		ws, _ := m["workspace"].(string)
+		out = append(out, Connection{ID: id, Name: name, Engine: eng, Workspace: ws})
 	}
 	return out, nil
 }

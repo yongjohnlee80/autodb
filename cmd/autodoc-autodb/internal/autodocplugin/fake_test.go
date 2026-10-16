@@ -31,6 +31,8 @@ type fakeDB struct {
 	fetch func(cur string, n int64) (map[string]any, error)
 	// engine is the connection's engine.
 	engine string
+	// more are connections conn.list lists after the first, scratch (id 7).
+	more []map[string]any
 }
 
 func newFakeDB(t *testing.T) *fakeDB {
@@ -62,7 +64,13 @@ func newFakeDB(t *testing.T) *fakeDB {
 	})
 	handle("auth.logout", func([]any) (any, error) { return nil, nil })
 	handle("conn.list", func([]any) (any, error) {
-		return []any{map[string]any{"id": int64(7), "name": "scratch", "engine": f.engineName()}}, nil
+		list := []any{map[string]any{"id": int64(7), "name": "scratch", "engine": f.engineName()}}
+		f.mu.Lock()
+		for _, c := range f.more {
+			list = append(list, c)
+		}
+		f.mu.Unlock()
+		return list, nil
 	})
 	handle("exec.session_open", func([]any) (any, error) { return map[string]any{"session_id": "sess-1"}, nil })
 	handle("exec.session_close", func([]any) (any, error) { return map[string]any{"closed": true}, nil })
@@ -143,8 +151,9 @@ type fakeHost struct {
 	tables []plugin.TableOpen
 	rows   []sentRows
 	ends   []sentEnd
-	frames int // host.frame sent
-	closes int // host.close sent
+	frames int      // host.frame sent
+	closes int      // host.close sent
+	titles []string // host.title sent, in order
 }
 
 type sentRows struct {
@@ -193,6 +202,23 @@ func (h *fakeHost) Close() error {
 	h.closes++
 	h.mu.Unlock()
 	return nil
+}
+
+func (h *fakeHost) Title(t string) error {
+	h.mu.Lock()
+	h.titles = append(h.titles, t)
+	h.mu.Unlock()
+	return nil
+}
+
+// title is the card's title as last sent, "" when none was.
+func (h *fakeHost) title() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.titles) == 0 {
+		return ""
+	}
+	return h.titles[len(h.titles)-1]
 }
 
 // closed is how many times the plugin asked to close the card.
