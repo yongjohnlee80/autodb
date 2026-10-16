@@ -359,10 +359,27 @@ func (b *Bound) revokeMintedAfterSwitch(ctx context.Context, name string) error 
 // stale disconnect watchers, and CodeAuth clears from the old connection
 // are all invalidated before the old client is even closed.
 func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error) {
+	return s.connect(ctx, nil)
+}
+
+// ConnectAt is Connect for a transition issued at generation gen. A session
+// that has moved past gen when the dial begins is not dialed (errSuperseded):
+// whatever moved it dials for itself, and this dial would close that one's
+// connection.
+func (s *Session) ConnectAt(ctx context.Context, gen uint64) (instanceChanged bool, err error) {
+	return s.connect(ctx, &gen)
+}
+
+// connect is Connect, refused when at is set and the generation is past it.
+func (s *Session) connect(ctx context.Context, at *uint64) (instanceChanged bool, err error) {
 	if s.remoteSnapshot() != nil {
-		return s.connectRemote(ctx)
+		return s.connectRemote(ctx, at)
 	}
 	s.mu.Lock()
+	if at != nil && s.gen != *at {
+		s.mu.Unlock()
+		return false, errSuperseded
+	}
 	old := s.client
 	s.client = nil
 	s.gen++

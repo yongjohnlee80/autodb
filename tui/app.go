@@ -227,9 +227,11 @@ type Host struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// connecting admits one connection transition at a time; connectedOnce
-	// tells a first connection from a reconnect.
+	// connecting admits one connection transition at a time, and connectSeq
+	// numbers them: the answer of one that a later one superseded changes
+	// nothing. connectedOnce tells a first connection from a reconnect.
 	connecting    bool
+	connectSeq    uint64
 	connectedOnce bool
 
 	// layoutSrc is the layout as last loaded, and dev the -dev directory ("" for

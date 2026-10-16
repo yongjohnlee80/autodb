@@ -42,12 +42,46 @@ func (h *Host) connect() {
 	if !h.ownsConnection() || h.connecting {
 		return // one transition at a time; the web never redials
 	}
+	h.dial()
+}
+
+// connectSuperseding dials now, whatever transition is in flight. Its caller
+// has moved the session on (backToLocal), so a transition in flight is for a
+// connection given up: its answer changes nothing, and the dial for the
+// connection now wanted does not wait for it.
+func (h *Host) connectSuperseding() {
+	if !h.ownsConnection() {
+		return
+	}
+	h.dial()
+}
+
+// beginConnect starts a transition, superseding any in flight.
+func (h *Host) beginConnect() uint64 {
+	h.connectSeq++
 	h.connecting = true
+	return h.connectSeq
+}
+
+// endConnect ends transition seq, and reports whether it was the one in
+// flight; a superseded one's answer is then dropped.
+func (h *Host) endConnect(seq uint64) bool {
+	if seq != h.connectSeq {
+		return false
+	}
+	h.connecting = false
+	return true
+}
+
+// dial is connect's transition.
+func (h *Host) dial() {
+	seq := h.beginConnect()
 	h.setAuth("connecting")
 	h.statusMessageAround("autodb.session.status.around", h.session.addr)
 	sess := h.session
+	issued := sess.Gen()
 	do(h, func(ctx context.Context) startup {
-		changed, err := sess.Connect(ctx)
+		changed, err := sess.ConnectAt(ctx, issued)
 		if err != nil {
 			return startup{err: err}
 		}
@@ -59,12 +93,16 @@ func (h *Host) connect() {
 			return startup{err: err}
 		}
 		return startup{gen: bound.Gen(), instanceChanged: changed, needsBootstrap: needs}
-	}, h.startupDone)
+	}, func(s startup) {
+		if !h.endConnect(seq) {
+			return // a later transition owns the connection's state
+		}
+		h.startupDone(s)
+	})
 }
 
 // startupDone applies a connection's answer, if it is still the current one.
 func (h *Host) startupDone(s startup) {
-	h.connecting = false
 	defer h.refreshIdentity()
 	if s.err != nil {
 		h.setAuth("disconnected")
