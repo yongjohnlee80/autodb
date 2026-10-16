@@ -33,6 +33,8 @@ type host interface {
 	TableEnd(id string, err error) error
 	// Close asks AutoDoc to close the card (host.close).
 	Close() error
+	// Title sets the card's title (host.title).
+	Title(title string) error
 }
 
 // step is what the card is doing.
@@ -104,6 +106,7 @@ type Plugin struct {
 
 	status  string // what was done last
 	problem string // what went wrong last
+	titled  string // the title last sent
 }
 
 // results is the table the plugin serves: its id, the cursor behind it, and rows read from AutoDB
@@ -531,7 +534,7 @@ func (p *Plugin) show(res *autodb.Result) {
 	rows := textRows(res.Rows)
 	title := ""
 	if p.conn != nil {
-		title = "Results: " + p.conn.Name
+		title = "Results · " + p.conn.Name
 	}
 	k := fit(rows, func(r [][]string) []any {
 		return plugin.TableParams(plugin.TableOpen{ID: id, Title: title, Fields: res.Columns, Rows: r, More: true})

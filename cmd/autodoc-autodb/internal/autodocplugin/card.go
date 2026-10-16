@@ -11,7 +11,8 @@ import (
 
 // THE CARD — what each step shows and the keys it takes. Each step is laid out as AutoDoc's own
 // dialogs are: a heading, the content, a rule, the buttons (the sign-in's), the keys on a line of
-// their own, then what was done last and what went wrong, in the error style.
+// their own, then what was done last and what went wrong, in the error style. Once a connection is
+// picked, every step's first line names it, and so do the card's title and the results' title.
 //
 //	finding    "Looking for AutoDB…"
 //	install    where it looked; i downloads the release matching this plugin, checked by its .sha256
@@ -199,13 +200,20 @@ const (
 	elision    = "…"
 )
 
-// layout is the card as rows width cells wide: top is the heading and the content, which give
-// way from the bottom when the card is short, except the row at keep (-1 none); bottom is the
-// rule, the buttons, the keys and the news, which keep their rows.
+// layout is the card as rows width cells wide: top is the connection, the heading and the
+// content, which give way from the bottom when the card is short, except its first fixed rows (the
+// connection and the heading) and the row at keep (-1 none); bottom is the rule, the buttons, the
+// keys and the news, which keep their rows.
 type layout struct {
 	width       int
 	top, bottom []row
-	keep        int
+	fixed, keep int
+}
+
+// heading is the step's title, the last of the rows that always show.
+func (l *layout) heading(text string) {
+	l.add(stTitle, "%s", text)
+	l.fixed = len(l.top)
 }
 
 // para adds text to rows, wrapped at spaces to the width.
@@ -226,15 +234,18 @@ func (l *layout) blank() { l.top = append(l.top, row{}) }
 // lines is what the card shows now, laid out width cells wide.
 func (p *Plugin) lines(width int) layout {
 	l := layout{width: width, keep: -1}
+	if line, st := p.connLine(); line != "" {
+		l.add(st, "%s", line)
+	}
 	var hint string
 	var buttons []row
 	switch p.step {
 	case stepFinding:
-		l.add(stTitle, "AutoDB")
+		l.heading("AutoDB")
 		l.add(stPlain, "Looking for AutoDB…")
 		hint = "q: close"
 	case stepInstall:
-		l.add(stTitle, "Install AutoDB")
+		l.heading("Install AutoDB")
 		l.add(stPlain, "AutoDB was not found. Looked in:")
 		for _, t := range p.tried {
 			where := t.Path
@@ -253,11 +264,11 @@ func (p *Plugin) lines(width int) layout {
 			hint = "i: install · q: close"
 		}
 	case stepStarting:
-		l.add(stTitle, "Starting AutoDB")
+		l.heading("Starting AutoDB")
 		l.add(stDim, "%s (%s, %s)", p.bin.Path, p.bin.Via, p.bin.Version)
 		hint = "q: close"
 	case stepLogin:
-		l.add(stTitle, "Sign in to AutoDB")
+		l.heading("Sign in to AutoDB")
 		p.serverLine(&l)
 		if p.noUsers {
 			l.add(stProblem, "AutoDB has no user yet: create the first administrator with `autodb --init` (or in `autodb --ui`), then sign in here.")
@@ -285,7 +296,7 @@ func (p *Plugin) lines(width int) layout {
 			hint = "Tab: move · Enter: cancel · q: close"
 		}
 	case stepPick:
-		l.add(stTitle, "Choose a connection")
+		l.heading("Choose a connection")
 		p.serverLine(&l)
 		l.blank()
 		for i, c := range p.conns {
@@ -294,13 +305,17 @@ func (p *Plugin) lines(width int) layout {
 				mark, st = "> ", stChosen
 				l.keep = len(l.top)
 			}
-			l.one(st, fmt.Sprintf("%s%s (%s)", mark, c.Name, c.Engine))
+			current := ""
+			if p.conn != nil && c.ID == p.conn.ID {
+				current = " · current"
+			}
+			text := elide(fmt.Sprintf("%s%s (%s)", mark, c.Name, c.Engine), width-utf8.RuneCountInString(current))
+			l.one(st, text+current)
 		}
 		hint = "↑↓ j k: choose · Enter: connect · q: close"
 	case stepReady:
-		l.add(stTitle, "Connected")
+		l.heading("Ready")
 		p.serverLine(&l)
-		l.one(stGood, p.conn.Name+" ("+p.conn.Engine+")")
 		l.blank()
 		l.add(stDim, "SPC p r  run the statement or the selection")
 		l.add(stDim, "SPC p s  run the whole note")
@@ -308,7 +323,7 @@ func (p *Plugin) lines(width int) layout {
 		l.add(stDim, "SPC p c  or c here: another connection")
 		hint = "c: another connection · q: close"
 	case stepFailed:
-		l.add(stTitle, "AutoDB is not reachable")
+		l.heading("AutoDB is not reachable")
 		l.add(stPlain, "AutoDB could not be reached.")
 		hint = "Enter: try again · q: close"
 	}
@@ -323,6 +338,38 @@ func (p *Plugin) lines(width int) layout {
 		l.para(&l.bottom, stProblem, "%s", p.problem)
 	}
 	return l
+}
+
+// connected reports whether the card has a connection to run on: picked, and AutoDB signed in.
+func (p *Plugin) connected() bool { return p.conn != nil && p.cli != nil && p.token != "" }
+
+// connLine is the line naming the connection picked, and its style; "" before any pick. A
+// connection whose server or sign-in has gone is named as not connected.
+func (p *Plugin) connLine() (string, plugin.Style) {
+	c := p.conn
+	if c == nil {
+		return "", stPlain
+	}
+	if !p.connected() {
+		return "Connection: " + c.Name + " (" + c.Engine + ") · not connected", stDim
+	}
+	s := "Connection: " + c.Name + " (" + c.Engine + ")"
+	if c.Workspace != "" {
+		s += " · " + c.Workspace
+	}
+	return s, stGood
+}
+
+// cardTitle is the card's title: AutoDB, and the connection picked.
+func (p *Plugin) cardTitle() string {
+	switch {
+	case p.conn == nil:
+		return "AutoDB"
+	case p.connected():
+		return "AutoDB · " + p.conn.Name + " (" + p.conn.Engine + ")"
+	default:
+		return "AutoDB · " + p.conn.Name + " · not connected"
+	}
 }
 
 func (p *Plugin) serverLine(l *layout) {
@@ -384,9 +431,18 @@ func buttonRows(width, focused int, labels ...string) []row {
 	return rows
 }
 
-// draw sends the card as it stands, laid out to the size AutoDoc last gave it.
+// draw sends the card as it stands, laid out to the size AutoDoc last gave it, and its title
+// when that has changed.
 func (p *Plugin) draw() {
-	if p.host == nil || p.w <= 0 || p.h <= 0 {
+	if p.host == nil {
+		return
+	}
+	if t := p.cardTitle(); t != p.titled {
+		if p.host.Title(t) == nil {
+			p.titled = t
+		}
+	}
+	if p.w <= 0 || p.h <= 0 {
 		return
 	}
 	f := plugin.NewFrame(p.w, p.h)
@@ -398,10 +454,11 @@ func (p *Plugin) draw() {
 	}
 	room := max(p.h-len(tail), 0)
 	if len(top) > room {
-		// the heading stays, and the rows after it scroll so the focused one shows
-		if room >= 2 && l.keep >= room {
+		// the connection and the heading stay, and the rows after them scroll so the focused one
+		// shows
+		if room > l.fixed && l.keep >= room {
 			skip := l.keep - room + 1
-			top = append(top[:1:1], top[1+skip:]...)
+			top = append(top[:l.fixed:l.fixed], top[l.fixed+skip:]...)
 		}
 		top = top[:room]
 	}

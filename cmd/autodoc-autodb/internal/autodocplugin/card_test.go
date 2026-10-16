@@ -11,6 +11,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodoc/plugin"
+	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 )
 
 // atSignIn is a plugin opened w×h on db and at its sign-in, sending to h.
@@ -359,5 +360,207 @@ func TestTheCardFitsItsSize(t *testing.T) {
 	lines = sh.lines()
 	if lines[0] != "Sign in to AutoDB" || rowOf(lines, 0, is("•█")) < 0 {
 		t.Fatalf("a short card lost its heading or its focused field:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// The connection picked is named everywhere once it is picked: the card's title, the first row of
+// every step (the ready card, a query running, an error, the pick itself, where its row is marked
+// current). Before a pick the title is AutoDB alone and no row names a connection.
+func TestTheConnectionShowsAfterAPick(t *testing.T) {
+	db := newFakeDB(t)
+	p, h := atSignIn(t, db, 48, 20)
+	if h.title() != "AutoDB" {
+		t.Fatalf("the sign-in's title is %q, want AutoDB", h.title())
+	}
+	signIn(p, "right")
+	if h.title() != "AutoDB" || h.lines()[0] != "Choose a connection" {
+		t.Fatalf("before a pick: title %q, first row %q; want AutoDB and the heading", h.title(), h.lines()[0])
+	}
+	p.Key(plugin.Key{Key: "Enter"})
+	const header = "Connection: scratch (postgres)"
+	if h.title() != "AutoDB · scratch (postgres)" {
+		t.Fatalf("after the pick the title is %q", h.title())
+	}
+	if lines := h.lines(); lines[0] != header || lines[1] != "Ready" {
+		t.Fatalf("the ready card's first rows are %q, want the connection then the heading", lines[:2])
+	}
+	if st, _ := h.styleOf(0, "Connection"); st != stGood {
+		t.Fatalf("the connection's row is %+v, want %+v", st, stGood)
+	}
+
+	seen := make(chan string, 1)
+	db.query = func(string) (map[string]any, error) {
+		seen <- h.lines()[0]
+		return nil, &golibrpc.Error{Code: -32032, Message: "exec: relation \"nope\" does not exist"}
+	}
+	run(p, docAt("SELECT * FROM nope|"))
+	if running := <-seen; running != header {
+		t.Fatalf("while the query ran the first row was %q, want %q", running, header)
+	}
+	if lines := h.lines(); lines[0] != header || !strings.Contains(h.card(), "does not exist") {
+		t.Fatalf("after a failed statement the card is:\n%s\nwant the connection first and the error", strings.Join(lines, "\n"))
+	}
+
+	p.Key(plugin.Key{Key: "c"})
+	if lines := h.lines(); lines[0] != header || rowOf(lines, 0, is("> scratch (postgres) · current")) < 0 {
+		t.Fatalf("the pick does not name and mark the connection in use:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// Picking another connection renames the title and the first row, with the workspace conn.list
+// names it under, and the pick marks the new one current.
+func TestPickingAnotherConnectionRenamesTheCard(t *testing.T) {
+	db := newFakeDB(t)
+	db.more = []map[string]any{{"id": int64(8), "name": "ledger", "engine": "sqlite", "workspace": "finance"}}
+	p, h := connected(t, db)
+	if h.title() != "AutoDB · scratch (postgres)" {
+		t.Fatalf("the title is %q", h.title())
+	}
+	p.Key(plugin.Key{Key: "c"})
+	lines := h.lines()
+	if rowOf(lines, 0, is("> scratch (postgres) · current")) < 0 || rowOf(lines, 0, is("ledger (sqlite)")) < 0 {
+		t.Fatalf("the pick before the change:\n%s", strings.Join(lines, "\n"))
+	}
+	p.Key(plugin.Key{Key: "j"})
+	p.Key(plugin.Key{Key: "Enter"})
+	if p.step != stepReady || p.conn == nil || p.conn.ID != 8 {
+		t.Fatalf("after choosing ledger: step %d, connection %+v", p.step, p.conn)
+	}
+	if h.title() != "AutoDB · ledger (sqlite)" {
+		t.Fatalf("after the change the title is %q", h.title())
+	}
+	if l := h.lines()[0]; l != "Connection: ledger (sqlite) · finance" {
+		t.Fatalf("after the change the first row is %q", l)
+	}
+	p.Key(plugin.Key{Key: "c"})
+	lines = h.lines()
+	if rowOf(lines, 0, is("scratch (postgres)")) < 0 || rowOf(lines, 0, is("> ledger (sqlite) · current")) < 0 {
+		t.Fatalf("the pick after the change does not mark ledger current:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// The results table is titled with the connection it came from, a whole result and a cursor's.
+func TestTheResultsTitleNamesTheConnection(t *testing.T) {
+	db := newFakeDB(t)
+	paged := false
+	db.query = func(string) (map[string]any, error) {
+		if paged {
+			return page(1, 2, true, "cur-t"), nil
+		}
+		return page(1, 1, false, ""), nil
+	}
+	p, h := connected(t, db)
+	run(p, docAt("SELECT 1|"))
+	paged = true
+	run(p, docAt("SELECT n FROM t|"))
+	if len(h.tables) != 2 || h.tables[1].ID != "cur-t" {
+		t.Fatalf("the runs opened %+v, want a whole table then cur-t's", h.tables)
+	}
+	for _, tab := range h.tables {
+		if tab.Title != "Results · scratch" {
+			t.Errorf("table %s is titled %q, want %q", tab.ID, tab.Title, "Results · scratch")
+		}
+	}
+}
+
+// A connection lost, or a sign-in AutoDB no longer takes, keeps the last connection's name in the
+// title and the first row, saying it is not connected.
+func TestALostConnectionIsNamedNotConnected(t *testing.T) {
+	db := newFakeDB(t)
+	db.query = whole
+	p, h := connected(t, db)
+	_ = p.cli.Close()
+	run(p, docAt("SELECT 1|"))
+	if p.step != stepFailed {
+		t.Fatalf("after the lost connection the card is at step %d", p.step)
+	}
+	if h.title() != "AutoDB · scratch · not connected" {
+		t.Fatalf("after the lost connection the title is %q", h.title())
+	}
+	if l := h.lines()[0]; l != "Connection: scratch (postgres) · not connected" {
+		t.Fatalf("after the lost connection the first row is %q", l)
+	}
+
+	db2 := newFakeDB(t)
+	db2.query = func(string) (map[string]any, error) {
+		return nil, &golibrpc.Error{Code: autodb.CodeAuth, Message: "auth: store is locked"}
+	}
+	q, qh := connected(t, db2)
+	run(q, docAt("SELECT 1|"))
+	if q.step != stepLogin || qh.title() != "AutoDB · scratch · not connected" {
+		t.Fatalf("after a sign-in refused: step %d, title %q", q.step, qh.title())
+	}
+}
+
+// fits fails the cell when a row of the last frame passes the card's width inside its margins, or
+// cuts a word of want across rows.
+func fits(t *testing.T, h *fakeHost, w int, state string, want ...string) {
+	t.Helper()
+	lines := h.lines()
+	for _, l := range lines {
+		if n := len([]rune(l)); n > w-2 {
+			t.Errorf("%s: a row of %d cells in a card %d wide: %q", state, n, w, l)
+		}
+	}
+	for _, s := range want {
+		for _, word := range strings.Fields(s) {
+			if !slices.ContainsFunc(lines, func(l string) bool { return slices.Contains(strings.Fields(l), word) }) {
+				t.Errorf("%s: %q is cut across rows:\n%s", state, word, strings.Join(lines, "\n"))
+			}
+		}
+	}
+}
+
+// Docked on the right, the card is a narrow column: at 32 columns the pick, the ready card, the
+// failed card and the install offer fit, their words whole, the connection still first.
+func TestTheCardReadsInANarrowColumn(t *testing.T) {
+	const w = 32
+	db := newFakeDB(t)
+	db.query = whole
+	p, h := connected(t, db)
+	p.Resize(w, 24)
+	fits(t, h, w, "ready", "Connection: scratch (postgres)", "c: another connection · q: close")
+	if l := h.lines()[0]; l != "Connection: scratch (postgres)" {
+		t.Errorf("ready at %d: the first row is %q", w, l)
+	}
+	p.Key(plugin.Key{Key: "c"})
+	fits(t, h, w, "pick", "↑↓ j k: choose · Enter: connect · q: close")
+	if rowOf(h.lines(), 0, is("> scratch (postgres) · current")) < 0 {
+		t.Errorf("pick at %d:\n%s", w, strings.Join(h.lines(), "\n"))
+	}
+	p.Key(plugin.Key{Key: "Enter"})
+	_ = p.cli.Close()
+	run(p, docAt("SELECT 1|"))
+	fits(t, h, w, "failed", "Enter: try again · q: close", p.problem)
+	if l := h.lines()[0]; !strings.HasPrefix(l, "Connection: scratch") {
+		t.Errorf("failed at %d: the first row is %q", w, l)
+	}
+
+	in := newPlugin("v0.4.2", t.TempDir())
+	t.Cleanup(in.Close)
+	in.find = func(context.Context) (autodb.Binary, []autodb.Tried, error) {
+		return autodb.Binary{}, []autodb.Tried{{Candidate: autodb.Candidate{Via: "PATH"}, Why: "no autodb on PATH"}}, errors.New("not found")
+	}
+	ih := &fakeHost{}
+	in.attach(ih, w, 30)
+	fits(t, ih, w, "install", "AutoDB was not found. Looked in:", "i: install · q: close")
+}
+
+// A pick longer than a short card scrolls under the connection and the heading, which stay, so the
+// chosen row shows.
+func TestALongPickScrollsUnderTheConnection(t *testing.T) {
+	db := newFakeDB(t)
+	for i := range 12 {
+		db.more = append(db.more, map[string]any{"id": int64(100 + i), "name": "db" + string(rune('a'+i)), "engine": "sqlite"})
+	}
+	p, h := connected(t, db)
+	p.Key(plugin.Key{Key: "c"})
+	p.Resize(32, 10)
+	for range 12 {
+		p.Key(plugin.Key{Key: "j"})
+	}
+	lines := h.lines()
+	if lines[0] != "Connection: scratch (postgres)" || lines[1] != "Choose a connection" || rowOf(lines, 0, is("> dbl (sqlite)")) < 0 {
+		t.Fatalf("a long pick in a short card lost the connection, the heading or the chosen row:\n%s", strings.Join(lines, "\n"))
 	}
 }

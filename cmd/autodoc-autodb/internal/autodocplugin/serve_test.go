@@ -208,7 +208,7 @@ func TestQIsHostCloseOffTheFieldsOverTheRealLink(t *testing.T) {
 	key("q")
 	next(plugin.MethodHostClose, nil)
 	send(plugin.MethodKey, plugin.KeyParams(plugin.Key{Key: "Enter"})) // the one connection
-	next(plugin.MethodFrame, framed("Connected"))
+	next(plugin.MethodFrame, framed("Connection: scratch (postgres)"))
 	key("q")
 	next(plugin.MethodHostClose, nil)
 
