@@ -341,6 +341,17 @@ func TestTheCardFitsItsSize(t *testing.T) {
 		}
 	}
 
+	path := "into /home/me/.local/share/autodoc/plugins/autodb/bin/autodb."
+	rows := wrap(path, 22)
+	if strings.Join(rows, "") != strings.Replace(path, " ", "", 1) {
+		t.Fatalf("wrapping %q lost text: %q", path, rows)
+	}
+	for _, r := range rows[1 : len(rows)-1] {
+		if !strings.HasSuffix(r, "/") {
+			t.Fatalf("a path too long for a row is cut inside a name, not after a /: %q", rows)
+		}
+	}
+
 	short, sh := atSignIn(t, newFakeDB(t), 48, 9)
 	short.noUsers = true
 	tab(short)
