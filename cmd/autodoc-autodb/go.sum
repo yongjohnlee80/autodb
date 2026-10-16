@@ -36,8 +36,8 @@ github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UV
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/yongjohnlee80/autodoc v0.1.51 h1:WICnZPxDEvnH9mIczkNuoMePiBZ8ExSbC/ofJjV3S+o=
-github.com/yongjohnlee80/autodoc v0.1.51/go.mod h1:ZxBwePYqP5fFt6z/M8fIH1LFguwcmF3FobLyJz3uBRk=
+github.com/yongjohnlee80/autodoc v0.1.52-0.20261016012523-87cfe8f4eae2 h1:9mhbEG/MQPS1WyeYsFERyJmzd9l3Ts/H/tCTGu4hYpM=
+github.com/yongjohnlee80/autodoc v0.1.52-0.20261016012523-87cfe8f4eae2/go.mod h1:XSdC6f5J93QEgLaNvEIMFHz7RBXx4UukecszWThRe8k=
 github.com/yongjohnlee80/golib v0.6.110 h1:/tZYnz6w/k1UzLYkeC4f69zhjo97pPxHr7pdER34eyc=
 github.com/yongjohnlee80/golib v0.6.110/go.mod h1:RAvsFuXFRS4qjOGL7Af9SRHVixI6cy0o4jsvPxRlTlc=
 golang.org/x/crypto v0.55.0 h1:+KWHjbgOaAQ66dh/YlkZKHlz9ZUlq61AFirAR9ntP8M=

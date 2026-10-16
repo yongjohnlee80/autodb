@@ -4,7 +4,7 @@ go 1.25.3
 
 require (
 	github.com/yongjohnlee80/autodb v0.0.0
-	github.com/yongjohnlee80/autodoc v0.1.51
+	github.com/yongjohnlee80/autodoc v0.1.52-0.20261016012523-87cfe8f4eae2
 	github.com/yongjohnlee80/golib v0.6.110
 )
 
