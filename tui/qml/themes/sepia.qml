@@ -18,28 +18,28 @@ Theme {
     // as the warning this is.
     pressureRaisedText: "#b3402a"
     app {
-        window: "#eadfc4"; windowText: "#4a3826"
-        button: "#ddcfae"; buttonText: "#4a3826"
+        window: "#dacca9"; windowText: "#4a3826"
+        button: "#cfbf9b"; buttonText: "#4a3826"
         highlight: "#8a5a2b"; highlightedText: "#fbf6ea"
-        base: "#f4ecd8"; text: "#5b4636"
-        inactive { highlight: "#ddcca6"; highlightedText: "#8a5a2b" }
+        base: "#e6d9b9"; text: "#5b4636"
+        inactive { highlight: "#cfbd96"; highlightedText: "#8a5a2b" }
         mid: "#b5a380"; light: "#8a5a2b"
-        backdrop: "#e4d6b4"
+        backdrop: "#d4c4a0"
     }
     menu {
-        window: "#e6d9b9"; windowText: "#4a3826"
+        window: "#d9caa6"; windowText: "#4a3826"
         highlight: "#8a5a2b"; highlightedText: "#fbf6ea"
         accent: "#9b3d1f"
     }
     document {
-        window: "#f4ecd8"; windowText: "#8c7656"
+        window: "#e6d9b9"; windowText: "#8c7656"
         highlight: "#8a5a2b"; highlightedText: "#fbf6ea"
-        base: "#f4ecd8"; text: "#5b4636"
-        selection: "#e2c98e"; selectedText: "#3b2a1a"
+        base: "#e6d9b9"; text: "#5b4636"
+        selection: "#d6b97a"; selectedText: "#3b2a1a"
         cursor: "#b5541f"; lineNumber: "#a8946c"
     }
     status {
-        window: "#e6d9b9"; windowText: "#5b4636"
+        window: "#d9caa6"; windowText: "#5b4636"
     }
     syntax {
         keyword: "#7c3f12"; controlFlow: "#7c3f12"
