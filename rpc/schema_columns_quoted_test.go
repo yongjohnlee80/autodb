@@ -20,7 +20,7 @@ func TestSchemaColumnsCarryTheServersQuoting(t *testing.T) {
 		`CREATE TABLE quoting ("Id" INTEGER PRIMARY KEY, "Order Total" TEXT)`); errVal != nil {
 		t.Fatalf("create: %#v", errVal)
 	}
-	checkQuotedColumns(t, c, f.rootTok, f.connID, "", "quoting", `"quoting"`)
+	checkQuotedColumns(t, c, f.rootTok, f.connID, "", "quoting", `"main"."quoting"`)
 }
 
 func TestSchemaColumnsCarryTheServersQuotingOnPostgres(t *testing.T) {
