@@ -1,0 +1,657 @@
+// Package autodocplugin is AutoDB as an AutoDoc plugin: a card beside the page that finds (or
+// installs) AutoDB, starts its server, signs in and picks a connection, and runs the statement
+// under the cursor, the selection or the whole note, sending the rows to AutoDoc's results table
+// a page at a time.
+//
+// It is an AutoDoc plugin.Handler. Serve calls its methods one at a time on one goroutine, so its
+// state needs no lock: every AutoDB call runs on that goroutine too, and the card is drawn after
+// each step.
+package autodocplugin
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
+	"github.com/yongjohnlee80/autodb/core/engine"
+	"github.com/yongjohnlee80/autodoc/plugin"
+)
+
+// host is what the plugin sends to AutoDoc: *plugin.Peer, or a test's recorder.
+type host interface {
+	Frame(f *plugin.Frame) error
+	Table(t plugin.TableOpen) error
+	Rows(id string, rows [][]string, more bool) error
+	TableEnd(id string, err error) error
+}
+
+// step is what the card is doing.
+type step int
+
+const (
+	stepFinding  step = iota // looking for AutoDB
+	stepInstall              // none found: an install is offered
+	stepStarting             // reaching its server, starting it if need be
+	stepLogin                // signing in
+	stepPick                 // choosing a connection
+	stepReady                // connected: the commands run
+	stepFailed               // the server could not be reached; Enter tries again
+)
+
+// The deadlines of AutoDB calls that are not statements.
+//
+// NOTE: deadlines: a server that stops answering must not hold the card forever, and a reply
+// that never comes announces nothing to wait on. A statement (run, script, fetch) has none: it
+// runs as long as the database takes, under the server's own limits.
+const (
+	controlTimeout = 15 * time.Second
+	loginTimeout   = 30 * time.Second // the passphrase's key derivation is slow on purpose
+	installTimeout = 5 * time.Minute
+	// closeBudget is what Close may spend: the host stops the process 2 s after plugin.close.
+	closeBudget = 1500 * time.Millisecond
+)
+
+// Plugin is the handler.
+type Plugin struct {
+	plugin.Base
+
+	version   string
+	pluginDir string
+
+	// find, start and install reach outside the process; a test replaces them.
+	find    func(ctx context.Context) (autodb.Binary, []autodb.Tried, error)
+	start   func(ctx context.Context, bin autodb.Binary) (*autodb.Client, error)
+	install func(ctx context.Context) error
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	host   host
+	w, h   int
+	doc    plugin.Document
+
+	step  step
+	tried []autodb.Tried
+	bin   autodb.Binary
+	cli   *autodb.Client
+	// noUsers is a store with no user yet: nobody can sign in until one is made.
+	noUsers bool
+
+	// the sign-in form; the passphrase is kept only until it is sent
+	name, pass []rune
+	field      int // 0 the name, 1 the passphrase
+
+	token string // auth.login's, in memory only
+	conns []autodb.Connection
+	pick  int
+	conn  *autodb.Connection
+	eng   engine.Name
+	sid   string // the session, opened once on the chosen connection
+
+	table    *results // the table shown, nil when none of ours is
+	idPrefix string
+	seq      int
+
+	status  string // what was done last
+	problem string // what went wrong last
+}
+
+// results is the table the plugin serves: its id, the cursor behind it, and rows read from AutoDB
+// and not yet sent.
+type results struct {
+	id     string
+	cursor string // "" once AutoDB has no more rows for it
+	buf    [][]string
+	sent   int
+	ended  bool // the host has been told no more rows will come
+}
+
+// New is the plugin, version its own release (stamped at build).
+func New(version string) *Plugin {
+	dir := os.Getenv("AUTODOC_PLUGIN_DIR")
+	if dir == "" {
+		if exe, err := os.Executable(); err == nil {
+			dir = filepath.Dir(filepath.Dir(exe)) // the command is <dir>/bin/autodoc-autodb
+		}
+	}
+	p := newPlugin(version, dir)
+	env := autodb.Env{Getenv: os.Getenv, PluginDir: dir}
+	p.find = func(ctx context.Context) (autodb.Binary, []autodb.Tried, error) { return autodb.Find(ctx, env) }
+	p.start = func(ctx context.Context, bin autodb.Binary) (*autodb.Client, error) {
+		return autodb.Starter{Bin: bin.Path, ClientVersion: version}.Start(ctx)
+	}
+	p.install = func(ctx context.Context) error {
+		return autodb.Install(ctx, http.DefaultClient, autodb.ThisPlatform(version), autodb.InstallPath(dir))
+	}
+	return p
+}
+
+func newPlugin(version, dir string) *Plugin {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Plugin{version: version, pluginDir: dir, ctx: ctx, cancel: cancel,
+		idPrefix: "res-" + hex.EncodeToString(b[:]), name: []rune(os.Getenv("USER"))}
+}
+
+// Open is the card opened: it looks for AutoDB at once.
+func (p *Plugin) Open(peer *plugin.Peer, o plugin.Open) { p.attach(peer, o.Width, o.Height) }
+
+func (p *Plugin) attach(h host, w, hh int) {
+	p.host, p.w, p.h = h, w, hh
+	p.boot()
+}
+
+// Resize redraws the card at its new size.
+func (p *Plugin) Resize(w, h int) {
+	p.w, p.h = w, h
+	p.draw()
+}
+
+// Document keeps the latest note: the feed's, or the one a command carries.
+func (p *Plugin) Document(d plugin.Document) { p.doc = d }
+
+// Close lets go of what the plugin holds on the server: the cursor, the session and the token.
+func (p *Plugin) Close() {
+	defer p.cancel()
+	if p.cli == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), closeBudget)
+	defer cancel()
+	if t := p.table; t != nil && t.cursor != "" {
+		_ = p.cli.CloseCursor(ctx, p.token, p.sid, t.cursor)
+	}
+	if p.sid != "" {
+		_ = p.cli.CloseSession(ctx, p.token, p.sid)
+	}
+	if p.token != "" {
+		_ = p.cli.Logout(ctx, p.token)
+	}
+	_ = p.cli.Close()
+}
+
+// ---------------------------------------------------------------- reaching AutoDB
+
+// boot finds AutoDB and reaches its server.
+func (p *Plugin) boot() {
+	p.step, p.problem, p.status = stepFinding, "", ""
+	p.draw()
+	bin, tried, err := p.find(p.ctx)
+	p.tried = tried
+	if err != nil {
+		p.step = stepInstall
+		if !autodb.IsRelease(p.version) {
+			p.problem = fmt.Sprintf("this plugin was built from a commit with no release (%s), so there is no release to install: "+
+				"install AutoDB with `%s`, or build it here with `go build -o bin/autodb ./cmd/autodb`", p.version, autodb.GoInstall(""))
+		}
+		p.draw()
+		return
+	}
+	p.bin = bin
+	p.connect()
+}
+
+// connect reaches the server of the AutoDB found, and asks for a sign-in.
+func (p *Plugin) connect() {
+	p.step, p.status = stepStarting, ""
+	p.draw()
+	cli, err := p.start(p.ctx, p.bin)
+	if err != nil {
+		p.step, p.problem = stepFailed, err.Error()
+		p.draw()
+		return
+	}
+	p.cli = cli
+	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
+	defer cancel()
+	p.noUsers, _ = cli.NeedsBootstrap(ctx)
+	p.step, p.problem = stepLogin, ""
+	p.draw()
+}
+
+// doInstall installs the release matching this plugin, then looks again.
+func (p *Plugin) doInstall() {
+	if !autodb.IsRelease(p.version) {
+		return
+	}
+	p.problem, p.status = "", "downloading AutoDB "+p.version+"…"
+	p.draw()
+	ctx, cancel := context.WithTimeout(p.ctx, installTimeout)
+	defer cancel()
+	if err := p.install(ctx); err != nil {
+		p.problem, p.status = err.Error(), ""
+		p.draw()
+		return
+	}
+	p.boot()
+}
+
+// login signs in with the form's name and passphrase; the passphrase is dropped either way.
+func (p *Plugin) login() {
+	name, pass := strings.TrimSpace(string(p.name)), string(p.pass)
+	clear(p.pass)
+	p.pass = p.pass[:0]
+	if name == "" {
+		p.problem = "type your AutoDB user name"
+		p.field = 0
+		p.draw()
+		return
+	}
+	p.status, p.problem = "signing in…", ""
+	p.draw()
+	ctx, cancel := context.WithTimeout(p.ctx, loginTimeout)
+	defer cancel()
+	token, err := p.cli.Login(ctx, name, pass)
+	p.status = ""
+	if err != nil {
+		if _, answered := autodb.Code(err); !answered {
+			p.lost(err)
+			return
+		}
+		p.problem = "sign-in refused: " + autodb.Message(err)
+		p.field = 1
+		p.draw()
+		return
+	}
+	p.token = token
+	p.choose()
+}
+
+// choose lists the connections for the card to pick from.
+func (p *Plugin) choose() {
+	if p.cli == nil || p.token == "" {
+		p.draw()
+		return
+	}
+	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
+	defer cancel()
+	conns, err := p.cli.Connections(ctx, p.token)
+	if err != nil {
+		p.failed("listing the connections", err)
+		p.draw()
+		return
+	}
+	p.conns, p.pick, p.step, p.problem = conns, 0, stepPick, ""
+	for i, c := range conns {
+		if p.conn != nil && c.ID == p.conn.ID {
+			p.pick = i
+		}
+	}
+	if len(conns) == 0 {
+		p.problem = "AutoDB has no connection you may use: add one in `autodb --ui`, then press c"
+	}
+	p.draw()
+}
+
+// use opens a session on the connection picked; the session on the last one, if another, closes.
+func (p *Plugin) use(c autodb.Connection) {
+	eng, err := engine.Parse(c.Engine)
+	if err != nil {
+		p.problem = fmt.Sprintf("%s's engine %q is not one this plugin knows", c.Name, c.Engine)
+		p.draw()
+		return
+	}
+	if p.conn != nil && p.conn.ID == c.ID && p.sid != "" {
+		p.step = stepReady
+		p.draw()
+		return
+	}
+	p.endTable(nil)
+	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
+	defer cancel()
+	if p.sid != "" {
+		_ = p.cli.CloseSession(ctx, p.token, p.sid)
+		p.sid = ""
+	}
+	sid, err := p.cli.OpenSession(ctx, p.token, c.ID)
+	if err != nil {
+		p.failed("opening a session on "+c.Name, err)
+		p.draw()
+		return
+	}
+	p.conn, p.eng, p.sid = &c, eng, sid
+	p.step, p.problem, p.status = stepReady, "", "connected to "+c.Name+" ("+c.Engine+")"
+	p.draw()
+}
+
+// reopen opens a new session on the chosen connection, for one AutoDB closed (idle, say).
+func (p *Plugin) reopen() error {
+	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
+	defer cancel()
+	sid, err := p.cli.OpenSession(ctx, p.token, p.conn.ID)
+	if err != nil {
+		return err
+	}
+	p.sid = sid
+	return nil
+}
+
+// failed says what went wrong, and acts on what it means: a token no longer valid sends the card
+// back to the sign-in, a session gone is forgotten (the next run opens another), and a connection
+// gone sends the card to reconnect.
+func (p *Plugin) failed(what string, err error) {
+	code, answered := autodb.Code(err)
+	switch {
+	case !answered:
+		p.lost(err)
+	case code == autodb.CodeAuth:
+		p.signedOut(autodb.Message(err))
+	case code == autodb.CodeSessionNotFound:
+		p.sid = ""
+		if p.table != nil {
+			p.table.cursor = ""
+		}
+		p.problem = what + ": the session ended (" + autodb.Message(err) + "); run again to open another"
+	default:
+		p.problem = what + ": " + autodb.Message(err)
+	}
+}
+
+// signedOut is a token AutoDB no longer takes (a restarted server locks the store again): the
+// card goes back to the sign-in.
+func (p *Plugin) signedOut(why string) {
+	p.forgetTable(errors.New("signed out of AutoDB"))
+	p.token, p.sid = "", ""
+	p.step, p.field = stepLogin, 1
+	p.problem = "signed out (" + why + "): sign in again"
+}
+
+// lost is the connection to the server gone.
+func (p *Plugin) lost(err error) {
+	p.forgetTable(errors.New("the connection to AutoDB ended"))
+	if p.cli != nil {
+		_ = p.cli.Close()
+	}
+	p.cli, p.token, p.sid = nil, "", ""
+	p.step, p.problem = stepFailed, "the connection to AutoDB ended: "+err.Error()
+	p.draw()
+}
+
+// ready reports whether the commands can run, and says why not on the card.
+func (p *Plugin) ready() bool {
+	if p.step == stepReady && p.cli != nil && p.token != "" && p.conn != nil {
+		return true
+	}
+	switch p.step {
+	case stepLogin:
+		p.problem = "sign in first"
+	case stepPick:
+		p.problem = "choose a connection first"
+	default:
+		p.problem = "AutoDB is not connected yet"
+	}
+	p.draw()
+	return false
+}
+
+// ---------------------------------------------------------------- the commands
+
+// Command runs one of the manifest's commands.
+func (p *Plugin) Command(id string) {
+	switch id {
+	case "run":
+		p.run()
+	case "script":
+		p.script()
+	case "connect":
+		p.connectCommand()
+	case "cancel":
+		p.cancelQuery()
+	}
+}
+
+func (p *Plugin) connectCommand() {
+	switch {
+	case p.step == stepFailed:
+		p.boot()
+	case p.cli != nil && p.token != "":
+		p.choose()
+	default:
+		p.draw()
+	}
+}
+
+// tooLarge says the note could not be sent; it reports whether that is so.
+func (p *Plugin) tooLarge() bool {
+	if !p.doc.TooLarge {
+		return false
+	}
+	p.problem = "the note is too large to send to a plugin: select the statement in a smaller file"
+	p.draw()
+	return true
+}
+
+// run sends the selection, or the statement under the cursor.
+func (p *Plugin) run() {
+	if !p.ready() || p.tooLarge() {
+		return
+	}
+	sql, err := statementAt(p.doc, p.eng)
+	if err != nil {
+		p.problem, p.status = err.Error(), ""
+		p.draw()
+		return
+	}
+	p.endTable(nil)
+	p.problem, p.status = "", "running…"
+	p.draw()
+	res, err := p.query(sql)
+	if err != nil {
+		p.status = ""
+		p.failed("the statement", err)
+		p.draw()
+		return
+	}
+	p.show(res)
+}
+
+// query is exec.session_query, opening a session first when the last one has ended.
+func (p *Plugin) query(sql string) (*autodb.Result, error) {
+	if p.sid == "" {
+		if err := p.reopen(); err != nil {
+			return nil, err
+		}
+	}
+	res, err := p.cli.Query(p.ctx, p.token, p.sid, sql, 0)
+	if autodb.IsCode(err, autodb.CodeSessionNotFound) {
+		if err := p.reopen(); err != nil {
+			return nil, err
+		}
+		res, err = p.cli.Query(p.ctx, p.token, p.sid, sql, 0)
+	}
+	return res, err
+}
+
+// script runs the whole note, AutoDB splitting it; the last statement's rows are shown.
+func (p *Plugin) script() {
+	if !p.ready() || p.tooLarge() {
+		return
+	}
+	if strings.TrimSpace(p.doc.Text) == "" {
+		p.problem, p.status = "the note is empty: there is no script to run", ""
+		p.draw()
+		return
+	}
+	p.endTable(nil)
+	p.problem, p.status = "", "running the script…"
+	p.draw()
+	res, err := p.cli.RunScript(p.ctx, p.token, p.conn.ID, p.doc.Text)
+	if err != nil {
+		p.status = ""
+		p.failed("the script", err)
+		p.draw()
+		return
+	}
+	p.show(res)
+}
+
+// show sends a result to AutoDoc's table: the first rows that fit one message, the rest kept for
+// the fetches. A result with no columns (a write, say) has no table; the card says what it did.
+func (p *Plugin) show(res *autodb.Result) {
+	prefix := ""
+	if res.Statements > 0 {
+		prefix = fmt.Sprintf("%d statements ran; the last: ", res.Statements)
+	}
+	if len(res.Columns) == 0 {
+		p.status = fmt.Sprintf("%s%s ok: %d rows affected in %d ms", prefix, verb(res), res.Affected, res.DurationMS)
+		p.draw()
+		return
+	}
+	id := res.Cursor
+	if id == "" {
+		id = p.freshID() // a whole result has no cursor, and a table needs an id of its own
+	}
+	rows := textRows(res.Rows)
+	title := ""
+	if p.conn != nil {
+		title = "Results: " + p.conn.Name
+	}
+	k := fit(rows, func(r [][]string) []any {
+		return plugin.TableParams(plugin.TableOpen{ID: id, Title: title, Fields: res.Columns, Rows: r, More: true})
+	}, plugin.MethodTable)
+	t := &results{id: id, cursor: res.Cursor, buf: rows[k:], sent: k}
+	more := t.cursor != "" || len(t.buf) > 0
+	t.ended = !more
+	if err := p.host.Table(plugin.TableOpen{ID: id, Title: title, Fields: res.Columns, Rows: rows[:k], More: more}); err != nil {
+		p.problem = "the results could not be shown: " + err.Error()
+	}
+	p.table = t
+	switch {
+	case more:
+		p.status = fmt.Sprintf("%s%s: %d rows shown in %d ms, more as you scroll", prefix, verb(res), k, res.DurationMS)
+	case res.More:
+		p.status = fmt.Sprintf("%s%s: the first %d rows (AutoDB caps a result it does not page)", prefix, verb(res), k)
+	default:
+		p.status = fmt.Sprintf("%s%s: %d rows in %d ms", prefix, verb(res), k, res.DurationMS)
+	}
+	p.draw()
+}
+
+func verb(res *autodb.Result) string {
+	if res.Verb == "" {
+		return "OK"
+	}
+	return strings.ToUpper(res.Verb)
+}
+
+// freshID is a table id never used before in this run, and never a cursor's.
+func (p *Plugin) freshID() string {
+	p.seq++
+	return fmt.Sprintf("%s-%d", p.idPrefix, p.seq)
+}
+
+// FetchRows answers AutoDoc asking for more of the table: rows read and not yet sent first, then
+// the cursor's next page. An ended cursor or a failed fetch ends the table, saying why.
+func (p *Plugin) FetchRows(f plugin.TableFetch) {
+	t := p.table
+	if t == nil || t.id != f.ID {
+		_ = p.host.TableEnd(f.ID, errors.New("this table's query has been closed"))
+		return
+	}
+	if len(t.buf) < f.N && t.cursor != "" {
+		res, err := p.cli.Fetch(p.ctx, p.token, p.sid, t.cursor, f.N-len(t.buf))
+		if err != nil {
+			t.cursor = "" // AutoDB ends a cursor whose page failed
+			p.endTable(errors.New(autodb.Message(err)))
+			p.failed("fetching more rows", err)
+			p.draw()
+			return
+		}
+		if !res.More {
+			t.cursor = "" // read to its end: AutoDB has closed it
+		}
+		t.buf = append(t.buf, textRows(res.Rows)...)
+	}
+	page := t.buf[:min(f.N, len(t.buf))]
+	k := fit(page, func(r [][]string) []any { return plugin.RowsParams(t.id, r, true) }, plugin.MethodRows)
+	rows := page[:k]
+	t.buf = t.buf[k:]
+	t.sent += k
+	more := t.cursor != "" || len(t.buf) > 0
+	t.ended = !more
+	_ = p.host.Rows(t.id, rows, more)
+	if !more {
+		p.status = fmt.Sprintf("all %d rows loaded", t.sent)
+		p.draw()
+	}
+}
+
+// TableClosed is the table gone from AutoDoc (its panel closed, or a newer table replaced it): the
+// cursor serving it closes. A table already replaced by one of the plugin's own is not the one
+// served.
+func (p *Plugin) TableClosed(id string) {
+	if p.table == nil || p.table.id != id {
+		return
+	}
+	p.closeCursor()
+	p.table = nil
+}
+
+// cancelQuery closes the cursor of the table shown; its loaded rows stay.
+func (p *Plugin) cancelQuery() {
+	t := p.table
+	if t == nil || t.ended {
+		p.status, p.problem = "no query is open to cancel", ""
+		p.draw()
+		return
+	}
+	n := t.sent
+	p.endTable(errors.New("cancelled"))
+	p.status, p.problem = fmt.Sprintf("cancelled: %d rows loaded", n), ""
+	p.draw()
+}
+
+// endTable closes the cursor of the table shown and tells AutoDoc no more rows will come (why,
+// when not nil, says so); the plugin then serves no table.
+func (p *Plugin) endTable(why error) {
+	t := p.table
+	if t == nil {
+		return
+	}
+	p.closeCursor()
+	if !t.ended {
+		_ = p.host.TableEnd(t.id, why)
+		t.ended = true
+	}
+	p.table = nil
+}
+
+// forgetTable ends the table without asking AutoDB anything: the server is gone, or no longer
+// takes the token.
+func (p *Plugin) forgetTable(why error) {
+	if t := p.table; t != nil {
+		t.cursor, t.buf = "", nil
+		if !t.ended {
+			_ = p.host.TableEnd(t.id, why)
+			t.ended = true
+		}
+		p.table = nil
+	}
+}
+
+// closeCursor closes the cursor serving the table, if it has one.
+func (p *Plugin) closeCursor() {
+	t := p.table
+	if t == nil {
+		return
+	}
+	t.buf = nil
+	if t.cursor == "" || p.cli == nil {
+		return
+	}
+	cur := t.cursor
+	t.cursor = ""
+	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
+	defer cancel()
+	if err := p.cli.CloseCursor(ctx, p.token, p.sid, cur); err != nil && !autodb.IsCode(err, autodb.CodeTxState) {
+		p.failed("closing the cursor", err)
+	}
+}
