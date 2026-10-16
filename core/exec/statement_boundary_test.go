@@ -131,6 +131,7 @@ func boundaryScripts(t *testing.T) map[string]string {
 		}
 		out["corpus "+filepath.Base(f)] = string(b)
 	}
+	t.Logf("%d scripts: %d cases and %d from the corpus", len(out), len(boundaryCases), len(files))
 	return out
 }
 
