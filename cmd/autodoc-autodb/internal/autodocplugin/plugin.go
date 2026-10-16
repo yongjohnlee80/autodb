@@ -79,6 +79,7 @@ type Plugin struct {
 	cancel context.CancelFunc
 	host   host
 	w, h   int
+	theme  plugin.Theme // the screen's, as plugin.open and plugin.theme send it
 	doc    plugin.Document
 
 	step  step
@@ -148,7 +149,10 @@ func newPlugin(version, dir string) *Plugin {
 }
 
 // Open is the card opened: it looks for AutoDB at once.
-func (p *Plugin) Open(peer *plugin.Peer, o plugin.Open) { p.attach(peer, o.Width, o.Height) }
+func (p *Plugin) Open(peer *plugin.Peer, o plugin.Open) {
+	p.theme = o.Theme
+	p.attach(peer, o.Width, o.Height)
+}
 
 func (p *Plugin) attach(h host, w, hh int) {
 	p.host, p.w, p.h = h, w, hh

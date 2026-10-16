@@ -178,11 +178,43 @@ var (
 	stDim     = plugin.Style{FG: "gray"}
 	stProblem = plugin.Style{FG: "red"}
 	stGood    = plugin.Style{FG: "green"}
-	stChosen  = plugin.Style{Bold: true, FG: "cyan"}
-	// a field is underlined across its width; the focused one is the chosen colour too
-	stField      = plugin.Style{Underline: true}
-	stFieldFocus = plugin.Style{Underline: true, Bold: true, FG: "cyan"}
+	// a field is underlined across its width
+	stField = plugin.Style{Underline: true}
+	// the selection and the focused field under a theme that names no selection colours: bold, the
+	// "> " mark and the cursor saying the rest
+	stChosen     = plugin.Style{Bold: true}
+	stFieldFocus = plugin.Style{Underline: true, Bold: true}
 )
+
+// The theme's colours the selection wears: the note's own text selection. Each built-in theme
+// gives its text 7:1 or better on it and sets it apart from the card, a soft tone of the page in
+// the light themes rather than the strong accent of a focused list.
+const (
+	themeSelectionBG = "document.selection"
+	themeSelectionFG = "document.selectedText"
+)
+
+// chosenStyle is the selection's: the theme's selection colours, or bold when the theme has none.
+func (p *Plugin) chosenStyle() plugin.Style {
+	bg, fg := p.theme.Colors[themeSelectionBG], p.theme.Colors[themeSelectionFG]
+	if bg == "" || fg == "" {
+		return stChosen
+	}
+	return plugin.Style{FG: fg, BG: bg}
+}
+
+// fieldFocusStyle is the focused field's: the selection's colours, underlined.
+func (p *Plugin) fieldFocusStyle() plugin.Style {
+	st := p.chosenStyle()
+	st.Underline = true
+	return st
+}
+
+// Theme is the theme AutoDoc's screen switched to: the card is drawn in it.
+func (p *Plugin) Theme(t plugin.Theme) {
+	p.theme = t
+	p.draw()
+}
 
 // span is text in one style; a row is one line of the card, laid out to its width.
 type span struct {
@@ -231,6 +263,13 @@ func (l *layout) add(st plugin.Style, format string, a ...any) { l.para(&l.top, 
 
 // one adds a row that is never wrapped: text past the width is cut with an ellipsis.
 func (l *layout) one(st plugin.Style, s string) { l.top = append(l.top, row{{elide(s, l.width), st}}) }
+
+// bar adds the selection's row: s cut to the width, and padded to it, so the colour runs the
+// card's whole width.
+func (l *layout) bar(st plugin.Style, s string) {
+	s = elide(s, l.width)
+	l.top = append(l.top, row{{s + strings.Repeat(" ", max(l.width-utf8.RuneCountInString(s), 0)), st}})
+}
 
 func (l *layout) blank() { l.top = append(l.top, row{}) }
 
@@ -281,13 +320,13 @@ func (p *Plugin) lines(width int) layout {
 		if p.field == focusName {
 			l.keep = len(l.top)
 		}
-		l.top = append(l.top, fieldRow(string(p.name), width, p.field == focusName))
+		l.top = append(l.top, fieldRow(string(p.name), width, p.field == focusName, p.fieldFocusStyle()))
 		l.one(stPlain, "passphrase")
 		if p.field == focusPass {
 			l.keep = len(l.top)
 		}
-		l.top = append(l.top, fieldRow(strings.Repeat(string(maskRune), len(p.pass)), width, p.field == focusPass))
-		buttons = buttonRows(width, p.field-focusSignIn, "Sign in", "Cancel")
+		l.top = append(l.top, fieldRow(strings.Repeat(string(maskRune), len(p.pass)), width, p.field == focusPass, p.fieldFocusStyle()))
+		buttons = buttonRows(width, p.field-focusSignIn, p.chosenStyle(), "Sign in", "Cancel")
 		switch p.field {
 		case focusName:
 			hint = "Tab Shift+Tab: move · Enter: next"
@@ -305,7 +344,7 @@ func (p *Plugin) lines(width int) layout {
 		for i, c := range p.conns {
 			mark, st := "  ", stPlain
 			if i == p.pick {
-				mark, st = "> ", stChosen
+				mark, st = "> ", p.chosenStyle()
 				l.keep = len(l.top)
 			}
 			current := ""
@@ -313,7 +352,11 @@ func (p *Plugin) lines(width int) layout {
 				current = " · current"
 			}
 			text := elide(fmt.Sprintf("%s%s (%s)", mark, c.Name, c.Engine), width-utf8.RuneCountInString(current))
-			l.one(st, text+current)
+			if i == p.pick {
+				l.bar(st, text+current)
+			} else {
+				l.one(st, text+current)
+			}
 		}
 		hint = "↑↓ j k: choose · Enter: connect · q: close"
 	case stepReady:
@@ -381,15 +424,15 @@ func (p *Plugin) serverLine(l *layout) {
 	}
 }
 
-// fieldRow is a field width cells wide holding value, underlined across; the focused one shows
-// its cursor, and a value too wide for it shows its end.
-func fieldRow(value string, width int, focused bool) row {
+// fieldRow is a field width cells wide holding value, underlined across; the focused one is in
+// focus's style and shows its cursor, and a value too wide for it shows its end.
+func fieldRow(value string, width int, focused bool, focus plugin.Style) row {
 	if width <= 0 {
 		return row{}
 	}
 	st, cursor := stField, ""
 	if focused {
-		st, cursor = stFieldFocus, string(cursorRune)
+		st, cursor = focus, string(cursorRune)
 	}
 	v := []rune(value + cursor)
 	if len(v) > width {
@@ -399,8 +442,8 @@ func fieldRow(value string, width int, focused bool) row {
 }
 
 // buttonRows are the buttons, "[ label ]" each, centred, the one at focused (none when it is out
-// of range) in the chosen style. Buttons too wide for one row go on to the next, as words do.
-func buttonRows(width, focused int, labels ...string) []row {
+// of range) in chosen. Buttons too wide for one row go on to the next, as words do.
+func buttonRows(width, focused int, chosen plugin.Style, labels ...string) []row {
 	var rows []row
 	var cur row
 	n := 0
@@ -423,7 +466,7 @@ func buttonRows(width, focused int, labels ...string) []row {
 		}
 		st := stPlain
 		if i == focused {
-			st = stChosen
+			st = chosen
 		}
 		cur = append(cur, span{b, st})
 		n += bn
