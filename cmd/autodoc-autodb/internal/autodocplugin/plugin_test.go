@@ -316,3 +316,57 @@ func TestARefusedSignInStays(t *testing.T) {
 		t.Fatalf("the card does not say the sign-in was refused:\n%s", card)
 	}
 }
+
+// A fetch AutoDB refuses ends the table with AutoDB's reason; the card says it too.
+func TestAFailedFetchEndsTheTableSayingWhy(t *testing.T) {
+	db := newFakeDB(t)
+	db.query = func(string) (map[string]any, error) { return page(1, 2, true, "cur-f"), nil }
+	db.fetch = func(string, int64) (map[string]any, error) {
+		return nil, &golibrpc.Error{Code: -32032, Message: "exec: canceling statement due to statement timeout"}
+	}
+	p, h := connected(t, db)
+	run(p, docAt("SELECT n FROM t|"))
+	p.FetchRows(plugin.TableFetch{ID: "cur-f", N: 10})
+	if len(h.rows) != 0 {
+		t.Fatalf("a failed fetch sent rows %+v", h.rows)
+	}
+	if len(h.ends) != 1 || h.ends[0].id != "cur-f" || !strings.Contains(h.ends[0].why, "statement timeout") {
+		t.Fatalf("a failed fetch ended the table as %+v, want cur-f with AutoDB's reason", h.ends)
+	}
+	if card := h.card(); !strings.Contains(card, "statement timeout") {
+		t.Fatalf("the card does not say why the rows ended:\n%s", card)
+	}
+}
+
+// A note too large to send runs nothing, and the card says so.
+func TestANoteTooLargeRunsNothing(t *testing.T) {
+	db := newFakeDB(t)
+	db.query = whole
+	p, h := connected(t, db)
+	p.Document(plugin.Document{Path: "big.sql", Version: 3, TooLarge: true})
+	p.Command("run")
+	p.Command("script")
+	if q := db.queries(); len(q) != 0 || len(db.took("exec.run_script")) != 0 {
+		t.Fatalf("a note too large to send ran %q", q)
+	}
+	if card := h.card(); !strings.Contains(card, "too large") {
+		t.Fatalf("the card does not say the note is too large:\n%s", card)
+	}
+}
+
+// "script" runs the whole note through exec.run_script, and shows the last statement's rows.
+func TestScriptRunsTheWholeNote(t *testing.T) {
+	db := newFakeDB(t)
+	db.query = whole
+	p, h := connected(t, db)
+	text := "CREATE TEMP TABLE x (n int);\nSELECT 1;\n"
+	p.Document(plugin.Document{Text: text, Version: 1})
+	p.Command("script")
+	sc := db.took("exec.run_script")
+	if len(sc) != 1 || sc[0].params[2] != text || sc[0].params[1] != int64(7) {
+		t.Fatalf("exec.run_script took %+v, want the whole note on connection 7", sc)
+	}
+	if len(h.tables) != 1 || h.tables[0].More {
+		t.Fatalf("the script's last rows: %+v", h.tables)
+	}
+}
