@@ -57,9 +57,7 @@ func (p *Plugin) Key(k plugin.Key) {
 	case stepPick:
 		p.pickKey(k)
 	case stepReady:
-		if k.Key == "c" {
-			p.choose()
-		}
+		p.treeKey(k)
 	}
 }
 
@@ -236,13 +234,25 @@ const (
 // its first fixed rows (the connection and the heading) always show, and the content scrolls to
 // keep its row at keep (-1 none) in view. Under them, at the card's foot: the rule, the buttons,
 // the keys, then the news, status (what was done last) and problem (what went wrong).
+//
+// list is more content after top, made a row at a time as it comes into view; keep counts its
+// rows after top's. from is the content row the view would start at, kept when the row at keep
+// stays in view.
 type layout struct {
 	width           int
 	top             []row
+	list            list
 	fixed, keep     int
+	from            int
 	rule            row
 	buttons, keys   []row
 	status, problem []row
+}
+
+// list is n rows of content, row(i) the i-th, made only for the rows in view.
+type list struct {
+	n   int
+	row func(i int) row
 }
 
 // heading is the step's title, the last of the rows that always show.
@@ -363,11 +373,9 @@ func (p *Plugin) lines(width int) layout {
 		l.heading("Ready")
 		p.serverLine(&l)
 		l.blank()
-		l.add(stDim, "SPC p r  run the statement or the selection")
-		l.add(stDim, "SPC p s  run the whole note")
-		l.add(stDim, "SPC p x  cancel the query")
-		l.add(stDim, "SPC p c  or c here: another connection")
-		hint = "c: another connection · q: close"
+		l.from = p.scroll
+		p.treeRows(&l)
+		hint = "j k: move · l h: open, close · Enter: query · c: another connection · q: close"
 	case stepFailed:
 		l.heading("AutoDB is not reachable")
 		l.add(stPlain, "AutoDB could not be reached.")
@@ -493,7 +501,10 @@ func (p *Plugin) draw() {
 	}
 	f := plugin.NewFrame(p.w, p.h)
 	l := p.lines(p.w - 2)
-	top, foot := l.fit(p.h)
+	top, foot, from := l.fit(p.h)
+	if p.step == stepReady {
+		p.scroll = from
+	}
 	for y, r := range top {
 		drawRow(f, y, r)
 	}
@@ -509,14 +520,18 @@ func (p *Plugin) draw() {
 // buttons, the keys and the rule; what is left goes to the status, the rest of the problem, and
 // the rest of the content. A problem or a status with fewer rows than it needs shows its end,
 // marked with a leading ellipsis.
-func (l *layout) fit(h int) (top, foot []row) {
+//
+// The content's view starts at from, moved only as far as keeps the row at keep in it, and fit
+// returns where it started.
+func (l *layout) fit(h int) (top, foot []row, from int) {
 	left := max(h, 0)
 	take := func(n int) int {
 		k := min(max(n, 0), left)
 		left -= k
 		return k
 	}
-	content := len(l.top) - l.fixed
+	inTop := len(l.top) - l.fixed
+	content := inTop + l.list.n
 	nFixed := take(l.fixed)
 	nContent := take(min(content, 1))
 	nProblem := take(min(len(l.problem), 1))
@@ -529,11 +544,18 @@ func (l *layout) fit(h int) (top, foot []row) {
 
 	top = append(top, l.top[:nFixed]...)
 	if nContent > 0 {
-		from := l.fixed
-		if l.keep >= from+nContent {
-			from = l.keep - nContent + 1
+		from = min(max(l.from, 0), content-nContent)
+		if keep := l.keep - l.fixed; keep >= 0 {
+			from = min(from, keep)
+			from = max(from, keep-nContent+1)
 		}
-		top = append(top, l.top[from:from+nContent]...)
+		for i := from; i < from+nContent; i++ {
+			if i < inTop {
+				top = append(top, l.top[l.fixed+i])
+			} else {
+				top = append(top, l.list.row(i-inTop))
+			}
+		}
 	}
 	if nRule > 0 {
 		foot = append(foot, l.rule)
@@ -542,7 +564,7 @@ func (l *layout) fit(h int) (top, foot []row) {
 	foot = append(foot, l.keys[:nKeys]...)
 	foot = append(foot, l.tail(l.status, nStatus)...)
 	foot = append(foot, l.tail(l.problem, nProblem)...)
-	return top, foot
+	return top, foot, from
 }
 
 // tail is the last n of rows; when that is fewer than all, its first row starts with an ellipsis,

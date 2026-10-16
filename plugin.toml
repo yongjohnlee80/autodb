@@ -9,6 +9,7 @@ title    = "AutoDB"
 kind     = "dialog"
 protocol = 4                   # it declares [table], protocol 4's
 command  = ["./bin/autodoc-autodb"]
+calls    = ["buffer.new"]      # AutoDoc's command it runs: Enter on a table opens a SELECT of it
 
 [dialog]
 modal      = false             # a card: it takes the keys when focused, Esc gives them back

@@ -33,6 +33,11 @@ type fakeDB struct {
 	engine string
 	// more are connections conn.list lists after the first, scratch (id 7).
 	more []map[string]any
+	// schemas answer schema.schemas (public alone when nil); tables answer schema.tables by
+	// schema, columns schema.columns by "schema.table", each row as AutoDB's wire carries it.
+	schemas []string
+	tables  map[string][]map[string]any
+	columns map[string][]map[string]any
 }
 
 func newFakeDB(t *testing.T) *fakeDB {
@@ -71,6 +76,40 @@ func newFakeDB(t *testing.T) *fakeDB {
 		}
 		f.mu.Unlock()
 		return list, nil
+	})
+	handle("schema.schemas", func([]any) (any, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		names := f.schemas
+		if names == nil {
+			names = []string{"public"}
+		}
+		out := []any{}
+		for _, n := range names {
+			out = append(out, n)
+		}
+		return out, nil
+	})
+	handle("schema.tables", func(p []any) (any, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if p[2] == "broken" {
+			return nil, &golibrpc.Error{Code: -32032, Message: "exec: permission denied for schema broken"}
+		}
+		out := []any{}
+		for _, t := range f.tables[p[2].(string)] {
+			out = append(out, t)
+		}
+		return out, nil
+	})
+	handle("schema.columns", func(p []any) (any, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		out := []any{}
+		for _, c := range f.columns[p[2].(string)+"."+p[3].(string)] {
+			out = append(out, c)
+		}
+		return out, nil
 	})
 	handle("exec.session_open", func([]any) (any, error) { return map[string]any{"session_id": "sess-1"}, nil })
 	handle("exec.session_close", func([]any) (any, error) { return map[string]any{"closed": true}, nil })
@@ -154,6 +193,25 @@ type fakeHost struct {
 	frames int      // host.frame sent
 	closes int      // host.close sent
 	titles []string // host.title sent, in order
+	calls  []hostCall
+	// answer is what a host.call is answered: nil runs it
+	answer error
+}
+
+// hostCall is one host.call the plugin sent: the command's id and its args.
+type hostCall struct {
+	id   string
+	args []string
+}
+
+func (h *fakeHost) Call(id string, args ...string) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, hostCall{id, append([]string(nil), args...)})
+	if h.answer != nil {
+		return false, h.answer
+	}
+	return true, nil
 }
 
 type sentRows struct {
