@@ -52,8 +52,6 @@ var certifiedClean = []string{
 	"core/pressure",
 	"core/schedmetrics",
 	"core/outcome",
-	"cmd/autodoc-autodb",
-	"cmd/autodoc-autodb/build",
 	"cmd/autodoc-autodb/internal/autodb",
 	"cmd/autodoc-autodb/internal/autodocplugin",
 }
