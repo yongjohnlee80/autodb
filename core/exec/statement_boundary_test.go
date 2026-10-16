@@ -33,13 +33,6 @@ import (
 // boundaryProbe is a statement every engine reads alike.
 const boundaryProbe = "SELECT 0;\n"
 
-// boundarySplitters is the splitter an editor uses for each engine's scripts.
-var boundarySplitters = map[engine.Name]gsql.SQL{
-	engine.Postgres: gsql.PostgreSQLSplitter(),
-	engine.MySQL:    gsql.MySQLSplitter(),
-	engine.SQLite:   gsql.SQLiteSplitter(),
-}
-
 // golibStarts is golib's statement starts for script: the first content byte of
 // each statement, read behind the probe. errClass is "lexical" when the
 // splitter refuses the script (an unterminated string, quote or comment).
@@ -152,7 +145,7 @@ func TestStatementBoundaries_GolibSplitsAsTheGateReads(t *testing.T) {
 	})
 	for _, eng := range []engine.Name{engine.Postgres, engine.MySQL, engine.SQLite} {
 		t.Run(string(eng), func(t *testing.T) {
-			sp := boundarySplitters[eng]
+			sp := eng.StatementSplitter()
 			for _, name := range names {
 				script := scripts[name]
 				gs, ge := golibStarts(sp, script)
