@@ -353,6 +353,10 @@ func TestTheCardFitsItsSize(t *testing.T) {
 		}
 	}
 
+	if got := wrap("autodb-v0.4.2-linux-amd64.tar.gz", 30); len(got) != 2 || got[0] != "autodb-v0.4.2-linux-" {
+		t.Fatalf("a file name too long for a row is cut at %q, want after its last - that fits", got)
+	}
+
 	short, sh := atSignIn(t, newFakeDB(t), 48, 9)
 	short.noUsers = true
 	tab(short)
