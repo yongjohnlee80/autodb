@@ -204,27 +204,45 @@ func TestPoolResetPG_AResetTheTargetRefusesDestroysThePooledBackend(t *testing.T
 	t.Parallel()
 	lt := newLeakTarget(t)
 
-	firstPID := lt.poolScalar(t, "SELECT pg_backend_pid()::text")
+	// THE PLAN IS READ BY A HOOK THAT RUNS AFTER THE STATEMENT HAS RETURNED.
+	// pgxpool runs AfterRelease on its own goroutine, so a statement's return
+	// says nothing about whether its release has been decided yet. The refused
+	// plan is therefore installed before the first borrow and kept until the
+	// NEXT borrow has come back: on a one-member pool that borrow cannot start
+	// until the previous member's hook has finished, so it is the only barrier
+	// the cell has, and nothing earlier is one.
+	//
+	// The backend is named by the statement whose release is refused, not by an
+	// earlier one: an earlier borrow's release reads the same plan and may be
+	// the one that destroys, which would leave the assertion comparing against
+	// a backend the refusal under test never touched.
 	lt.f.eng.setResetPlan(append(backendResetPlan(),
 		resetStep{carries: "a state no server can discard", sql: "DISCARD NOTHING_LIKE_THIS"}))
-	lt.poolExec(t, "SELECT 1")
+	refused := lt.poolScalar(t, backendIdentitySQL)
+	second := lt.poolScalar(t, backendIdentitySQL)
 	lt.f.eng.setResetPlan(nil)
-
-	if second := lt.poolScalar(t, "SELECT pg_backend_pid()::text"); second == firstPID {
+	if second == refused {
 		t.Fatalf("backend %s came back after a reset the target refused. A connection the "+
-			"driver hands back unproved must be destroyed, not parked in the pool", firstPID)
+			"driver hands back unproved must be destroyed, not parked in the pool", refused)
 	}
 
 	// The positive control: with a plan the target accepts, the SAME backend is
 	// reused. Without this, a hook that destroyed every connection it touched
-	// would satisfy the assertion above while making the pool pointless.
-	keptA := lt.poolScalar(t, "SELECT pg_backend_pid()::text")
-	keptB := lt.poolScalar(t, "SELECT pg_backend_pid()::text")
+	// would satisfy the assertion above while making the pool pointless. keptA's
+	// borrow waits for the previous hook, and its own release begins after the
+	// plan above was restored, so its hook can only read the accepted plan.
+	keptA := lt.poolScalar(t, backendIdentitySQL)
+	keptB := lt.poolScalar(t, backendIdentitySQL)
 	if keptA != keptB {
 		t.Fatalf("two consecutive statements on a one-member pool ran on backends %s and %s; "+
 			"a proved connection must be reused", keptA, keptB)
 	}
 }
+
+// backendIdentitySQL names a backend by its process id AND its start time. A
+// process id alone is recycled by the operating system; the pair is not.
+const backendIdentitySQL = "SELECT pg_backend_pid()::text || '@' || backend_start::text " +
+	"FROM pg_stat_activity WHERE pid = pg_backend_pid()"
 
 // A STATEMENT THE DRIVER PREPARED MUST STILL RUN AFTER THE RESET DEALLOCATES IT.
 //
