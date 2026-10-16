@@ -435,7 +435,7 @@ func elide(s string, width int) string {
 }
 
 // wrap breaks text at spaces to width cells (one a character). A word longer than a whole row is
-// the only thing cut, at the row's end.
+// the only thing cut: after its last / that fits (a path's or a URL's), else at the row's end.
 func wrap(text string, width int) []string {
 	if width <= 0 {
 		return nil
@@ -460,8 +460,14 @@ func wrap(text string, width int) []string {
 		}
 		for wn > width-n {
 			r := []rune(word)
-			cur.WriteString(string(r[:width-n]))
-			word = string(r[width-n:])
+			cut := width - n
+			if at := strings.LastIndex(string(r[:cut]), "/"); at > 0 {
+				if k := utf8.RuneCountInString(string(r[:cut])[:at]) + 1; k < cut {
+					cut = k
+				}
+			}
+			cur.WriteString(string(r[:cut]))
+			word = string(r[cut:])
 			wn = utf8.RuneCountInString(word)
 			flush()
 		}
