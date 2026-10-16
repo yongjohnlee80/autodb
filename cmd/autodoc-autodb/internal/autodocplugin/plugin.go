@@ -31,6 +31,8 @@ type host interface {
 	Table(t plugin.TableOpen) error
 	Rows(id string, rows [][]string, more bool) error
 	TableEnd(id string, err error) error
+	// Close asks AutoDoc to close the card (host.close).
+	Close() error
 }
 
 // step is what the card is doing.
@@ -84,9 +86,10 @@ type Plugin struct {
 	// noUsers is a store with no user yet: nobody can sign in until one is made.
 	noUsers bool
 
-	// the sign-in form; the passphrase is kept only until it is sent
+	// the sign-in form, empty when the card opens; the passphrase is kept only until it is sent,
+	// or the card is closed or hidden
 	name, pass []rune
-	field      int // 0 the name, 1 the passphrase
+	field      int // the control focused: focusName, focusPass, focusSignIn or focusCancel
 
 	token string // auth.login's, in memory only
 	conns []autodb.Connection
@@ -138,7 +141,7 @@ func newPlugin(version, dir string) *Plugin {
 	_, _ = rand.Read(b[:])
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Plugin{version: version, pluginDir: dir, ctx: ctx, cancel: cancel,
-		idPrefix: "res-" + hex.EncodeToString(b[:]), name: []rune(os.Getenv("USER"))}
+		idPrefix: "res-" + hex.EncodeToString(b[:])}
 }
 
 // Open is the card opened: it looks for AutoDB at once.
@@ -237,11 +240,10 @@ func (p *Plugin) doInstall() {
 // login signs in with the form's name and passphrase; the passphrase is dropped either way.
 func (p *Plugin) login() {
 	name, pass := strings.TrimSpace(string(p.name)), string(p.pass)
-	clear(p.pass)
-	p.pass = p.pass[:0]
+	p.dropPass()
 	if name == "" {
 		p.problem = "type your AutoDB user name"
-		p.field = 0
+		p.field = focusName
 		p.draw()
 		return
 	}
@@ -257,7 +259,7 @@ func (p *Plugin) login() {
 			return
 		}
 		p.problem = "sign-in refused: " + autodb.Message(err)
-		p.field = 1
+		p.field = focusPass
 		p.draw()
 		return
 	}
@@ -360,7 +362,7 @@ func (p *Plugin) failed(what string, err error) {
 func (p *Plugin) signedOut(why string) {
 	p.forgetTable(errors.New("signed out of AutoDB"))
 	p.token, p.sid = "", ""
-	p.step, p.field = stepLogin, 1
+	p.step, p.field = stepLogin, focusPass
 	p.problem = "signed out (" + why + "): sign in again"
 }
 
