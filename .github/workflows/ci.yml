@@ -111,6 +111,27 @@ jobs:
           echo "$pkgs"
           go test -race -count=2 $pkgs
 
+  # THE AUTODOC PLUGIN IS A MODULE OF ITS OWN (cmd/autodoc-autodb/go.mod: it
+  # requires AutoDoc's SDK, which AutoDB's root module must not), so the root's
+  # `go test ./...` never reaches it. Its cells run here, under -race and twice,
+  # as the shards' do; the live end-to-end cell skips without TEST_PGURL.
+  plugin:
+    name: test (autodoc-autodb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: vet
+        run: go -C cmd/autodoc-autodb vet ./...
+      - name: test
+        run: go -C cmd/autodoc-autodb test -race -count=2 ./...
+      - name: the install build AutoDoc runs
+        run: |
+          go -C cmd/autodoc-autodb run ./build
+          test -x bin/autodoc-autodb
+
   # macOS SERVES. Every darwin release before v0.4.4 refused its own --serve
   # (the lease flocked meta.db, which darwin refuses while SQLite holds fcntl
   # locks on it), and nothing caught it: CI ran on linux only, and the tap's
