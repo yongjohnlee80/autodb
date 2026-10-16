@@ -185,13 +185,31 @@ func pgPartitionRoles(ctx context.Context, q dao.Querier, schema string) (map[st
 	return out, rows.Err()
 }
 
+// ColumnEntry is one column of a relation, with its name quoted by the server.
+type ColumnEntry struct {
+	dao.ColumnInfo
+	// Quoted is the column's name through the dialect's mandatory QuoteIdent: a TRUSTED
+	// identifier a frontend splices into SQL, as TableEntry.Quoted is, so it never carries raw
+	// text.
+	Quoted string
+}
+
 // ListColumns lists schema.table's columns in ordinal order.
-func (e *Engine) ListColumns(ctx context.Context, token string, connID int64, schema, table string) ([]dao.ColumnInfo, error) {
+func (e *Engine) ListColumns(ctx context.Context, token string, connID int64, schema, table string) ([]ColumnEntry, error) {
 	tgt, err := e.introTarget(ctx, token, connID)
 	if err != nil {
 		return nil, err
 	}
-	return dao.ListColumns(ctx, tgt, schema, table)
+	infos, err := dao.ListColumns(ctx, tgt, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	dialect := tgt.Dialect()
+	out := make([]ColumnEntry, 0, len(infos))
+	for _, c := range infos {
+		out = append(out, ColumnEntry{ColumnInfo: c, Quoted: dialect.QuoteIdent(c.Name)})
+	}
+	return out, nil
 }
 
 // ListRoutines lists schema's stored routines. Capability absence (sqlite

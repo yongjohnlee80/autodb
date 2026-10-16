@@ -2309,6 +2309,9 @@ func (s *Server) registerM6() {
 				"name": c.Name, "type": c.DataType, "nullable": c.Nullable,
 				"default": c.Default, "has_default": c.HasDefault,
 				"position": int64(c.Position), "pk": c.PrimaryKey,
+				// the server's quoting, as schema.tables gives a relation's: additive, so no
+				// protocol bump
+				"quoted": c.Quoted,
 			})
 		}
 		return out, nil
