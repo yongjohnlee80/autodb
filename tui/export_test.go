@@ -866,3 +866,34 @@ func (h *Host) ActivityKinds() []string {
 	})
 	return <-out
 }
+
+// HoldDisconnectLogout holds Remote › Disconnect once its real sign-out has
+// answered: the session's token is gone and the session has not gone back to
+// local yet. The test closes the channel it is sent to let Disconnect go on.
+func (h *Host) HoldDisconnectLogout(signedOut chan<- chan struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.remoteLogout = func(ctx context.Context, b *Bound) error {
+			err := b.Logout(ctx)
+			release := make(chan struct{})
+			signedOut <- release
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return err
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+// SettleBackgroundTask runs one background task, which does nothing, to its
+// end on the loop, as every call's answer is applied, and waits for it.
+func (h *Host) SettleBackgroundTask() {
+	done := make(chan struct{})
+	h.p.Post(func() {
+		do(h, func(context.Context) struct{} { return struct{}{} }, func(struct{}) { close(done) })
+	})
+	<-done
+}

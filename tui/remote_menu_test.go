@@ -3,9 +3,14 @@ package tui_test
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/golib/logger"
 	tuicore "github.com/yongjohnlee80/golib/tui"
@@ -29,9 +34,18 @@ type remoteRig struct {
 
 func newRemoteRig(t *testing.T) *remoteRig {
 	t.Helper()
+	return newRemoteRigWith(t, nil)
+}
+
+// newRemoteRigWith is newRemoteRig with the profile edited first.
+func newRemoteRigWith(t *testing.T, edit func(*remotetest.Server, *remoteclient.Profile)) *remoteRig {
+	t.Helper()
 	srv := remotetest.Start(t)
 	p, _ := srv.Profile(t)
 	p.Name = "staging"
+	if edit != nil {
+		edit(srv, &p)
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "remotes.toml")
 	if err := remoteclient.SaveProfiles(path, []remoteclient.Profile{p}); err != nil {
@@ -132,6 +146,132 @@ func TestDisconnectingGoesBackToTheLocalDaemon(t *testing.T) {
 	r.s.WaitFor(t, "signed in locally again", func(sc string) bool {
 		return r.h.Auth() == "signed-in" && strings.Contains(sc, "▸ main")
 	})
+}
+
+// A task that settles after Disconnect's sign-out has answered, and before the
+// session is back on the local daemon, finds the session's token gone. That is
+// Disconnect's own doing, not a sign-in the server refused: the remote server
+// is not dialed again, and the local sign-in opens.
+func TestATaskSettlingDuringDisconnectDoesNotDialTheRemoteAgain(t *testing.T) {
+	r := newRemoteRig(t)
+	r.connectAsAlice(t)
+	signedOut := make(chan chan struct{}, 1)
+	r.h.HoldDisconnectLogout(signedOut)
+	r.s.Keys(t, decltest.Alt('m'))
+	r.s.WaitForText(t, "Disconnect")
+	r.s.Keys(t, key('d'))
+	var release chan struct{}
+	select {
+	case release = <-signedOut:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Disconnect never signed out")
+	}
+	r.h.SettleBackgroundTask()
+	if got := r.h.Auth(); got != "signed-in" {
+		t.Errorf("a task settling during Disconnect left the sign-in %q; want signed-in until back to local, no new dial", got)
+	}
+	close(release)
+	r.s.WaitFor(t, "the local sign-in, the remote identity already gone", func(sc string) bool {
+		return strings.Contains(sc, "┌ sign in ") && !strings.Contains(sc, "▸ ops")
+	})
+}
+
+// Remote › Disconnect while the remote connection is being dialed again goes
+// back to the local daemon at once: the dial in flight was for the connection
+// being given up, and it does not hold up the local one.
+func TestDisconnectingWhileTheRemoteRedialsGoesBackToTheLocalDaemon(t *testing.T) {
+	var fw *freezer
+	r := newRemoteRigWith(t, func(srv *remotetest.Server, p *remoteclient.Profile) {
+		fw = startFreezer(t, srv.Addr)
+		host, port, _ := net.SplitHostPort(fw.addr())
+		p.Host = host
+		p.Port, _ = strconv.Atoi(port)
+	})
+	r.connectAsAlice(t)
+	fw.freeze() // the connection drops, and the watcher's dial hangs
+	select {
+	case <-fw.held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the dropped connection was never dialed again")
+	}
+	r.s.WaitFor(t, "the remote connection dialing again", func(string) bool { return r.h.Auth() == "connecting" })
+	r.s.Keys(t, decltest.Alt('m'))
+	r.s.WaitForText(t, "Disconnect")
+	r.s.Keys(t, key('d'))
+	r.s.WaitFor(t, "the local sign-in, the remote identity already gone", func(sc string) bool {
+		return strings.Contains(sc, "┌ sign in ") && !strings.Contains(sc, "▸ ops")
+	})
+}
+
+// freezer forwards TCP connections to a target until it is frozen. Frozen,
+// it ends the connections it forwarded and holds each new one open without
+// forwarding a byte, as a server that stopped answering does.
+type freezer struct {
+	ln     net.Listener
+	target string
+	held   chan struct{} // closed when the first connection is held
+	mu     sync.Mutex
+	frozen bool
+	once   sync.Once
+	conns  []net.Conn
+}
+
+func startFreezer(t *testing.T, target string) *freezer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &freezer{ln: ln, target: target, held: make(chan struct{})}
+	t.Cleanup(f.close)
+	go f.serve()
+	return f
+}
+
+func (f *freezer) addr() string { return f.ln.Addr().String() }
+
+func (f *freezer) serve() {
+	for {
+		c, err := f.ln.Accept()
+		if err != nil {
+			return
+		}
+		f.mu.Lock()
+		f.conns = append(f.conns, c)
+		frozen := f.frozen
+		f.mu.Unlock()
+		if frozen {
+			f.once.Do(func() { close(f.held) })
+			continue
+		}
+		up, err := net.Dial("tcp", f.target)
+		if err != nil {
+			_ = c.Close()
+			continue
+		}
+		f.mu.Lock()
+		f.conns = append(f.conns, up)
+		f.mu.Unlock()
+		go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
+		go func() { _, _ = io.Copy(c, up); _ = c.Close() }()
+	}
+}
+
+// freeze ends every forwarded connection and holds every new one.
+func (f *freezer) freeze() {
+	f.mu.Lock()
+	f.frozen = true
+	conns := f.conns
+	f.conns = nil
+	f.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
+func (f *freezer) close() {
+	_ = f.ln.Close()
+	f.freeze()
 }
 
 // A first connect's two entries must agree: they are refused before anything
