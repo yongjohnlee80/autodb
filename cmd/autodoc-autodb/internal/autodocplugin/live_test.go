@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -95,7 +96,8 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 		defer cancel()
 		_, _ = admin.Call(sctx, "sys.shutdown", adminTok)
 	})
-	if _, err := admin.Call(ctx, "conn.create", adminTok, "scratch", "postgres", pgurl); err != nil {
+	created, err := admin.Call(ctx, "conn.create", adminTok, "scratch", "postgres", pgurl)
+	if err != nil {
 		t.Fatalf("conn.create: %v", err)
 	}
 
@@ -149,6 +151,48 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 	run(p, docAt("SELECT 1 AS one|"))
 	if len(h.tables) != 2 || h.tables[1].ID == tab.ID || h.tables[1].More {
 		t.Fatalf("the second run's table: %+v\n%s", h.tables[1:], h.card())
+	}
+
+	// The tree reads the real catalog, and Enter on a table sends a SELECT built from the server's
+	// own quoting, which runs.
+	_, _ = rand.Read(b[:4])
+	tbl := "card_tree_" + hex.EncodeToString(b[:4])
+	t.Cleanup(func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = admin.Call(dctx, "exec.run", adminTok, created, "DROP TABLE IF EXISTS public."+tbl)
+	})
+	run(p, docAt(`CREATE TABLE public.`+tbl+` ("Id" integer PRIMARY KEY, "Order Total" text)|;`))
+	if p.problem != "" {
+		t.Fatalf("creating %s: %s", tbl, p.problem)
+	}
+	selectRow := func(match func(item) bool) {
+		t.Helper()
+		for i, it := range p.tree.items() {
+			if match(it) {
+				p.tree.sel = i
+				return
+			}
+		}
+		t.Fatalf("no such row in the tree:\n%s", h.card())
+	}
+	if p.tree == nil {
+		t.Fatalf("the ready card has no tree: %s", p.problem)
+	}
+	selectRow(func(it item) bool { return it.t == nil && it.node() && it.s.name == "public" })
+	p.Key(plugin.Key{Key: "l", Text: "l"})
+	selectRow(func(it item) bool { return it.t != nil && it.node() && it.t.t.Name == tbl })
+	p.Key(plugin.Key{Key: "Enter"})
+	if len(h.calls) != 1 || h.calls[0].id != "buffer.new" || h.calls[0].args[0] != "public."+tbl+".sql" {
+		t.Fatalf("Enter on %s sent %q (%s)", tbl, h.calls, p.problem)
+	}
+	text := h.calls[0].args[1]
+	if want := "SELECT\n  \"Id\",\n  \"Order Total\"\nFROM "; !strings.HasPrefix(text, want) || !strings.Contains(text, tbl) {
+		t.Fatalf("the scaffold is %q, want the server-quoted columns of %s", text, tbl)
+	}
+	run(p, docAt("|"+text))
+	if len(h.tables) != 3 || !slices.Equal(h.tables[2].Fields, []string{"Id", "Order Total"}) {
+		t.Fatalf("the scaffold did not run as a SELECT of the two columns: %+v (%s)", h.tables[2:], p.problem)
 	}
 	p.Close()
 }
