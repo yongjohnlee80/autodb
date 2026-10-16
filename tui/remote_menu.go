@@ -344,6 +344,12 @@ func (h *Host) remoteDisconnect() {
 		return
 	}
 	h.guardUnsaved(func() {
+		// The connection is being given up from here on. The sign-out empties
+		// the session's token before backToLocal runs, and any other task that
+		// settles in between would take that for a sign-in the server refused
+		// and dial the remote again (checkAuth), and that dial in flight would
+		// keep backToLocal from dialing the local daemon.
+		h.leavingGen = h.session.Gen()
 		b := h.session.Bind()
 		signedIn := h.session.Token() != ""
 		do(h, func(ctx context.Context) struct{} {
