@@ -35,6 +35,9 @@ type host interface {
 	Close() error
 	// Title sets the card's title (host.title).
 	Title(title string) error
+	// Call runs one of AutoDoc's commands the manifest's calls declare (host.call), and waits for
+	// its answer.
+	Call(id string, args ...string) (bool, error)
 }
 
 // step is what the card is doing.
@@ -100,6 +103,9 @@ type Plugin struct {
 	conn  *autodb.Connection
 	eng   engine.Name
 	sid   string // the session, opened once on the chosen connection
+	tree  *tree  // the connection's schemas, read on connect; nil when they could not be
+	// scroll is the ready card's first content row in view
+	scroll int
 
 	table    *results // the table shown, nil when none of ours is
 	idPrefix string
@@ -328,6 +334,8 @@ func (p *Plugin) use(c autodb.Connection) {
 	}
 	p.conn, p.eng, p.sid = &c, eng, sid
 	p.step, p.problem, p.status = stepReady, "", "connected to "+c.Name+" ("+c.Engine+")"
+	p.scroll = 0
+	p.loadSchemas()
 	p.draw()
 }
 

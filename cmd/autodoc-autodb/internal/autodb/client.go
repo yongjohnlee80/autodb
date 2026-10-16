@@ -190,6 +190,76 @@ func (c *Client) Connections(ctx context.Context, token string) ([]Connection, e
 	return out, nil
 }
 
+// Schemas are the schemas of connection conn's database (schema.schemas).
+func (c *Client) Schemas(ctx context.Context, token string, conn int64) ([]string, error) {
+	res, err := c.call(ctx, "schema.schemas", token, conn)
+	if err != nil {
+		return nil, err
+	}
+	list, _ := res.([]any)
+	out := make([]string, 0, len(list))
+	for _, v := range list {
+		if n, ok := v.(string); ok {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+// Table is one relation of a schema, as schema.tables lists it. Quoted is its name as the server
+// quotes it, schema and all: a trusted identifier to splice into SQL.
+type Table struct {
+	Schema, Name, Kind, Quoted string
+}
+
+// Tables are schema's tables and views (schema.tables).
+func (c *Client) Tables(ctx context.Context, token string, conn int64, schema string) ([]Table, error) {
+	res, err := c.call(ctx, "schema.tables", token, conn, schema)
+	if err != nil {
+		return nil, err
+	}
+	list, _ := res.([]any)
+	out := make([]Table, 0, len(list))
+	for _, v := range list {
+		m, _ := v.(map[string]any)
+		t := Table{}
+		t.Schema, _ = m["schema"].(string)
+		t.Name, _ = m["name"].(string)
+		t.Kind, _ = m["kind"].(string)
+		t.Quoted, _ = m["quoted"].(string)
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// Column is one column of a relation, as schema.columns lists it. Quoted is its name as the server
+// quotes it, "" from a server that does not say.
+type Column struct {
+	Name, Type, Quoted string
+	PK, Nullable       bool
+}
+
+// Columns are schema.table's columns in order (schema.columns).
+func (c *Client) Columns(ctx context.Context, token string, conn int64, schema, table string) ([]Column, error) {
+	res, err := c.call(ctx, "schema.columns", token, conn, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	list, _ := res.([]any)
+	out := make([]Column, 0, len(list))
+	for _, v := range list {
+		m, _ := v.(map[string]any)
+		col := Column{}
+		col.Name, _ = m["name"].(string)
+		col.Type, _ = m["type"].(string)
+		col.Quoted, _ = m["quoted"].(string)
+		col.PK, _ = m["pk"].(bool)
+		col.Nullable, _ = m["nullable"].(bool)
+		out = append(out, col)
+	}
+	return out, nil
+}
+
 // OpenSession opens a session on connection conn.
 func (c *Client) OpenSession(ctx context.Context, token string, conn int64) (string, error) {
 	res, err := c.call(ctx, "exec.session_open", token, conn)
