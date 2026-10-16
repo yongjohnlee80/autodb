@@ -105,6 +105,39 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 	if p.step != stepPick {
 		t.Fatalf("after signing in: step %d\n%s", p.step, h.card())
 	}
+
+	// The sign-in is recorded under the temporary state directory, keyed by the store the server
+	// serves, the name alone; the next start of the plugin opens on it, the passphrase focused.
+	if p.cli.Hello.StoreID == "" {
+		t.Fatal("the server's hello names no store")
+	}
+	logins := filepath.Join(root, "state", "autodoc-autodb", "logins.json")
+	if p.logins != logins {
+		t.Fatalf("the plugin keeps its sign-ins at %s, want %s", p.logins, logins)
+	}
+	kept, err := os.ReadFile(logins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(kept), pass) || strings.Contains(string(kept), p.token) {
+		t.Fatal("the record of the sign-in holds the passphrase or the token")
+	}
+	if got := record(t, logins); len(got) != 1 || got["store:"+p.cli.Hello.StoreID] != "admin" {
+		t.Fatalf("the record is %v, want admin for store %s", got, p.cli.Hello.StoreID)
+	}
+	if fi, err := os.Stat(logins); err != nil {
+		t.Fatal(err)
+	} else if m := fi.Mode().Perm(); m != 0o600 {
+		t.Fatalf("the record's mode is %o, want 600", m)
+	}
+	next := New("dev")
+	nh := &fakeHost{}
+	next.attach(nh, 70, 30)
+	if next.step != stepLogin || string(next.name) != "admin" || next.field != focusPass {
+		t.Fatalf("the next start opened at step %d with the name %q, focus %d; want the sign-in, admin, the passphrase\n%s",
+			next.step, string(next.name), next.field, nh.card())
+	}
+	next.Close()
 	for i, c := range p.conns {
 		if c.Name == "scratch" {
 			p.pick = i
