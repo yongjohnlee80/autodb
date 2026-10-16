@@ -189,11 +189,16 @@ func TestThePickAsASCII(t *testing.T) {
 		"| connect · q: close             |................................|\n" +
 		"| connected to scratch           |................................|\n" +
 		"| (postgres)                     |................................|\n"
+	// the note's selection: sepia's soft gold under dark brown ink, not its strong brown accent
+	colours := map[string]plugin.Style{
+		"sepia": {BG: "#d6b97a", FG: "#3b2a1a"},
+		"dark":  {BG: "#005f87", FG: "#ffffff"},
+	}
 	for _, name := range []string{"sepia", "dark"} {
 		th := builtIn(t, name)
 		p, h := atPick(t, 32, 14)
 		p.Theme(th)
-		if got := picture(h, selection(th)); got != want {
+		if got := picture(h, colours[name]); got != want {
 			t.Errorf("%s: the pick is\n%s\nwant\n%s", name, got, want)
 		}
 	}
