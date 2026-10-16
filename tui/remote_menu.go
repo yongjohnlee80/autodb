@@ -354,9 +354,13 @@ func (h *Host) remoteDisconnect() {
 		h.leavingGen = h.session.Gen()
 		b := h.session.Bind()
 		signedIn := h.session.Token() != ""
+		logout := h.remoteLogout
+		if logout == nil {
+			logout = func(ctx context.Context, b *Bound) error { return b.Logout(ctx) }
+		}
 		do(h, func(ctx context.Context) struct{} {
 			if signedIn {
-				_ = b.Logout(ctx) // the session is revoked, not left to resume
+				_ = logout(ctx, b) // the session is revoked, not left to resume
 			}
 			return struct{}{}
 		}, func(struct{}) {

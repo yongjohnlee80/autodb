@@ -203,6 +203,9 @@ type Host struct {
 	keyFormBound  *Bound
 	keyFormID     int64
 	leavingGen    uint64
+	// remoteLogout is Disconnect's sign-out on the remote server; nil is the
+	// Bound's own.
+	remoteLogout func(context.Context, *Bound) error
 	// Where the session starts (remote_start.go): the option, whether a
 	// start on a remote server or a question is still unanswered, and the
 	// question's choices.
