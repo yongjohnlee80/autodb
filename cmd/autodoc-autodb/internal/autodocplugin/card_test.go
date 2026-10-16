@@ -568,3 +568,114 @@ func TestALongPickScrollsUnderTheConnection(t *testing.T) {
 		t.Fatalf("a long pick in a short card lost the connection, the heading or the chosen row:\n%s", strings.Join(lines, "\n"))
 	}
 }
+
+// a server error of the length a real one runs to
+const longServerError = `exec: ERROR: relation "public.invoice_line_items_2026_archive" does not exist ` +
+	`(SQLSTATE 42P01) at character 15, while planning SELECT on the scratch database`
+
+// fixedRows checks that the last frame starts with want, row by row, and is h rows high.
+func fixedRows(t *testing.T, h *fakeHost, height int, state string, want ...string) []string {
+	t.Helper()
+	lines := h.lines()
+	if len(lines) != height {
+		t.Fatalf("%s at height %d: the frame has %d rows", state, height, len(lines))
+	}
+	for i, w := range want {
+		if i >= len(lines) || lines[i] != w {
+			t.Fatalf("%s at height %d: row %d is %q, want %q:\n%s", state, height, i, lines[i], w, strings.Join(lines, "\n"))
+		}
+	}
+	return lines
+}
+
+// shownProblem checks that the frame shows the problem's end in rows of the error style, a
+// clipped one opening with an ellipsis, whenever a row is left after the fixed rows and content.
+func shownProblem(t *testing.T, h *fakeHost, height, reserved int, state, problem string) {
+	t.Helper()
+	lines := h.lines()
+	var rows []int
+	for y := range lines {
+		if st, ok := h.styleOf(y, strings.TrimSpace(lines[y])); ok && lines[y] != "" && st == stProblem {
+			rows = append(rows, y)
+		}
+	}
+	if height <= reserved {
+		return
+	}
+	if len(rows) == 0 {
+		t.Fatalf("%s at height %d: the problem is dropped with %d rows left:\n%s", state, height, height-reserved, strings.Join(lines, "\n"))
+	}
+	words := strings.Fields(problem)
+	if last := strings.Fields(lines[rows[len(rows)-1]]); len(last) == 0 || last[len(last)-1] != words[len(words)-1] {
+		t.Fatalf("%s at height %d: the problem's last row %q is not its end", state, height, lines[rows[len(rows)-1]])
+	}
+	var shown []string
+	for _, y := range rows {
+		shown = append(shown, lines[y])
+	}
+	// the problem whole, its spaces aside: a word longer than a row is cut across two
+	whole := strings.Join(strings.Fields(strings.Join(shown, "")), "")
+	if whole != strings.Join(words, "") && !strings.HasPrefix(lines[rows[0]], "…") {
+		t.Fatalf("%s at height %d: a clipped problem does not open with an ellipsis: %q", state, height, shown)
+	}
+}
+
+// Docked narrow and short, a connected card with a long server error still opens with the
+// connection and the heading; the error gets the rows left, its end shown and its cut marked.
+func TestALongErrorLeavesTheConnectionRow(t *testing.T) {
+	db := newFakeDB(t)
+	db.query = func(string) (map[string]any, error) {
+		return nil, &golibrpc.Error{Code: -32032, Message: longServerError}
+	}
+	p, h := connected(t, db)
+	run(p, docAt("SELECT * FROM public.invoice_line_items_2026_archive|"))
+	p.Resize(32, 10)
+	lines := fixedRows(t, h, 10, "ready", "Connection: scratch (postgres)", "Ready")
+	shownProblem(t, h, 10, 3, "ready", p.problem)
+	if rowOf(lines, 0, prefixed("…")) < 0 {
+		t.Fatalf("the long error is not clipped with an ellipsis at 32×10:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(strings.Join(lines, " "), "scratch database") {
+		t.Fatalf("the error's end is not shown at 32×10:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, height := range []int{2, 3, 4, 6, 8, 12, 16, 24} {
+		p.Resize(32, height)
+		fixedRows(t, h, height, "ready", "Connection: scratch (postgres)", "Ready")
+		shownProblem(t, h, height, 3, "ready", p.problem)
+	}
+	p.Resize(32, 2)
+	if lines := h.lines(); lines[0] != "Connection: scratch (postgres)" || lines[1] != "Ready" {
+		t.Fatalf("a card of two rows shows %q, want only the connection and the heading", lines)
+	}
+}
+
+// The pick and the failed card keep their fixed rows the same way: the pick its chosen row too.
+func TestALongProblemLeavesTheFixedRowsOnThePickAndTheFailedCard(t *testing.T) {
+	db := newFakeDB(t)
+	db.more = []map[string]any{{"id": int64(8), "name": "ledger", "engine": "sqlite"}}
+	p, h := connected(t, db)
+	p.Key(plugin.Key{Key: "c"})
+	p.Key(plugin.Key{Key: "j"})
+	p.problem = "opening a session on ledger: " + longServerError
+	for _, height := range []int{2, 3, 4, 6, 10, 16} {
+		p.Resize(32, height)
+		lines := fixedRows(t, h, height, "pick", "Connection: scratch (postgres)", "Choose a connection")
+		if height >= 3 && rowOf(lines, 2, is("> ledger (sqlite)")) < 0 {
+			t.Fatalf("pick at height %d lost the chosen row:\n%s", height, strings.Join(lines, "\n"))
+		}
+		shownProblem(t, h, height, 3, "pick", p.problem)
+	}
+
+	p.Key(plugin.Key{Key: "Enter"})
+	_ = p.cli.Close()
+	run(p, docAt("SELECT 1|"))
+	if p.step != stepFailed {
+		t.Fatalf("after the lost connection the card is at step %d", p.step)
+	}
+	p.problem = "the connection to AutoDB ended: " + longServerError
+	for _, height := range []int{3, 4, 5, 7, 10, 16} {
+		p.Resize(32, height)
+		fixedRows(t, h, height, "failed", "Connection: ledger (sqlite) ·", "not connected", "AutoDB is not reachable")
+		shownProblem(t, h, height, 4, "failed", p.problem)
+	}
+}

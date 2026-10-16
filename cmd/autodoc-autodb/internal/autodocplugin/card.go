@@ -200,14 +200,17 @@ const (
 	elision    = "…"
 )
 
-// layout is the card as rows width cells wide: top is the connection, the heading and the
-// content, which give way from the bottom when the card is short, except its first fixed rows (the
-// connection and the heading) and the row at keep (-1 none); bottom is the rule, the buttons, the
-// keys and the news, which keep their rows.
+// layout is the card as rows width cells wide. top is the connection, the heading and the content:
+// its first fixed rows (the connection and the heading) always show, and the content scrolls to
+// keep its row at keep (-1 none) in view. Under them, at the card's foot: the rule, the buttons,
+// the keys, then the news, status (what was done last) and problem (what went wrong).
 type layout struct {
-	width       int
-	top, bottom []row
-	fixed, keep int
+	width           int
+	top             []row
+	fixed, keep     int
+	rule            row
+	buttons, keys   []row
+	status, problem []row
 }
 
 // heading is the step's title, the last of the rows that always show.
@@ -328,14 +331,14 @@ func (p *Plugin) lines(width int) layout {
 		hint = "Enter: try again · q: close"
 	}
 
-	l.bottom = append(l.bottom, row{{strings.Repeat("─", max(width, 0)), stDim}})
-	l.bottom = append(l.bottom, buttons...)
-	l.para(&l.bottom, stDim, "%s", hint)
+	l.rule = row{{strings.Repeat("─", max(width, 0)), stDim}}
+	l.buttons = buttons
+	l.para(&l.keys, stDim, "%s", hint)
 	if p.status != "" {
-		l.para(&l.bottom, stPlain, "%s", p.status)
+		l.para(&l.status, stPlain, "%s", p.status)
 	}
 	if p.problem != "" {
-		l.para(&l.bottom, stProblem, "%s", p.problem)
+		l.para(&l.problem, stProblem, "%s", p.problem)
 	}
 	return l
 }
@@ -447,28 +450,78 @@ func (p *Plugin) draw() {
 	}
 	f := plugin.NewFrame(p.w, p.h)
 	l := p.lines(p.w - 2)
-	top, tail := l.top, l.bottom
-	// the bottom rows are the newest news: they keep their rows, the top gives way
-	if len(tail) > p.h {
-		tail = tail[len(tail)-p.h:]
-	}
-	room := max(p.h-len(tail), 0)
-	if len(top) > room {
-		// the connection and the heading stay, and the rows after them scroll so the focused one
-		// shows
-		if room > l.fixed && l.keep >= room {
-			skip := l.keep - room + 1
-			top = append(top[:l.fixed:l.fixed], top[l.fixed+skip:]...)
-		}
-		top = top[:room]
-	}
+	top, foot := l.fit(p.h)
 	for y, r := range top {
 		drawRow(f, y, r)
 	}
-	for i, r := range tail {
-		drawRow(f, p.h-len(tail)+i, r)
+	for i, r := range foot {
+		drawRow(f, p.h-len(foot)+i, r)
 	}
 	_ = p.host.Frame(f)
+}
+
+// fit shares h rows among the layout's parts, and returns the rows drawn from the top and those
+// drawn at the foot. Rows go first to the connection and the heading, then to one row of content
+// (the focused field or the chosen connection, when the step has one), one row of the problem, the
+// buttons, the keys and the rule; what is left goes to the status, the rest of the problem, and
+// the rest of the content. A problem or a status with fewer rows than it needs shows its end,
+// marked with a leading ellipsis.
+func (l *layout) fit(h int) (top, foot []row) {
+	left := max(h, 0)
+	take := func(n int) int {
+		k := min(max(n, 0), left)
+		left -= k
+		return k
+	}
+	content := len(l.top) - l.fixed
+	nFixed := take(l.fixed)
+	nContent := take(min(content, 1))
+	nProblem := take(min(len(l.problem), 1))
+	nButtons := take(len(l.buttons))
+	nKeys := take(len(l.keys))
+	nRule := take(1)
+	nStatus := take(len(l.status))
+	nProblem += take(len(l.problem) - nProblem)
+	nContent += take(content - nContent)
+
+	top = append(top, l.top[:nFixed]...)
+	if nContent > 0 {
+		from := l.fixed
+		if l.keep >= from+nContent {
+			from = l.keep - nContent + 1
+		}
+		top = append(top, l.top[from:from+nContent]...)
+	}
+	if nRule > 0 {
+		foot = append(foot, l.rule)
+	}
+	foot = append(foot, l.buttons[:nButtons]...)
+	foot = append(foot, l.keys[:nKeys]...)
+	foot = append(foot, l.tail(l.status, nStatus)...)
+	foot = append(foot, l.tail(l.problem, nProblem)...)
+	return top, foot
+}
+
+// tail is the last n of rows; when that is fewer than all, its first row starts with an ellipsis,
+// the row cut at its start to keep within the width.
+func (l *layout) tail(rows []row, n int) []row {
+	if n <= 0 {
+		return nil
+	}
+	if n >= len(rows) {
+		return rows
+	}
+	out := append([]row(nil), rows[len(rows)-n:]...)
+	first := out[0]
+	if len(first) == 0 {
+		return out
+	}
+	r := []rune(elision + strings.TrimLeft(first[0].text, " "))
+	if len(r) > l.width {
+		r = append([]rune(elision), r[len(r)-l.width+1:]...)
+	}
+	out[0] = append(row{{string(r), first[0].st}}, first[1:]...)
+	return out
 }
 
 // drawRow writes r at row y, from the card's one-cell margin.
