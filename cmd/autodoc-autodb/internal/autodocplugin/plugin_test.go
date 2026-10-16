@@ -370,3 +370,33 @@ func TestScriptRunsTheWholeNote(t *testing.T) {
 		t.Fatalf("the script's last rows: %+v", h.tables)
 	}
 }
+
+// Ending the last table closes its cursor, a call of its own. When that call finds the connection
+// gone, run and script stop on the card's reconnect state instead of running on no client.
+func TestACommandStopsWhenEndingTheLastTableLosesTheConnection(t *testing.T) {
+	for _, cmd := range []string{"run", "script"} {
+		t.Run(cmd, func(t *testing.T) {
+			db := newFakeDB(t)
+			db.query = func(string) (map[string]any, error) { return page(1, 2, true, "cur-l"), nil }
+			p, h := connected(t, db)
+			run(p, docAt("SELECT n FROM t|"))
+			if len(h.tables) != 1 {
+				t.Fatalf("the first run opened %d tables", len(h.tables))
+			}
+			_ = p.cli.Close() // the connection drops under the open cursor
+
+			p.Document(docAt("SELECT 2|"))
+			p.Command(cmd)
+
+			if p.step != stepFailed || p.cli != nil {
+				t.Fatalf("after the lost connection: step %d, client kept %t; want the reconnect state", p.step, p.cli != nil)
+			}
+			if card := h.card(); !strings.Contains(card, "connection to AutoDB ended") {
+				t.Fatalf("the card does not say the connection ended:\n%s", card)
+			}
+			if q := db.queries(); len(q) != 1 || len(db.took("exec.run_script")) != 0 {
+				t.Fatalf("a command ran after the connection was lost: queries %q, scripts %d", q, len(db.took("exec.run_script")))
+			}
+		})
+	}
+}
