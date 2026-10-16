@@ -375,6 +375,17 @@ func (p *Plugin) lost(err error) {
 	p.draw()
 }
 
+// lostItsWay reports whether ending the last table cost the connection or the sign-in: closing its
+// cursor is a call of its own, and failed has then said why on the card and taken the client or the
+// token away, so there is nothing left to run on.
+func (p *Plugin) lostItsWay() bool {
+	if p.cli != nil && p.token != "" {
+		return false
+	}
+	p.draw()
+	return true
+}
+
 // ready reports whether the commands can run, and says why not on the card.
 func (p *Plugin) ready() bool {
 	if p.step == stepReady && p.cli != nil && p.token != "" && p.conn != nil {
@@ -441,6 +452,9 @@ func (p *Plugin) run() {
 		return
 	}
 	p.endTable(nil)
+	if p.lostItsWay() {
+		return
+	}
 	p.problem, p.status = "", "running…"
 	p.draw()
 	res, err := p.query(sql)
@@ -481,6 +495,9 @@ func (p *Plugin) script() {
 		return
 	}
 	p.endTable(nil)
+	if p.lostItsWay() {
+		return
+	}
 	p.problem, p.status = "", "running the script…"
 	p.draw()
 	res, err := p.cli.RunScript(p.ctx, p.token, p.conn.ID, p.doc.Text)
