@@ -154,7 +154,7 @@ func (s *Session) ConnectRemote(ctx context.Context, passphrase string) (hostKey
 	if rs == nil {
 		return "", errors.New("tui: not a remote session")
 	}
-	conn, myGen, err := s.remoteDial(ctx, rs, remotedial.Unlock{Passphrase: passphrase})
+	conn, myGen, err := s.remoteDial(ctx, rs, remotedial.Unlock{Passphrase: passphrase}, nil)
 	if err != nil {
 		return "", err
 	}
@@ -190,7 +190,7 @@ func (s *Session) remoteSnapshot() *remoteState {
 // memory and, holding a token, resume it. A session that can no longer be
 // resumed drops the token, so the UI's sign-in prompt signs in on this same
 // connection (remoteSignIn).
-func (s *Session) connectRemote(ctx context.Context) (bool, error) {
+func (s *Session) connectRemote(ctx context.Context, at *uint64) (bool, error) {
 	s.mu.Lock()
 	rs := s.remote
 	var key ed25519.PrivateKey
@@ -209,7 +209,7 @@ func (s *Session) connectRemote(ctx context.Context) (bool, error) {
 	// returns, so the snapshot has no owner past that point: every path, the
 	// error ones included, wipes it. The holder keeps its own copy.
 	defer remoteclient.Wipe(key)
-	conn, myGen, err := s.remoteDial(ctx, rs, remotedial.Unlock{Key: key})
+	conn, myGen, err := s.remoteDial(ctx, rs, remotedial.Unlock{Key: key}, at)
 	if err != nil {
 		return false, err
 	}
@@ -232,13 +232,17 @@ func (s *Session) connectRemote(ctx context.Context) (bool, error) {
 
 // remoteDial dials rs, installs the connection as the session's client, and
 // records the greeting; superseded if the session switched transport or
-// moved on meanwhile.
-func (s *Session) remoteDial(ctx context.Context, rs *remoteState, u remotedial.Unlock) (*remotedial.Conn, uint64, error) {
+// moved on meanwhile, or, when at is set, had moved past it before the dial.
+func (s *Session) remoteDial(ctx context.Context, rs *remoteState, u remotedial.Unlock, at *uint64) (*remotedial.Conn, uint64, error) {
 	superseded := errors.New("tui: connect superseded by a newer transition")
 	s.mu.Lock()
 	if s.remote != rs {
 		s.mu.Unlock()
 		return nil, 0, superseded
+	}
+	if at != nil && s.gen != *at {
+		s.mu.Unlock()
+		return nil, 0, errSuperseded
 	}
 	old, oldConn := s.client, rs.conn
 	s.client, rs.conn = nil, nil

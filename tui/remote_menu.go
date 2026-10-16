@@ -185,7 +185,7 @@ func (h *Host) remoteConnectAnswered(id, passphrase, again string) error {
 	h.hadAuth = false
 	h.retireIdentity()
 	h.session.SwitchToRemote(d)
-	h.connecting = true
+	seq := h.beginConnect()
 	h.setAuth("connecting")
 	h.setStatus(fmt.Sprintf("connecting to %s as %s…", profile.Address(), profile.User))
 	h.refreshIdentity()
@@ -198,7 +198,9 @@ func (h *Host) remoteConnectAnswered(id, passphrase, again string) error {
 		fp, err := sess.ConnectRemote(ctx, passphrase)
 		return result{fp, err}
 	}, func(r result) {
-		h.connecting = false
+		if !h.endConnect(seq) {
+			return // a later transition superseded this one
+		}
 		if h.session.RemoteDialer() != d {
 			return // cancelled, or another connect since
 		}
@@ -372,5 +374,5 @@ func (h *Host) backToLocal(status string) {
 	h.setAuth("disconnected")
 	h.setStatus(status)
 	h.refreshIdentity()
-	h.connect()
+	h.connectSuperseding()
 }
