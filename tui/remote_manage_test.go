@@ -407,7 +407,9 @@ func TestManageOffersMyDevicesOnlySignedIn(t *testing.T) {
 	r.s.WaitForText(t, "Disconnect")
 	r.s.Keys(t, esc())
 	r.connectAsAlice(t)
-	r.s.Keys(t, decltest.Alt('m'), key('d')) // Disconnect: signed out, local
+	r.s.Keys(t, decltest.Alt('m'))
+	r.s.WaitForText(t, "Disconnect") // the menu drawn first: a key sent with Alt+m can beat it
+	r.s.Keys(t, key('d'))            // Disconnect: signed out, local
 	r.s.WaitForText(t, "┌ sign in ")
 	r.s.Keys(t, esc())
 	r.openManage(t)
