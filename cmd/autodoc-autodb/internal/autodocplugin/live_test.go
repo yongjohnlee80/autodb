@@ -30,7 +30,17 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
-	build := exec.Command("go", "build", "-o", filepath.Join(bin, "autodb"), "github.com/yongjohnlee80/autodb/cmd/autodb")
+	// Built in AutoDB's own module, four levels up: its go.sum, not this nested module's, holds
+	// the server's dependencies, and a build from here resolves only what the plugin imports.
+	repo, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "cmd", "autodb")); err != nil {
+		t.Fatalf("AutoDB's checkout is not at %s: %v", repo, err)
+	}
+	build := exec.Command("go", "build", "-o", filepath.Join(bin, "autodb"), "./cmd/autodb")
+	build.Dir = repo
 	build.Stdout, build.Stderr = os.Stderr, os.Stderr
 	if err := build.Run(); err != nil {
 		t.Fatalf("building autodb: %v", err)
