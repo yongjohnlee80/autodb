@@ -18,7 +18,8 @@ import (
 //	install    where it looked; i downloads the release matching this plugin, checked by its .sha256
 //	starting   "Starting AutoDB…" while the server is reached or started
 //	login      the name and the passphrase (masked), and Sign in and Cancel: Tab and Shift+Tab move
-//	           between them, Enter activates
+//	           between them, Enter activates. The name is the one this server was last signed in
+//	           to with, and the passphrase then has the focus; with none, it is empty and focused
 //	pick       the connections; ↑↓ (j k) choose, Enter connects
 //	ready      the connection, the last result, and the SPC p commands
 //	failed     why the server could not be reached; Enter tries again

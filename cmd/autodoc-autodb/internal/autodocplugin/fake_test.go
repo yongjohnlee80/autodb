@@ -31,6 +31,10 @@ type fakeDB struct {
 	fetch func(cur string, n int64) (map[string]any, error)
 	// engine is the connection's engine.
 	engine string
+	// storeID is the meta store the hello names, none when "".
+	storeID string
+	// pass is the passphrase auth.login takes, "right" when "".
+	pass string
 	// more are connections conn.list lists after the first, scratch (id 7).
 	more []map[string]any
 	// schemas answer schema.schemas (public alone when nil); tables answer schema.tables by
@@ -58,11 +62,23 @@ func newFakeDB(t *testing.T) *fakeDB {
 		})
 	}
 	handle("sys.hello", func([]any) (any, error) {
-		return map[string]any{"protocol": autodb.Protocol, "server": "autodb", "version": "v-fake", "instance": "i1"}, nil
+		m := map[string]any{"protocol": autodb.Protocol, "server": "autodb", "version": "v-fake", "instance": "i1"}
+		f.mu.Lock()
+		if f.storeID != "" {
+			m["store_id"] = f.storeID
+		}
+		f.mu.Unlock()
+		return m, nil
 	})
 	handle("auth.needs_bootstrap", func([]any) (any, error) { return false, nil })
 	handle("auth.login", func(p []any) (any, error) {
-		if p[1] != "right" {
+		want := "right"
+		f.mu.Lock()
+		if f.pass != "" {
+			want = f.pass
+		}
+		f.mu.Unlock()
+		if p[1] != want {
 			return nil, &golibrpc.Error{Code: autodb.CodeAuth, Message: "auth: bad credentials"}
 		}
 		return map[string]any{"token": "tok-1", "user": map[string]any{"name": p[0]}}, nil

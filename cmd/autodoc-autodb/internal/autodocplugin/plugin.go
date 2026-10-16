@@ -92,10 +92,14 @@ type Plugin struct {
 	// noUsers is a store with no user yet: nobody can sign in until one is made.
 	noUsers bool
 
-	// the sign-in form, empty when the card opens; the passphrase is kept only until it is sent,
-	// or the card is closed or hidden
+	// the sign-in form: the name the server was last signed in to with, or empty; the passphrase is
+	// kept only until it is sent, or the card is closed or hidden
 	name, pass []rune
 	field      int // the control focused: focusName, focusPass, focusSignIn or focusCancel
+	// logins is the file of the names last signed in with, a server's each ("" keeps none), and
+	// loginsTold that one which could not be read has been said so on the card
+	logins     string
+	loginsTold bool
 
 	token string // auth.login's, in memory only
 	conns []autodb.Connection
@@ -135,6 +139,7 @@ func New(version string) *Plugin {
 		}
 	}
 	p := newPlugin(version, dir)
+	p.logins = loginsPath(os.Getenv)
 	env := autodb.Env{Getenv: os.Getenv, PluginDir: dir}
 	p.find = func(ctx context.Context) (autodb.Binary, []autodb.Tried, error) { return autodb.Find(ctx, env) }
 	p.start = func(ctx context.Context, bin autodb.Binary) (*autodb.Client, error) {
@@ -230,7 +235,26 @@ func (p *Plugin) connect() {
 	defer cancel()
 	p.noUsers, _ = cli.NeedsBootstrap(ctx)
 	p.step, p.problem = stepLogin, ""
+	p.prefill()
 	p.draw()
+}
+
+// prefill starts the sign-in with the name this server was last signed in to with, the focus on
+// the passphrase; with none recorded the name is empty and has the focus. A record that cannot be
+// read counts as none, said once on the card.
+func (p *Plugin) prefill() {
+	clear(p.name)
+	p.name = p.name[:0]
+	m, err := readLogins(p.logins)
+	if err != nil && !p.loginsTold {
+		p.loginsTold = true
+		p.problem = "the names last signed in with could not be read (" + err.Error() + "): type yours"
+	}
+	p.name = append(p.name, []rune(m[serverKey(p.cli)])...)
+	p.field = focusName
+	if len(p.name) > 0 {
+		p.field = focusPass
+	}
 }
 
 // doInstall installs the release matching this plugin, then looks again.
@@ -277,7 +301,12 @@ func (p *Plugin) login() {
 		return
 	}
 	p.token = token
+	kept := rememberLogin(p.logins, serverKey(p.cli), name)
 	p.choose()
+	if kept != nil && p.problem == "" {
+		p.problem = "signed in, but the name could not be kept for the next sign-in: " + kept.Error()
+		p.draw()
+	}
 }
 
 // choose lists the connections for the card to pick from.
