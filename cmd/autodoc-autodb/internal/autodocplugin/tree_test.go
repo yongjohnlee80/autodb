@@ -81,8 +81,28 @@ func TestPointerSelectsAndScrollsTheReadyCard(t *testing.T) {
 	if p.tree.sel != last || p.scroll == 0 || chosenRow(h, p) == "" {
 		t.Fatalf("wheel did not reveal the selected row: selected %d, scroll %d, row %q", p.tree.sel, p.scroll, chosenRow(h, p))
 	}
+	// Select another visible item after the viewport moved: the frame y is not the item index.
+	p.Resize(48, 12)
+	l := p.lines(p.w - 2)
+	top, _, from := l.fit(p.h)
+	selected := false
+	for y := l.fixed; y < len(top); y++ {
+		index := from + y - len(l.top)
+		if index >= 0 && index < len(p.tree.items()) && index != last {
+			p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: y, Count: 1})
+			if p.tree.sel != index {
+				t.Fatalf("scrolled row y=%d selected %d, wanted %d", y, p.tree.sel, index)
+			}
+			selected = true
+			break
+		}
+	}
+	if !selected {
+		t.Fatalf("no other tree row visible after scroll: from=%d, top=%d", from, len(top))
+	}
+	beforeFooter := p.tree.sel
 	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: p.h - 1, Count: 1})
-	if p.tree.sel != last {
+	if p.tree.sel != beforeFooter {
 		t.Fatal("press on the footer moved the tree selection")
 	}
 }
