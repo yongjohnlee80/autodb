@@ -78,12 +78,13 @@ type Plugin struct {
 	start   func(ctx context.Context, bin autodb.Binary) (*autodb.Client, error)
 	install func(ctx context.Context) error
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	host   host
-	w, h   int
-	theme  plugin.Theme // the screen's, as plugin.open and plugin.theme send it
-	doc    plugin.Document
+	ctx     context.Context
+	cancel  context.CancelFunc
+	host    host
+	w, h    int
+	theme   plugin.Theme // the screen's, as plugin.open and plugin.theme send it
+	focused bool         // whether the card has the keys: active vs inactive highlight
+	doc     plugin.Document
 
 	step  step
 	tried []autodb.Tried

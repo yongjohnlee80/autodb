@@ -7,6 +7,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodoc/plugin"
+	"github.com/yongjohnlee80/golib/tui/style"
 )
 
 // THE CARD — what each step shows and the keys it takes. Each step is laid out as AutoDoc's own
@@ -59,6 +60,56 @@ func (p *Plugin) Key(k plugin.Key) {
 		p.pickKey(k)
 	case stepReady:
 		p.treeKey(k)
+	}
+}
+
+// Pointer selects the connection or tree row under a left press. The wheel moves the selection,
+// which keeps the scrolled viewport and the keyboard's cursor in agreement. Coordinates are in
+// the frame, whose content begins after its fixed heading and may have a scrolled prefix.
+func (p *Plugin) Pointer(at plugin.Pointer) {
+	if at.X < 0 || at.X >= p.w || at.Y < 0 || at.Y >= p.h || at.Count < 1 {
+		return
+	}
+	l := p.lines(p.w - 2)
+	top, _, from := l.fit(p.h)
+	switch at.Kind {
+	case "press":
+		if at.Button != "left" || at.Y >= len(top) || at.Y < l.fixed {
+			return
+		}
+		if p.step == stepPick {
+			if index := from + at.Y - l.pickStart; index >= 0 && index < len(p.conns) {
+				p.pick = index
+				p.draw()
+			}
+		} else if p.step == stepReady && p.tree != nil {
+			if index := from + at.Y - len(l.top); index >= 0 && index < len(p.tree.items()) {
+				p.tree.sel = index
+				p.draw()
+			}
+		}
+	case "wheel":
+		step := min(at.Count*3, 48)
+		if at.Button == "up" {
+			step = -step
+		} else if at.Button != "down" {
+			return
+		}
+		switch p.step {
+		case stepPick:
+			if len(p.conns) > 0 {
+				p.pick = min(max(p.pick+step, 0), len(p.conns)-1)
+				p.draw()
+			}
+		case stepReady:
+			if p.tree != nil {
+				items := p.tree.items()
+				if len(items) > 0 {
+					p.tree.sel = min(max(p.tree.sel+step, 0), len(items)-1)
+					p.draw()
+				}
+			}
+		}
 	}
 }
 
@@ -165,7 +216,7 @@ func (p *Plugin) pickKey(k plugin.Key) {
 
 // Hide is the card's panel closed while the plugin runs on: the session, the connection and the
 // table stay, and a passphrase half typed goes.
-func (p *Plugin) Hide() { p.dropPass() }
+func (p *Plugin) Hide() { p.focused = false; p.dropPass() }
 
 // Show is the panel open again: the card is drawn as it stands.
 func (p *Plugin) Show() { p.draw() }
@@ -185,22 +236,34 @@ var (
 	stFieldFocus = plugin.Style{Underline: true, Bold: true}
 )
 
-// The theme's colours the selection wears: the note's own text selection. Each built-in theme
-// gives its text 7:1 or better on it and sets it apart from the card, a soft tone of the page in
-// the light themes rather than the strong accent of a focused list.
+// The card and the results table use the same document highlight roles for their cursors.
 const (
-	themeSelectionBG = "document.selection"
-	themeSelectionFG = "document.selectedText"
+	themeSelectionBG = "document.highlight"
+	themeSelectionFG = "document.highlightedText"
 )
 
 // chosenStyle is the selection's: the theme's selection colours, or bold when the theme has none.
 func (p *Plugin) chosenStyle() plugin.Style {
-	bg, fg := p.theme.Colors[themeSelectionBG], p.theme.Colors[themeSelectionFG]
+	bgKey, fgKey := themeSelectionBG, themeSelectionFG
+	if !p.focused {
+		bgKey, fgKey = "app.inactive.highlight", "app.inactive.highlightedText"
+	}
+	bg, fg := p.theme.Colors[bgKey], p.theme.Colors[fgKey]
 	if bg == "" || fg == "" {
 		return stChosen
 	}
+	if bgColor, err := style.ParseColor(bg); err == nil {
+		if fgColor, err := style.ParseColor(fg); err == nil {
+			if r, g, b, ok := style.Legible(fgColor, bgColor, 4.5).RGBValues(); ok {
+				fg = fmt.Sprintf("#%02x%02x%02x", r, g, b)
+			}
+		}
+	}
 	return plugin.Style{FG: fg, BG: bg}
 }
+
+// Focus switches the card cursor between the same active and inactive roles as the results table.
+func (p *Plugin) Focus(focused bool) { p.focused = focused; p.draw() }
 
 // fieldFocusStyle is the focused field's: the selection's colours, underlined.
 func (p *Plugin) fieldFocusStyle() plugin.Style {
@@ -243,6 +306,7 @@ type layout struct {
 	width           int
 	top             []row
 	list            list
+	pickStart       int // first connection's index in top, or -1
 	fixed, keep     int
 	from            int
 	rule            row
@@ -286,7 +350,7 @@ func (l *layout) blank() { l.top = append(l.top, row{}) }
 
 // lines is what the card shows now, laid out width cells wide.
 func (p *Plugin) lines(width int) layout {
-	l := layout{width: width, keep: -1}
+	l := layout{width: width, keep: -1, pickStart: -1}
 	if line, st := p.connLine(); line != "" {
 		l.add(st, "%s", line)
 	}
@@ -352,6 +416,7 @@ func (p *Plugin) lines(width int) layout {
 		l.heading("Choose a connection")
 		p.serverLine(&l)
 		l.blank()
+		l.pickStart = len(l.top)
 		for i, c := range p.conns {
 			mark, st := "  ", stPlain
 			if i == p.pick {

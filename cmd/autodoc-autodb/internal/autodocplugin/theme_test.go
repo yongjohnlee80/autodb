@@ -2,6 +2,7 @@ package autodocplugin
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"regexp"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodoc/plugin"
 	"github.com/yongjohnlee80/golib/tui/decl/themes"
+	"github.com/yongjohnlee80/golib/tui/style"
 )
 
 // builtIn is AutoDoc's built-in theme name, as plugin.open sends it: its colours by dotted name.
@@ -25,8 +27,22 @@ func builtIn(t *testing.T, name string) plugin.Theme {
 }
 
 // selection is the theme's selection colours as a run carries them.
-func selection(th plugin.Theme) plugin.Style {
-	return plugin.Style{BG: th.Colors[themeSelectionBG], FG: th.Colors[themeSelectionFG]}
+func selection(th plugin.Theme) plugin.Style { return selectionWithFocus(th, false) }
+
+func selectionWithFocus(th plugin.Theme, focused bool) plugin.Style {
+	bgKey, fgKey := "app.inactive.highlight", "app.inactive.highlightedText"
+	if focused {
+		bgKey, fgKey = themeSelectionBG, themeSelectionFG
+	}
+	bg, fg := th.Colors[bgKey], th.Colors[fgKey]
+	b, be := style.ParseColor(bg)
+	f, fe := style.ParseColor(fg)
+	if be == nil && fe == nil {
+		if r, g, blue, ok := style.Legible(f, b, 4.5).RGBValues(); ok {
+			fg = fmt.Sprintf("#%02x%02x%02x", r, g, blue)
+		}
+	}
+	return plugin.Style{BG: bg, FG: fg}
 }
 
 // runOf is the run of the last frame's row y that holds text, and whether there is one.
@@ -113,6 +129,30 @@ func TestTheChosenRowIsTheThemesSelectionBar(t *testing.T) {
 	}
 }
 
+// The card's cursor takes the document's active highlight and the app's inactive highlight, the
+// same palette roles the results table uses. Both states keep a readable foreground.
+func TestTheCardCursorMatchesTheResultsPaletteInBothFocusStates(t *testing.T) {
+	for _, name := range themes.Names() {
+		th := builtIn(t, name)
+		p, _ := atPick(t, 32, 16)
+		p.Theme(th)
+		for _, focused := range []bool{false, true} {
+			p.Focus(focused)
+			st := p.chosenStyle()
+			wantBG := th.Colors["app.inactive.highlight"]
+			if focused {
+				wantBG = th.Colors["document.highlight"]
+			}
+			fg, fgErr := style.ParseColor(st.FG)
+			bg, bgErr := style.ParseColor(st.BG)
+			ratio, ok := style.ContrastRatio(fg, bg)
+			if st.BG != wantBG || fgErr != nil || bgErr != nil || !ok || ratio < 4.5 {
+				t.Errorf("%s focused=%v: cursor %+v, wanted background %s and 4.5 contrast (got %.2f)", name, focused, st, wantBG, ratio)
+			}
+		}
+	}
+}
+
 // A theme naming no selection colours (an older host, a theme of the user's) leaves the choice to
 // bold and the "> " mark, and the focused field to bold and its underline: never a raw colour.
 func TestAThemeWithoutSelectionColoursFallsBackToBold(t *testing.T) {
@@ -189,16 +229,12 @@ func TestThePickAsASCII(t *testing.T) {
 		"| connect · q: close             |................................|\n" +
 		"| connected to scratch           |................................|\n" +
 		"| (postgres)                     |................................|\n"
-	// the note's selection: sepia's soft gold under dark brown ink, not its strong brown accent
-	colours := map[string]plugin.Style{
-		"sepia": {BG: "#d6b97a", FG: "#3b2a1a"},
-		"dark":  {BG: "#005f87", FG: "#ffffff"},
-	}
+	// The unfocused card uses the app's inactive highlight, not the old text-selection bar.
 	for _, name := range []string{"sepia", "dark"} {
 		th := builtIn(t, name)
 		p, h := atPick(t, 32, 14)
 		p.Theme(th)
-		if got := picture(h, colours[name]); got != want {
+		if got := picture(h, selection(th)); got != want {
 			t.Errorf("%s: the pick is\n%s\nwant\n%s", name, got, want)
 		}
 	}
@@ -255,11 +291,14 @@ func TestTheThemeCrossesTheRealLink(t *testing.T) {
 	}
 	sepia, dark := builtIn(t, "sepia"), builtIn(t, "dark")
 	field := func(th plugin.Theme) plugin.Style {
-		st := selection(th)
+		st := selectionWithFocus(th, true)
 		st.Underline = true
 		return st
 	}
 	if err := link.Notify(ctx, plugin.MethodOpen, plugin.OpenParams(plugin.Open{Protocol: 4, Width: 32, Height: 16, Theme: sepia})); err != nil {
+		t.Fatal(err)
+	}
+	if err := link.Notify(ctx, plugin.MethodFocus, plugin.FocusParams(true)); err != nil {
 		t.Fatal(err)
 	}
 	fieldIn(field(sepia))
