@@ -23,6 +23,11 @@ document = true                # the note, and from protocol 4 each command carr
 title = "Results"
 
 [[commands]]
+id    = "toggle"
+title = "Show or hide the AutoDB card"
+key   = "o"
+
+[[commands]]
 id    = "run"
 title = "Run statement or selection"
 key   = "r"
