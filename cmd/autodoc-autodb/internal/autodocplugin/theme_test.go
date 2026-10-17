@@ -134,11 +134,12 @@ func TestTheChosenRowIsTheThemesSelectionBar(t *testing.T) {
 func TestTheCardCursorMatchesTheResultsPaletteInBothFocusStates(t *testing.T) {
 	for _, name := range themes.Names() {
 		th := builtIn(t, name)
-		p, _ := atPick(t, 32, 16)
+		p, h := atPick(t, 32, 16)
 		p.Theme(th)
 		for _, focused := range []bool{false, true} {
 			p.Focus(focused)
-			st := p.chosenStyle()
+			_, run, _ := h.runOf("> ") // the selected connection, in the cursor's style
+			st := run.Style
 			wantBG := th.Colors["app.inactive.highlight"]
 			if focused {
 				wantBG = th.Colors["document.highlight"]

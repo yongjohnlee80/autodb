@@ -15,6 +15,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodoc/plugin"
+	"github.com/yongjohnlee80/autodoc/plugin/card"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
 )
@@ -133,14 +134,14 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 	next := New("dev")
 	nh := &fakeHost{}
 	next.attach(nh, 70, 30)
-	if next.step != stepLogin || string(next.name) != "admin" || next.field != focusPass {
+	if next.step != stepLogin || next.nameIn.Value() != "admin" || next.field() != focusPass {
 		t.Fatalf("the next start opened at step %d with the name %q, focus %d; want the sign-in, admin, the passphrase\n%s",
-			next.step, string(next.name), next.field, nh.card())
+			next.step, next.nameIn.Value(), next.field(), nh.card())
 	}
 	next.Close()
 	for i, c := range p.conns {
 		if c.Name == "scratch" {
-			p.pick = i
+			p.connList.Sel = i
 		}
 	}
 	p.Key(plugin.Key{Key: "Enter"})
@@ -199,22 +200,32 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 	if p.problem != "" {
 		t.Fatalf("creating %s: %s", tbl, p.problem)
 	}
-	selectRow := func(match func(item) bool) {
+	selectRow := func(match func(*card.Node) bool) {
 		t.Helper()
-		for i, it := range p.tree.items() {
-			if match(it) {
-				p.tree.sel = i
-				return
+		var walk func([]*card.Node) bool
+		walk = func(ns []*card.Node) bool {
+			for _, n := range ns {
+				if match(n) {
+					p.tree.view.Select(n)
+					p.draw()
+					return true
+				}
+				if n.Open && walk(n.Children) {
+					return true
+				}
 			}
+			return false
 		}
-		t.Fatalf("no such row in the tree:\n%s", h.card())
+		if !walk(p.tree.view.Roots) {
+			t.Fatalf("no such row in the tree:\n%s", h.card())
+		}
 	}
 	if p.tree == nil {
 		t.Fatalf("the ready card has no tree: %s", p.problem)
 	}
-	selectRow(func(it item) bool { return it.t == nil && it.node() && it.s.name == "public" })
+	selectRow(func(n *card.Node) bool { s, ok := n.Value.(*schemaNode); return ok && s.name == "public" })
 	p.Key(plugin.Key{Key: "l", Text: "l"})
-	selectRow(func(it item) bool { return it.t != nil && it.node() && it.t.t.Name == tbl })
+	selectRow(func(n *card.Node) bool { tn, ok := n.Value.(*tableNode); return ok && tn.t.Name == tbl })
 	p.Key(plugin.Key{Key: "Enter"})
 	if len(h.calls) != 1 || h.calls[0].id != "buffer.new" || h.calls[0].args[0] != "public."+tbl+".sql" {
 		t.Fatalf("Enter on %s sent %q (%s)", tbl, h.calls, p.problem)

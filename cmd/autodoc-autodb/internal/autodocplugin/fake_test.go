@@ -383,7 +383,7 @@ func connected(t *testing.T, db *fakeDB) (*Plugin, *fakeHost) {
 
 // signIn types the name "admin" and pass into the card and presses Enter in the passphrase.
 func signIn(p *Plugin, pass string) {
-	p.field = focusName
+	p.focus(focusName)
 	p.Key(plugin.Key{Key: "u", Ctrl: true}) // a name left from an earlier sign-in goes
 	for _, r := range "admin" {
 		p.Key(plugin.Key{Key: string(r), Text: string(r)})

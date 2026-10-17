@@ -309,7 +309,7 @@ func TestARefusedSignInStays(t *testing.T) {
 	if p.step != stepLogin || p.token != "" {
 		t.Fatalf("a refused sign-in left the card at step %d", p.step)
 	}
-	if len(p.pass) != 0 {
+	if len(p.passIn.Runes()) != 0 {
 		t.Fatal("the refused passphrase is still held")
 	}
 	if card := h.card(); !strings.Contains(card, "bad credentials") {

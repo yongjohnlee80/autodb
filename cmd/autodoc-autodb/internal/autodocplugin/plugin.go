@@ -23,6 +23,7 @@ import (
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodoc/plugin"
+	"github.com/yongjohnlee80/autodoc/plugin/card"
 )
 
 // host is what the plugin sends to AutoDoc: *plugin.Peer, or a test's recorder.
@@ -78,13 +79,18 @@ type Plugin struct {
 	start   func(ctx context.Context, bin autodb.Binary) (*autodb.Client, error)
 	install func(ctx context.Context) error
 
-	ctx     context.Context
-	cancel  context.CancelFunc
-	host    host
-	w, h    int
-	theme   plugin.Theme // the screen's, as plugin.open and plugin.theme send it
-	focused bool         // whether the card has the keys: active vs inactive highlight
-	doc     plugin.Document
+	ctx    context.Context
+	cancel context.CancelFunc
+	host   host
+	theme  plugin.Theme // the screen's, as plugin.open and plugin.theme send it
+	doc    plugin.Document
+
+	// the card, drawn by AutoDoc's plugin/card kit, and its controls (card.go)
+	ui       *card.Card
+	nameIn   card.Input   // the sign-in's name: the one this server was last signed in to with, or empty
+	passIn   card.Input   // the passphrase, masked, kept only until it is sent, or the card closes or hides
+	signIn   card.Buttons // Sign in, Cancel
+	connList card.List    // the connections to pick from
 
 	step  step
 	tried []autodb.Tried
@@ -93,10 +99,6 @@ type Plugin struct {
 	// noUsers is a store with no user yet: nobody can sign in until one is made.
 	noUsers bool
 
-	// the sign-in form: the name the server was last signed in to with, or empty; the passphrase is
-	// kept only until it is sent, or the card is closed or hidden
-	name, pass []rune
-	field      int // the control focused: focusName, focusPass, focusSignIn or focusCancel
 	// logins is the file of the names last signed in with, a server's each ("" keeps none), and
 	// loginsTold that one which could not be read has been said so on the card
 	logins     string
@@ -104,13 +106,10 @@ type Plugin struct {
 
 	token string // auth.login's, in memory only
 	conns []autodb.Connection
-	pick  int
 	conn  *autodb.Connection
 	eng   engine.Name
 	sid   string // the session, opened once on the chosen connection
 	tree  *tree  // the connection's schemas, read on connect; nil when they could not be
-	// scroll is the ready card's first content row in view
-	scroll int
 
 	table    *results // the table shown, nil when none of ours is
 	idPrefix string
@@ -118,7 +117,6 @@ type Plugin struct {
 
 	status  string // what was done last
 	problem string // what went wrong last
-	titled  string // the title last sent
 }
 
 // results is the table the plugin serves: its id, the cursor behind it, and rows read from AutoDB
@@ -156,8 +154,10 @@ func newPlugin(version, dir string) *Plugin {
 	var b [4]byte
 	_, _ = rand.Read(b[:])
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Plugin{version: version, pluginDir: dir, ctx: ctx, cancel: cancel,
+	p := &Plugin{version: version, pluginDir: dir, ctx: ctx, cancel: cancel,
 		idPrefix: "res-" + hex.EncodeToString(b[:])}
+	p.newCard()
+	return p
 }
 
 // Open is the card opened: it looks for AutoDB at once.
@@ -167,15 +167,13 @@ func (p *Plugin) Open(peer *plugin.Peer, o plugin.Open) {
 }
 
 func (p *Plugin) attach(h host, w, hh int) {
-	p.host, p.w, p.h = h, w, hh
+	p.host = h
+	p.ui.Attach(h, w, hh, p.theme)
 	p.boot()
 }
 
 // Resize redraws the card at its new size.
-func (p *Plugin) Resize(w, h int) {
-	p.w, p.h = w, h
-	p.draw()
-}
+func (p *Plugin) Resize(w, h int) { p.ui.Resize(w, h) }
 
 // Document keeps the latest note: the feed's, or the one a command carries.
 func (p *Plugin) Document(d plugin.Document) { p.doc = d }
@@ -244,17 +242,15 @@ func (p *Plugin) connect() {
 // the passphrase; with none recorded the name is empty and has the focus. A record that cannot be
 // read counts as none, said once on the card.
 func (p *Plugin) prefill() {
-	clear(p.name)
-	p.name = p.name[:0]
 	m, err := readLogins(p.logins)
 	if err != nil && !p.loginsTold {
 		p.loginsTold = true
 		p.problem = "the names last signed in with could not be read (" + err.Error() + "): type yours"
 	}
-	p.name = append(p.name, []rune(m[serverKey(p.cli)])...)
-	p.field = focusName
-	if len(p.name) > 0 {
-		p.field = focusPass
+	p.nameIn.Set(m[serverKey(p.cli)])
+	p.ui.FocusOn(&p.nameIn)
+	if p.nameIn.Value() != "" {
+		p.ui.FocusOn(&p.passIn)
 	}
 }
 
@@ -277,12 +273,11 @@ func (p *Plugin) doInstall() {
 
 // login signs in with the form's name and passphrase; the passphrase is dropped either way.
 func (p *Plugin) login() {
-	name, pass := strings.TrimSpace(string(p.name)), string(p.pass)
-	p.dropPass()
+	name, pass := strings.TrimSpace(p.nameIn.Value()), string(p.passIn.Runes())
+	p.passIn.Clear()
 	if name == "" {
 		p.problem = "type your AutoDB user name"
-		p.field = focusName
-		p.draw()
+		p.ui.FocusOn(&p.nameIn)
 		return
 	}
 	p.status, p.problem = "signing in…", ""
@@ -297,8 +292,7 @@ func (p *Plugin) login() {
 			return
 		}
 		p.problem = "sign-in refused: " + autodb.Message(err)
-		p.field = focusPass
-		p.draw()
+		p.ui.FocusOn(&p.passIn)
 		return
 	}
 	p.token = token
@@ -324,10 +318,10 @@ func (p *Plugin) choose() {
 		p.draw()
 		return
 	}
-	p.conns, p.pick, p.step, p.problem = conns, 0, stepPick, ""
+	p.conns, p.connList.Sel, p.step, p.problem = conns, 0, stepPick, ""
 	for i, c := range conns {
 		if p.conn != nil && c.ID == p.conn.ID {
-			p.pick = i
+			p.connList.Sel = i
 		}
 	}
 	if len(conns) == 0 {
@@ -364,7 +358,6 @@ func (p *Plugin) use(c autodb.Connection) {
 	}
 	p.conn, p.eng, p.sid = &c, eng, sid
 	p.step, p.problem, p.status = stepReady, "", "connected to "+c.Name+" ("+c.Engine+")"
-	p.scroll = 0
 	p.loadSchemas()
 	p.draw()
 }
@@ -407,7 +400,8 @@ func (p *Plugin) failed(what string, err error) {
 func (p *Plugin) signedOut(why string) {
 	p.forgetTable(errors.New("signed out of AutoDB"))
 	p.token, p.sid = "", ""
-	p.step, p.field = stepLogin, focusPass
+	p.step = stepLogin
+	p.ui.FocusOn(&p.passIn)
 	p.problem = "signed out (" + why + "): sign in again"
 }
 

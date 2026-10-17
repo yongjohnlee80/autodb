@@ -8,23 +8,24 @@ import (
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodoc/plugin"
+	"github.com/yongjohnlee80/autodoc/plugin/card"
 )
 
 // THE TREE — the ready card's body: the connection's schemas, a schema's tables and views, a
 // table's columns. Each level is read from AutoDB when it is first opened (schema.schemas on
-// connect, schema.tables on a schema, schema.columns on a table), and only the rows in view are
-// drawn, so a schema of thousands of tables is a list in memory, never a frame of thousands of
-// rows. Enter on a table opens a SELECT of it in a new AutoDoc buffer.
+// connect, schema.tables on a schema, schema.columns on a table), and the card's kit draws only the
+// rows in view, so a schema of thousands of tables is a list in memory, never a frame of thousands
+// of rows. Enter on a table opens a SELECT of it in a new AutoDoc buffer.
 
-// tree is the connection's schemas and the row selected among the rows open.
+// tree is the connection's schemas, and the card.Tree that shows them: one node per schema, table
+// and column, each schema and table node's Value its schemaNode or tableNode.
 type tree struct {
 	schemas []*schemaNode
-	sel     int
+	view    *card.Tree
 }
 
 type schemaNode struct {
 	name   string
-	open   bool
 	loaded bool
 	tables []*tableNode
 }
@@ -32,203 +33,63 @@ type schemaNode struct {
 type tableNode struct {
 	schema *schemaNode
 	t      autodb.Table
-	open   bool
 	loaded bool
 	cols   []autodb.Column
 }
 
-// item is one row of the tree as it stands open: a schema, a table, a column, or the note that
-// a schema has no tables or a table no columns (col nil, placeholder set).
-type item struct {
-	s           *schemaNode
-	t           *tableNode
-	col         *autodb.Column
-	placeholder string
-}
-
-// items are the tree's rows, open schemas and tables showing what they hold.
-func (tr *tree) items() []item {
-	var out []item
-	for _, s := range tr.schemas {
-		out = append(out, item{s: s})
-		if !s.open {
-			continue
-		}
-		if len(s.tables) == 0 {
-			out = append(out, item{s: s, placeholder: "(no tables)"})
-		}
-		for _, t := range s.tables {
-			out = append(out, item{s: s, t: t})
-			if !t.open {
-				continue
+// newTree is the tree of schemas, its nodes opening as the card's kit asks: a schema reads its
+// tables, a table its columns, the first time each opens; Enter on a table opens a SELECT of it.
+func (p *Plugin) newTree(names []string) *tree {
+	tr := &tree{view: &card.Tree{}}
+	for _, n := range names {
+		s := &schemaNode{name: n}
+		tr.schemas = append(tr.schemas, s)
+		tr.view.Roots = append(tr.view.Roots, &card.Node{Text: n, Empty: "(no tables)", Value: s})
+	}
+	tr.view.OnOpen = func(n *card.Node) bool {
+		switch v := n.Value.(type) {
+		case *schemaNode:
+			if !p.loadTables(v) {
+				return false
 			}
-			if len(t.cols) == 0 {
-				out = append(out, item{s: s, t: t, placeholder: "(no columns)"})
+			n.Children = n.Children[:0]
+			for _, t := range v.tables {
+				n.Children = append(n.Children, &card.Node{Text: t.t.Name + " (" + t.t.Kind + ")", Empty: "(no columns)", Value: t})
 			}
-			for i := range t.cols {
-				out = append(out, item{s: s, t: t, col: &t.cols[i]})
+		case *tableNode:
+			if !p.loadColumns(v) {
+				return false
+			}
+			n.Children = n.Children[:0]
+			for _, c := range v.cols {
+				text := c.Name + " " + c.Type
+				if c.PK {
+					text += " · pk"
+				}
+				n.Children = append(n.Children, &card.Node{Text: text, Leaf: true})
 			}
 		}
+		return true
 	}
-	return out
-}
-
-// depth is how deep it sits: a schema 0, a table 1, a column 2, a note one under what it notes.
-func (it item) depth() int {
-	switch {
-	case it.col != nil, it.placeholder != "" && it.t != nil:
-		return 2
-	case it.t != nil, it.placeholder != "":
-		return 1
-	}
-	return 0
-}
-
-// node reports whether it is a schema's or a table's own row, one that opens.
-func (it item) node() bool { return it.col == nil && it.placeholder == "" }
-
-// isOpen reports whether it is a schema or a table open.
-func (it item) isOpen() bool {
-	switch {
-	case !it.node():
-		return false
-	case it.t != nil:
-		return it.t.open
-	}
-	return it.s.open
-}
-
-// text is it as the tree draws it, indented by its depth.
-func (it item) text() string {
-	switch {
-	case it.placeholder != "" && it.t != nil:
-		return "      " + it.placeholder
-	case it.placeholder != "":
-		return "    " + it.placeholder
-	case it.col != nil:
-		s := "      " + it.col.Name + " " + it.col.Type
-		if it.col.PK {
-			s += " · pk"
+	tr.view.OnEnter = func(n *card.Node) bool {
+		t, ok := n.Value.(*tableNode)
+		if ok {
+			p.openTable(t)
 		}
-		return s
-	case it.t != nil:
-		return "  " + arrow(it.t.open) + " " + it.t.t.Name + " (" + it.t.t.Kind + ")"
-	default:
-		return arrow(it.s.open) + " " + it.s.name
+		return ok // a schema: Enter opens or closes it
 	}
+	return tr
 }
 
-func arrow(open bool) string {
-	if open {
-		return "▾"
-	}
-	return "▸"
-}
-
-// treeRows adds the tree to the ready card's content: drawn on demand, the selected row the
-// themed bar, kept in view.
-func (p *Plugin) treeRows(l *layout) {
+// treeBlocks adds the tree to the ready card's body.
+func (p *Plugin) treeBlocks(pg *card.Page) {
 	switch {
 	case p.tree == nil:
-		l.add(stDim, "the schemas could not be read: c to choose the connection again")
-		return
+		pg.Body = append(pg.Body, card.Text(card.Dim, "the schemas could not be read: c to choose the connection again"))
 	case len(p.tree.schemas) == 0:
-		l.add(stDim, "(no schemas)")
-		return
-	}
-	items := p.tree.items()
-	p.tree.sel = min(max(p.tree.sel, 0), len(items)-1)
-	chosen, width := p.chosenStyle(), l.width
-	l.list = list{n: len(items), row: func(i int) row {
-		if i == p.tree.sel {
-			s := elide("> "+items[i].text(), width)
-			return row{{s + strings.Repeat(" ", max(width-len([]rune(s)), 0)), chosen}}
-		}
-		st := stPlain
-		if !items[i].node() {
-			st = stDim
-		}
-		return row{{elide("  "+items[i].text(), width), st}}
-	}}
-	l.keep = len(l.top) + p.tree.sel
-}
-
-// treeKey is a key on the ready card: the tree's, then c for another connection.
-func (p *Plugin) treeKey(k plugin.Key) {
-	if k.Key == "c" && !k.Ctrl {
-		p.choose()
-		return
-	}
-	if p.tree == nil || len(p.tree.schemas) == 0 {
-		return
-	}
-	items := p.tree.items()
-	tr := p.tree
-	page := max(p.h/2, 1)
-	it := items[min(max(tr.sel, 0), len(items)-1)]
-	switch {
-	case k.Key == "Up" || k.Key == "k":
-		tr.sel--
-	case k.Key == "Down" || k.Key == "j":
-		tr.sel++
-	case k.Key == "PageUp" || (k.Ctrl && k.Key == "u"):
-		tr.sel -= page
-	case k.Key == "PageDown" || (k.Ctrl && k.Key == "d"):
-		tr.sel += page
-	case k.Key == "Right" || k.Key == "l":
-		p.expand(it)
-	case k.Key == "Left" || k.Key == "h":
-		p.collapse(it, items)
-	case k.Key == "Enter":
-		switch {
-		case !it.node():
-		case it.t != nil:
-			p.openTable(it.t)
-			return
-		case it.s.open:
-			it.s.open = false
-		default:
-			p.expand(it)
-		}
+		pg.Body = append(pg.Body, card.Text(card.Dim, "(no schemas)"))
 	default:
-		return
-	}
-	tr.sel = min(max(tr.sel, 0), len(tr.items())-1)
-	p.draw()
-}
-
-// expand opens it, reading what it holds the first time; on a row already open it steps to the
-// first row it holds.
-func (p *Plugin) expand(it item) {
-	switch {
-	case !it.node():
-	case it.isOpen():
-		p.tree.sel++
-	case it.t != nil:
-		if p.loadColumns(it.t) {
-			it.t.open = true
-		}
-	default:
-		if p.loadTables(it.s) {
-			it.s.open = true
-		}
-	}
-}
-
-// collapse closes it when it is open; otherwise it steps to the row holding it.
-func (p *Plugin) collapse(it item, items []item) {
-	switch {
-	case it.isOpen() && it.t != nil:
-		it.t.open = false
-	case it.isOpen():
-		it.s.open = false
-	default:
-		for i := min(p.tree.sel, len(items)-1) - 1; i >= 0; i-- {
-			if items[i].depth() == it.depth()-1 {
-				p.tree.sel = i
-				return
-			}
-		}
+		pg.Body = append(pg.Body, p.tree.view)
 	}
 }
 
@@ -242,11 +103,7 @@ func (p *Plugin) loadSchemas() {
 		p.failed("listing the schemas", err)
 		return
 	}
-	tr := &tree{}
-	for _, n := range names {
-		tr.schemas = append(tr.schemas, &schemaNode{name: n})
-	}
-	p.tree = tr
+	p.tree = p.newTree(names)
 }
 
 // loadTables reads s's tables the first time; it reports whether they are there.

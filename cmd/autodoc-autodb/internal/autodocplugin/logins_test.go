@@ -44,7 +44,7 @@ func openAt(t *testing.T, db *fakeDB, path string) (*Plugin, *fakeHost) {
 
 // signInAs types name over the one in the field, then pass, and presses Enter on the passphrase.
 func signInAs(p *Plugin, name, pass string) {
-	p.field = focusName
+	p.focus(focusName)
 	p.Key(plugin.Key{Key: "u", Ctrl: true})
 	typeText(p, name)
 	tab(p)
@@ -80,17 +80,17 @@ func record(t *testing.T, path string) map[string]string {
 // an empty name with the focus on it.
 func wantPrefilled(t *testing.T, p *Plugin, h *fakeHost, name string) {
 	t.Helper()
-	if got := string(p.name); got != name {
+	if got := p.nameIn.Value(); got != name {
 		t.Fatalf("the sign-in opened with the name %q, want %q", got, name)
 	}
 	if name == "" {
-		if p.field != focusName {
-			t.Fatalf("an empty name opened with the focus on %d, want the name", p.field)
+		if p.field() != focusName {
+			t.Fatalf("an empty name opened with the focus on %d, want the name", p.field())
 		}
 		return
 	}
-	if p.field != focusPass {
-		t.Fatalf("the name %q opened with the focus on %d, want the passphrase", name, p.field)
+	if p.field() != focusPass {
+		t.Fatalf("the name %q opened with the focus on %d, want the passphrase", name, p.field())
 	}
 	if card := h.card(); !strings.Contains(card, name) || !strings.Contains(card, "Enter: sign in") {
 		t.Fatalf("the card does not show %q with the passphrase focused:\n%s", name, card)

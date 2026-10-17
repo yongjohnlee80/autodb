@@ -2,18 +2,16 @@ package autodocplugin
 
 import (
 	"fmt"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodoc/plugin"
-	"github.com/yongjohnlee80/golib/tui/style"
+	"github.com/yongjohnlee80/autodoc/plugin/card"
 )
 
-// THE CARD — what each step shows and the keys it takes. Each step is laid out as AutoDoc's own
-// dialogs are: a heading, the content, a rule, the buttons (the sign-in's), the keys on a line of
-// their own, then what was done last and what went wrong, in the error style. Once a connection is
-// picked, every step's first line names it, and so do the card's title and the results' title.
+// THE CARD — what each step shows and the keys it takes, drawn by AutoDoc's plugin/card kit
+// (ADR 1792254331): a heading, the content, then at the foot a rule, the buttons (the sign-in's),
+// the keys, what was done last and what went wrong. Once a connection is picked, every step's first
+// line names it, and so do the card's title and the results' title.
 //
 //	finding    "Looking for AutoDB…"
 //	install    where it looked; i downloads the release matching this plugin, checked by its .sha256
@@ -22,462 +20,137 @@ import (
 //	           between them, Enter activates. The name is the one this server was last signed in
 //	           to with, and the passphrase then has the focus; with none, it is empty and focused
 //	pick       the connections; ↑↓ (j k) choose, Enter connects
-//	ready      the connection, the last result, and the SPC p commands
+//	ready      the connection and its schemas as a tree (tree.go)
 //	failed     why the server could not be reached; Enter tries again
 //
-// q closes the card wherever no text field has the keys: on the sign-in's fields it is a letter.
-// AutoDoc sends a card keys only while the card has them, so a key here is the card's.
+// q closes the card wherever no text field has the keys: in the sign-in's fields it is a letter.
 
-// The sign-in's controls, in Tab order: p.field is the one focused.
-const (
-	focusName = iota
-	focusPass
-	focusSignIn
-	focusCancel
-	focusCount
-)
-
-// Key is a key typed into the focused card.
-func (p *Plugin) Key(k plugin.Key) {
-	if p.step == stepLogin {
-		p.loginKey(k)
-		return
-	}
-	if isQ(k) {
-		p.closeCard()
-		return
-	}
-	switch p.step {
-	case stepInstall:
-		if k.Key == "i" || k.Key == "Enter" {
-			p.doInstall()
-		}
-	case stepFailed:
-		if k.Key == "Enter" {
-			p.boot()
-		}
-	case stepPick:
-		p.pickKey(k)
-	case stepReady:
-		p.treeKey(k)
-	}
-}
-
-// Pointer selects the connection or tree row under a left press. The wheel moves the selection,
-// which keeps the scrolled viewport and the keyboard's cursor in agreement. Coordinates are in
-// the frame, whose content begins after its fixed heading and may have a scrolled prefix.
-func (p *Plugin) Pointer(at plugin.Pointer) {
-	if at.X < 0 || at.X >= p.w || at.Y < 0 || at.Y >= p.h || at.Count < 1 {
-		return
-	}
-	l := p.lines(p.w - 2)
-	top, _, from := l.fit(p.h)
-	switch at.Kind {
-	case "press":
-		if at.Button != "left" || at.Y >= len(top) || at.Y < l.fixed {
-			return
-		}
-		if p.step == stepPick {
-			if index := from + at.Y - l.pickStart; index >= 0 && index < len(p.conns) {
-				p.pick = index
-				p.draw()
-			}
-		} else if p.step == stepReady && p.tree != nil {
-			if index := from + at.Y - len(l.top); index >= 0 && index < len(p.tree.items()) {
-				p.tree.sel = index
-				p.draw()
-			}
-		}
-	case "wheel":
-		step := min(at.Count*3, 48)
-		if at.Button == "up" {
-			step = -step
-		} else if at.Button != "down" {
-			return
-		}
-		switch p.step {
-		case stepPick:
-			if len(p.conns) > 0 {
-				p.pick = min(max(p.pick+step, 0), len(p.conns)-1)
-				p.draw()
-			}
-		case stepReady:
-			if p.tree != nil {
-				items := p.tree.items()
-				if len(items) > 0 {
-					p.tree.sel = min(max(p.tree.sel+step, 0), len(items)-1)
-					p.draw()
-				}
-			}
-		}
-	}
-}
-
-// isQ is q typed alone.
-func isQ(k plugin.Key) bool { return k.Key == "q" && !k.Ctrl && !k.Alt }
-
-// closeCard asks AutoDoc to close the card. A passphrase half typed is dropped first: the plugin
-// may run on unseen.
-func (p *Plugin) closeCard() {
-	p.dropPass()
-	p.draw()
-	if p.host != nil {
-		_ = p.host.Close()
-	}
-}
-
-// dropPass forgets the passphrase typed.
-func (p *Plugin) dropPass() {
-	clear(p.pass)
-	p.pass = p.pass[:0]
-}
-
-func (p *Plugin) loginKey(k plugin.Key) {
-	switch {
-	case k.Key == "Tab" && k.Shift, k.Key == "Up":
-		p.field = (p.field + focusCount - 1) % focusCount
-	case k.Key == "Tab", k.Key == "Down":
-		p.field = (p.field + 1) % focusCount
-	case p.field == focusSignIn || p.field == focusCancel:
-		p.buttonKey(k)
-		return
-	default:
-		p.fieldKey(k)
-		return
-	}
-	p.draw()
-}
-
-// fieldKey is a key typed into the name or the passphrase: every printable key is text, q too.
-func (p *Plugin) fieldKey(k plugin.Key) {
-	f := &p.name
-	if p.field == focusPass {
-		f = &p.pass
-	}
-	switch {
-	case k.Key == "Enter":
-		if p.field == focusName {
-			p.field = focusPass
-			p.draw()
-			return
-		}
-		p.login()
-		return
-	case k.Key == "Backspace":
-		if n := len(*f); n > 0 {
-			(*f)[n-1] = 0
-			*f = (*f)[:n-1]
-		}
-	case k.Ctrl && k.Key == "u":
-		clear(*f)
-		*f = (*f)[:0]
-	case !k.Ctrl && !k.Alt && k.Text != "":
-		*f = append(*f, []rune(k.Text)...)
-	default:
-		return
-	}
-	p.draw()
-}
-
-// buttonKey is a key on Sign in or Cancel: Enter or Space presses it, ← → move between the two,
-// and q closes, no field having the keys.
-func (p *Plugin) buttonKey(k plugin.Key) {
-	switch {
-	case k.Key == "Enter" || k.Key == " ":
-		if p.field == focusSignIn {
+// newCard makes the card's controls and the kit's Card over them.
+func (p *Plugin) newCard() {
+	p.nameIn = card.Input{Label: "name"} // Enter moves to the passphrase
+	p.passIn = card.Input{Label: "passphrase", Masked: true, OnEnter: p.login}
+	p.signIn = card.Buttons{Labels: []string{"Sign in", "Cancel"}, OnPress: func(i int) {
+		if i == 0 {
 			p.login()
 			return
 		}
 		p.closeCard()
-	case isQ(k):
-		p.closeCard()
-	case k.Key == "Left" || k.Key == "Right":
-		p.field = focusSignIn + focusCancel - p.field
-		p.draw()
+	}}
+	p.connList = card.List{
+		Item:    p.connItem,
+		OnEnter: func(i int) { p.use(p.conns[i]) },
 	}
+	p.ui = card.New(p.page, card.Options{})
 }
 
-func (p *Plugin) pickKey(k plugin.Key) {
-	switch k.Key {
-	case "Up", "k":
-		p.pick = max(p.pick-1, 0)
-	case "Down", "j":
-		p.pick = min(p.pick+1, max(len(p.conns)-1, 0))
-	case "Enter":
-		if p.pick < len(p.conns) {
-			p.use(p.conns[p.pick])
-		}
-		return
-	default:
-		return
+// page is what the card shows now.
+func (p *Plugin) page() card.Page {
+	pg := card.Page{Title: p.cardTitle(), Status: p.status, Problem: p.problem}
+	if line, role := p.connLine(); line != "" {
+		pg.Header = append(pg.Header, card.Text(role, line))
 	}
-	p.draw()
-}
-
-// Hide is the card's panel closed while the plugin runs on: the session, the connection and the
-// table stay, and a passphrase half typed goes.
-func (p *Plugin) Hide() { p.focused = false; p.dropPass() }
-
-// Show is the panel open again: the card is drawn as it stands.
-func (p *Plugin) Show() { p.draw() }
-
-// Styles, in the themes' vocabulary.
-var (
-	stTitle   = plugin.Style{Bold: true}
-	stPlain   = plugin.Style{}
-	stDim     = plugin.Style{FG: "gray"}
-	stProblem = plugin.Style{FG: "red"}
-	stGood    = plugin.Style{FG: "green"}
-	// a field is underlined across its width
-	stField = plugin.Style{Underline: true}
-	// the selection and the focused field under a theme that names no selection colours: bold, the
-	// "> " mark and the cursor saying the rest
-	stChosen     = plugin.Style{Bold: true}
-	stFieldFocus = plugin.Style{Underline: true, Bold: true}
-)
-
-// The card and the results table use the same document highlight roles for their cursors.
-const (
-	themeSelectionBG = "document.highlight"
-	themeSelectionFG = "document.highlightedText"
-)
-
-// chosenStyle is the selection's: the theme's selection colours, or bold when the theme has none.
-func (p *Plugin) chosenStyle() plugin.Style {
-	bgKey, fgKey := themeSelectionBG, themeSelectionFG
-	if !p.focused {
-		bgKey, fgKey = "app.inactive.highlight", "app.inactive.highlightedText"
-	}
-	bg, fg := p.theme.Colors[bgKey], p.theme.Colors[fgKey]
-	if bg == "" || fg == "" {
-		return stChosen
-	}
-	if bgColor, err := style.ParseColor(bg); err == nil {
-		if fgColor, err := style.ParseColor(fg); err == nil {
-			if r, g, b, ok := style.Legible(fgColor, bgColor, 4.5).RGBValues(); ok {
-				fg = fmt.Sprintf("#%02x%02x%02x", r, g, b)
-			}
-		}
-	}
-	return plugin.Style{FG: fg, BG: bg}
-}
-
-// Focus switches the card cursor between the same active and inactive roles as the results table.
-func (p *Plugin) Focus(focused bool) { p.focused = focused; p.draw() }
-
-// fieldFocusStyle is the focused field's: the selection's colours, underlined.
-func (p *Plugin) fieldFocusStyle() plugin.Style {
-	st := p.chosenStyle()
-	st.Underline = true
-	return st
-}
-
-// Theme is the theme AutoDoc's screen switched to: the card is drawn in it.
-func (p *Plugin) Theme(t plugin.Theme) {
-	p.theme = t
-	p.draw()
-}
-
-// span is text in one style; a row is one line of the card, laid out to its width.
-type span struct {
-	text string
-	st   plugin.Style
-}
-
-type row []span
-
-// The marks drawn in a field: the passphrase's characters, the cursor, and the cut when the value
-// is wider than the field.
-const (
-	maskRune   = '•'
-	cursorRune = '█'
-	elision    = "…"
-)
-
-// layout is the card as rows width cells wide. top is the connection, the heading and the content:
-// its first fixed rows (the connection and the heading) always show, and the content scrolls to
-// keep its row at keep (-1 none) in view. Under them, at the card's foot: the rule, the buttons,
-// the keys, then the news, status (what was done last) and problem (what went wrong).
-//
-// list is more content after top, made a row at a time as it comes into view; keep counts its
-// rows after top's. from is the content row the view would start at, kept when the row at keep
-// stays in view.
-type layout struct {
-	width           int
-	top             []row
-	list            list
-	pickStart       int // first connection's index in top, or -1
-	fixed, keep     int
-	from            int
-	rule            row
-	buttons, keys   []row
-	status, problem []row
-}
-
-// list is n rows of content, row(i) the i-th, made only for the rows in view.
-type list struct {
-	n   int
-	row func(i int) row
-}
-
-// heading is the step's title, the last of the rows that always show.
-func (l *layout) heading(text string) {
-	l.add(stTitle, "%s", text)
-	l.fixed = len(l.top)
-}
-
-// para adds text to rows, wrapped at spaces to the width.
-func (l *layout) para(to *[]row, st plugin.Style, format string, a ...any) {
-	for _, s := range wrap(fmt.Sprintf(format, a...), l.width) {
-		*to = append(*to, row{{s, st}})
-	}
-}
-
-// add is a paragraph of the content.
-func (l *layout) add(st plugin.Style, format string, a ...any) { l.para(&l.top, st, format, a...) }
-
-// one adds a row that is never wrapped: text past the width is cut with an ellipsis.
-func (l *layout) one(st plugin.Style, s string) { l.top = append(l.top, row{{elide(s, l.width), st}}) }
-
-// bar adds the selection's row: s cut to the width, and padded to it, so the colour runs the
-// card's whole width.
-func (l *layout) bar(st plugin.Style, s string) {
-	s = elide(s, l.width)
-	l.top = append(l.top, row{{s + strings.Repeat(" ", max(l.width-utf8.RuneCountInString(s), 0)), st}})
-}
-
-func (l *layout) blank() { l.top = append(l.top, row{}) }
-
-// lines is what the card shows now, laid out width cells wide.
-func (p *Plugin) lines(width int) layout {
-	l := layout{width: width, keep: -1, pickStart: -1}
-	if line, st := p.connLine(); line != "" {
-		l.add(st, "%s", line)
-	}
-	var hint string
-	var buttons []row
+	heading := func(s string) { pg.Header = append(pg.Header, card.Text(card.Title, s)) }
+	body := func(bs ...card.Block) { pg.Body = append(pg.Body, bs...) }
 	switch p.step {
 	case stepFinding:
-		l.heading("AutoDB")
-		l.add(stPlain, "Looking for AutoDB…")
-		hint = "q: close"
+		heading("AutoDB")
+		body(card.Text(card.Plain, "Looking for AutoDB…"))
+		pg.Keys = "q: close"
 	case stepInstall:
-		l.heading("Install AutoDB")
-		l.add(stPlain, "AutoDB was not found. Looked in:")
+		heading("Install AutoDB")
+		body(card.Text(card.Plain, "AutoDB was not found. Looked in:"))
 		for _, t := range p.tried {
 			where := t.Path
 			if where == "" {
 				where = "-"
 			}
-			l.add(stDim, "%s: %s (%s)", t.Via, where, t.Why)
+			body(card.Text(card.Dim, fmt.Sprintf("%s: %s (%s)", t.Via, where, t.Why)))
 		}
-		hint = "q: close"
+		pg.Keys = "q: close"
 		if autodb.IsRelease(p.version) {
 			r := autodb.ThisPlatform(p.version)
-			l.blank()
-			l.add(stPlain, "Download AutoDB %s for %s/%s, checked against its .sha256, into %s.",
-				p.version, r.OS, r.Arch, autodb.InstallPath(p.pluginDir))
-			l.add(stDim, "%s", r.URL())
-			hint = "i: install · q: close"
+			body(card.Blank(),
+				card.Text(card.Plain, fmt.Sprintf("Download AutoDB %s for %s/%s, checked against its .sha256, into %s.",
+					p.version, r.OS, r.Arch, autodb.InstallPath(p.pluginDir))),
+				card.Text(card.Dim, r.URL()))
+			pg.Keys = "i: install · q: close"
 		}
 	case stepStarting:
-		l.heading("Starting AutoDB")
-		l.add(stDim, "%s (%s, %s)", p.bin.Path, p.bin.Via, p.bin.Version)
-		hint = "q: close"
+		heading("Starting AutoDB")
+		body(card.Text(card.Dim, fmt.Sprintf("%s (%s, %s)", p.bin.Path, p.bin.Via, p.bin.Version)))
+		pg.Keys = "q: close"
 	case stepLogin:
-		l.heading("Sign in to AutoDB")
-		p.serverLine(&l)
+		heading("Sign in to AutoDB")
+		p.serverLine(&pg)
 		if p.noUsers {
-			l.add(stProblem, "AutoDB has no user yet: create the first administrator with `autodb --init` (or in `autodb --ui`), then sign in here.")
+			body(card.Text(card.Problem, "AutoDB has no user yet: create the first administrator with `autodb --init` (or in `autodb --ui`), then sign in here."))
 		}
-		l.blank()
-		l.one(stPlain, "name")
-		if p.field == focusName {
-			l.keep = len(l.top)
-		}
-		l.top = append(l.top, fieldRow(string(p.name), width, p.field == focusName, p.fieldFocusStyle()))
-		l.one(stPlain, "passphrase")
-		if p.field == focusPass {
-			l.keep = len(l.top)
-		}
-		l.top = append(l.top, fieldRow(strings.Repeat(string(maskRune), len(p.pass)), width, p.field == focusPass, p.fieldFocusStyle()))
-		buttons = buttonRows(width, p.field-focusSignIn, p.chosenStyle(), "Sign in", "Cancel")
-		switch p.field {
-		case focusName:
-			hint = "Tab Shift+Tab: move · Enter: next"
-		case focusPass:
-			hint = "Tab Shift+Tab: move · Enter: sign in"
-		case focusSignIn:
-			hint = "Tab: move · Enter: sign in · q: close"
+		body(card.Blank(), &p.nameIn, &p.passIn)
+		pg.Buttons = &p.signIn
+		switch {
+		case p.ui.Focused() == &p.nameIn:
+			pg.Keys = "Tab Shift+Tab: move · Enter: next"
+		case p.ui.Focused() == &p.passIn:
+			pg.Keys = "Tab Shift+Tab: move · Enter: sign in"
+		case p.signIn.Focused() == 0:
+			pg.Keys = "Tab: move · Enter: sign in · q: close"
 		default:
-			hint = "Tab: move · Enter: cancel · q: close"
+			pg.Keys = "Tab: move · Enter: cancel · q: close"
 		}
 	case stepPick:
-		l.heading("Choose a connection")
-		p.serverLine(&l)
-		l.blank()
-		l.pickStart = len(l.top)
-		for i, c := range p.conns {
-			mark, st := "  ", stPlain
-			if i == p.pick {
-				mark, st = "> ", p.chosenStyle()
-				l.keep = len(l.top)
-			}
-			current := ""
-			if p.conn != nil && c.ID == p.conn.ID {
-				current = " · current"
-			}
-			text := elide(fmt.Sprintf("%s%s (%s)", mark, c.Name, c.Engine), width-utf8.RuneCountInString(current))
-			if i == p.pick {
-				l.bar(st, text+current)
-			} else {
-				l.one(st, text+current)
-			}
-		}
-		hint = "↑↓ j k: choose · Enter: connect · q: close"
+		heading("Choose a connection")
+		p.serverLine(&pg)
+		p.connList.Len = len(p.conns)
+		body(card.Blank(), &p.connList)
+		pg.Keys = "↑↓ j k: choose · Enter: connect · q: close"
 	case stepReady:
-		l.heading("Ready")
-		p.serverLine(&l)
-		l.blank()
-		l.from = p.scroll
-		p.treeRows(&l)
-		hint = "j k: move · l h: open, close · Enter: query · c: another connection · q: close"
+		heading("Ready")
+		p.serverLine(&pg)
+		body(card.Blank())
+		p.treeBlocks(&pg)
+		pg.Keys = "j k: move · l h: open, close · Enter: query · c: another connection · q: close"
 	case stepFailed:
-		l.heading("AutoDB is not reachable")
-		l.add(stPlain, "AutoDB could not be reached.")
-		hint = "Enter: try again · q: close"
+		heading("AutoDB is not reachable")
+		body(card.Text(card.Plain, "AutoDB could not be reached."))
+		pg.Keys = "Enter: try again · q: close"
 	}
+	return pg
+}
 
-	l.rule = row{{strings.Repeat("─", max(width, 0)), stDim}}
-	l.buttons = buttons
-	l.para(&l.keys, stDim, "%s", hint)
-	if p.status != "" {
-		l.para(&l.status, stPlain, "%s", p.status)
+// connItem is the i-th connection's row: its name and engine, and whether it is the one in use.
+func (p *Plugin) connItem(i int) string {
+	c := p.conns[i]
+	s := fmt.Sprintf("%s (%s)", c.Name, c.Engine)
+	if p.conn != nil && c.ID == p.conn.ID {
+		s += " · current"
 	}
-	if p.problem != "" {
-		l.para(&l.problem, stProblem, "%s", p.problem)
+	return s
+}
+
+func (p *Plugin) serverLine(pg *card.Page) {
+	if p.cli != nil {
+		pg.Body = append(pg.Body, card.Text(card.Dim, fmt.Sprintf("AutoDB %s at %s", p.cli.Hello.Version, p.cli.Addr)))
 	}
-	return l
 }
 
 // connected reports whether the card has a connection to run on: picked, and AutoDB signed in.
 func (p *Plugin) connected() bool { return p.conn != nil && p.cli != nil && p.token != "" }
 
-// connLine is the line naming the connection picked, and its style; "" before any pick. A
+// connLine is the line naming the connection picked, and its role; "" before any pick. A
 // connection whose server or sign-in has gone is named as not connected.
-func (p *Plugin) connLine() (string, plugin.Style) {
+func (p *Plugin) connLine() (string, card.Role) {
 	c := p.conn
 	if c == nil {
-		return "", stPlain
+		return "", card.Plain
 	}
 	if !p.connected() {
-		return "Connection: " + c.Name + " (" + c.Engine + ") · not connected", stDim
+		return "Connection: " + c.Name + " (" + c.Engine + ") · not connected", card.Dim
 	}
 	s := "Connection: " + c.Name + " (" + c.Engine + ")"
 	if c.Workspace != "" {
 		s += " · " + c.Workspace
 	}
-	return s, stGood
+	return s, card.Good
 }
 
 // cardTitle is the card's title: AutoDB, and the connection picked.
@@ -492,230 +165,53 @@ func (p *Plugin) cardTitle() string {
 	}
 }
 
-func (p *Plugin) serverLine(l *layout) {
-	if p.cli != nil {
-		l.add(stDim, "AutoDB %s at %s", p.cli.Hello.Version, p.cli.Addr)
-	}
-}
-
-// fieldRow is a field width cells wide holding value, underlined across; the focused one is in
-// focus's style and shows its cursor, and a value too wide for it shows its end.
-func fieldRow(value string, width int, focused bool, focus plugin.Style) row {
-	if width <= 0 {
-		return row{}
-	}
-	st, cursor := stField, ""
-	if focused {
-		st, cursor = focus, string(cursorRune)
-	}
-	v := []rune(value + cursor)
-	if len(v) > width {
-		v = append([]rune(elision), v[len(v)-width+1:]...)
-	}
-	return row{{string(v) + strings.Repeat(" ", width-len(v)), st}}
-}
-
-// buttonRows are the buttons, "[ label ]" each, centred, the one at focused (none when it is out
-// of range) in chosen. Buttons too wide for one row go on to the next, as words do.
-func buttonRows(width, focused int, chosen plugin.Style, labels ...string) []row {
-	var rows []row
-	var cur row
-	n := 0
-	flush := func() {
-		if pad := (width - n) / 2; pad > 0 {
-			cur = append(row{{strings.Repeat(" ", pad), stPlain}}, cur...)
-		}
-		rows = append(rows, cur)
-		cur, n = nil, 0
-	}
-	for i, label := range labels {
-		b := "[ " + label + " ]"
-		bn := utf8.RuneCountInString(b)
-		if n > 0 && n+2+bn > width {
-			flush()
-		}
-		if n > 0 {
-			cur = append(cur, span{"  ", stPlain})
-			n += 2
-		}
-		st := stPlain
-		if i == focused {
-			st = chosen
-		}
-		cur = append(cur, span{b, st})
-		n += bn
-	}
-	if len(cur) > 0 {
-		flush()
-	}
-	return rows
-}
-
-// draw sends the card as it stands, laid out to the size AutoDoc last gave it, and its title
-// when that has changed.
-func (p *Plugin) draw() {
-	if p.host == nil {
+// Key is a key typed into the focused card: the card's controls first, then the plugin's own.
+func (p *Plugin) Key(k plugin.Key) {
+	plain := !k.Ctrl && !k.Alt
+	if p.step == stepReady && plain && k.Key == "c" {
+		p.choose()
 		return
 	}
-	if t := p.cardTitle(); t != p.titled {
-		if p.host.Title(t) == nil {
-			p.titled = t
-		}
-	}
-	if p.w <= 0 || p.h <= 0 {
+	if p.ui.Key(k) {
 		return
 	}
-	f := plugin.NewFrame(p.w, p.h)
-	l := p.lines(p.w - 2)
-	top, foot, from := l.fit(p.h)
-	if p.step == stepReady {
-		p.scroll = from
-	}
-	for y, r := range top {
-		drawRow(f, y, r)
-	}
-	for i, r := range foot {
-		drawRow(f, p.h-len(foot)+i, r)
-	}
-	_ = p.host.Frame(f)
-}
-
-// fit shares h rows among the layout's parts, and returns the rows drawn from the top and those
-// drawn at the foot. Rows go first to the connection and the heading, then to one row of content
-// (the focused field or the chosen connection, when the step has one), one row of the problem, the
-// buttons, the keys and the rule; what is left goes to the status, the rest of the problem, and
-// the rest of the content. A problem or a status with fewer rows than it needs shows its end,
-// marked with a leading ellipsis.
-//
-// The content's view starts at from, moved only as far as keeps the row at keep in it, and fit
-// returns where it started.
-func (l *layout) fit(h int) (top, foot []row, from int) {
-	left := max(h, 0)
-	take := func(n int) int {
-		k := min(max(n, 0), left)
-		left -= k
-		return k
-	}
-	inTop := len(l.top) - l.fixed
-	content := inTop + l.list.n
-	nFixed := take(l.fixed)
-	nContent := take(min(content, 1))
-	nProblem := take(min(len(l.problem), 1))
-	nButtons := take(len(l.buttons))
-	nKeys := take(len(l.keys))
-	nRule := take(1)
-	nStatus := take(len(l.status))
-	nProblem += take(len(l.problem) - nProblem)
-	nContent += take(content - nContent)
-
-	top = append(top, l.top[:nFixed]...)
-	if nContent > 0 {
-		from = min(max(l.from, 0), content-nContent)
-		if keep := l.keep - l.fixed; keep >= 0 {
-			from = min(from, keep)
-			from = max(from, keep-nContent+1)
-		}
-		for i := from; i < from+nContent; i++ {
-			if i < inTop {
-				top = append(top, l.top[l.fixed+i])
-			} else {
-				top = append(top, l.list.row(i-inTop))
-			}
-		}
-	}
-	if nRule > 0 {
-		foot = append(foot, l.rule)
-	}
-	foot = append(foot, l.buttons[:nButtons]...)
-	foot = append(foot, l.keys[:nKeys]...)
-	foot = append(foot, l.tail(l.status, nStatus)...)
-	foot = append(foot, l.tail(l.problem, nProblem)...)
-	return top, foot, from
-}
-
-// tail is the last n of rows; when that is fewer than all, its first row starts with an ellipsis,
-// the row cut at its start to keep within the width.
-func (l *layout) tail(rows []row, n int) []row {
-	if n <= 0 {
-		return nil
-	}
-	if n >= len(rows) {
-		return rows
-	}
-	out := append([]row(nil), rows[len(rows)-n:]...)
-	first := out[0]
-	if len(first) == 0 {
-		return out
-	}
-	r := []rune(elision + strings.TrimLeft(first[0].text, " "))
-	if len(r) > l.width {
-		r = append([]rune(elision), r[len(r)-l.width+1:]...)
-	}
-	out[0] = append(row{{string(r), first[0].st}}, first[1:]...)
-	return out
-}
-
-// drawRow writes r at row y, from the card's one-cell margin.
-func drawRow(f *plugin.Frame, y int, r row) {
-	x := 1
-	for _, s := range r {
-		x = f.Text(x, y, s.text, s.st)
+	switch {
+	case plain && k.Key == "q": // no field has the keys, or the kit would have taken it
+		p.closeCard()
+	case p.step == stepInstall && (k.Key == "i" || k.Key == "Enter"):
+		p.doInstall()
+	case p.step == stepFailed && k.Key == "Enter":
+		p.boot()
 	}
 }
 
-// elide is s cut to width cells, an ellipsis marking the cut.
-func elide(s string, width int) string {
-	if width <= 0 {
-		return ""
+// Pointer selects the connection or tree row under a left press, or presses a button; the wheel
+// moves the selection.
+func (p *Plugin) Pointer(at plugin.Pointer) { p.ui.Pointer(at) }
+
+// closeCard asks AutoDoc to close the card. A passphrase half typed is dropped first: the plugin
+// may run on unseen.
+func (p *Plugin) closeCard() {
+	p.passIn.Clear()
+	p.draw()
+	if p.host != nil {
+		_ = p.host.Close()
 	}
-	r := []rune(s)
-	if len(r) <= width {
-		return s
-	}
-	return string(r[:width-1]) + elision
 }
 
-// wrap breaks text at spaces to width cells (one a character). A word longer than a whole row is
-// the only thing cut: after its last / or - that fits (a path's, a URL's, a file name's), else at
-// the row's end.
-func wrap(text string, width int) []string {
-	if width <= 0 {
-		return nil
-	}
-	var out []string
-	var cur strings.Builder
-	n := 0
-	flush := func() {
-		out = append(out, cur.String())
-		cur.Reset()
-		n = 0
-	}
-	for i, word := range strings.Split(text, " ") {
-		wn := utf8.RuneCountInString(word)
-		if i > 0 {
-			if n > 0 && n+1+wn > width {
-				flush()
-			} else {
-				cur.WriteByte(' ')
-				n++
-			}
-		}
-		for wn > width-n {
-			r := []rune(word)
-			cut := width - n
-			if at := strings.LastIndexAny(string(r[:cut]), "/-"); at > 0 {
-				if k := utf8.RuneCountInString(string(r[:cut])[:at]) + 1; k < cut {
-					cut = k
-				}
-			}
-			cur.WriteString(string(r[:cut]))
-			word = string(r[cut:])
-			wn = utf8.RuneCountInString(word)
-			flush()
-		}
-		cur.WriteString(word)
-		n += wn
-	}
-	flush()
-	return out
-}
+// Hide is the card's panel closed while the plugin runs on: the session, the connection and the
+// table stay, and a passphrase half typed goes.
+func (p *Plugin) Hide() { p.ui.Focus(false); p.passIn.Clear() }
+
+// Show is the panel open again: the card is drawn as it stands.
+func (p *Plugin) Show() { p.draw() }
+
+// Focus switches the card's selection between the active and inactive roles, as the results
+// table's.
+func (p *Plugin) Focus(focused bool) { p.ui.Focus(focused) }
+
+// Theme is the theme AutoDoc's screen switched to: the card is drawn in it.
+func (p *Plugin) Theme(t plugin.Theme) { p.theme = t; p.ui.Theme(t) }
+
+// draw sends the card as it stands, and its title when that has changed.
+func (p *Plugin) draw() { p.ui.Draw() }

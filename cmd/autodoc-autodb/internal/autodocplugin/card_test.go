@@ -45,17 +45,17 @@ func shiftTab(p *Plugin) { p.Key(plugin.Key{Key: "Tab", Shift: true}) }
 
 func TestPointerChoosesAConnectionFromItsVisibleRow(t *testing.T) {
 	p, h := atPick(t, 32, 12)
-	first := rowOf(h.lines(), p.lines(p.w-2).pickStart, has("scratch (postgres)"))
+	first := rowOf(h.lines(), 0, prefixed("scratch (postgres)")) // the list's row, not the "Connection: …" header
 	if first < 0 {
 		t.Fatalf("first connection is not visible: %q", h.lines())
 	}
 	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 2, Y: first, Count: 1})
-	if p.pick != 0 {
-		t.Fatalf("press on the first connection kept selection %d", p.pick)
+	if p.pick() != 0 {
+		t.Fatalf("press on the first connection kept selection %d", p.pick())
 	}
 	p.Pointer(plugin.Pointer{Kind: "wheel", Button: "down", X: 2, Y: first, Count: 1})
-	if p.pick != 1 {
-		t.Fatalf("wheel down kept selection %d", p.pick)
+	if p.pick() != 1 {
+		t.Fatalf("wheel down kept selection %d", p.pick())
 	}
 }
 
@@ -91,12 +91,12 @@ func TestTheNameStartsEmpty(t *testing.T) {
 	t.Setenv("LOGNAME", "someone-else")
 	fresh := New("v0.0.1")
 	t.Cleanup(fresh.Close)
-	if len(fresh.name) != 0 {
-		t.Fatalf("New's name is %q, want empty", string(fresh.name))
+	if len([]rune(fresh.nameIn.Value())) != 0 {
+		t.Fatalf("New's name is %q, want empty", fresh.nameIn.Value())
 	}
 	p, h := atSignIn(t, newFakeDB(t), 48, 20)
-	if len(p.name) != 0 {
-		t.Fatalf("the sign-in opened with the name %q, want empty", string(p.name))
+	if len([]rune(p.nameIn.Value())) != 0 {
+		t.Fatalf("the sign-in opened with the name %q, want empty", p.nameIn.Value())
 	}
 	if card := h.card(); strings.Contains(card, "someone-else") {
 		t.Fatalf("the sign-in shows $USER:\n%s", card)
@@ -179,11 +179,11 @@ func TestTabCyclesTheSignIn(t *testing.T) {
 	var got []int
 	for range 4 {
 		tab(p)
-		got = append(got, p.field)
+		got = append(got, p.field())
 	}
 	for range 4 {
 		shiftTab(p)
-		got = append(got, p.field)
+		got = append(got, p.field())
 	}
 	want := []int{focusPass, focusSignIn, focusCancel, focusName, focusCancel, focusSignIn, focusPass, focusName}
 	if !slices.Equal(got, want) {
@@ -194,8 +194,8 @@ func TestTabCyclesTheSignIn(t *testing.T) {
 	tab(p)
 	typeText(p, "right")
 	tab(p)
-	if p.field != focusSignIn {
-		t.Fatalf("Tab from the passphrase focused %d, want Sign in", p.field)
+	if p.field() != focusSignIn {
+		t.Fatalf("Tab from the passphrase focused %d, want Sign in", p.field())
 	}
 	p.Key(plugin.Key{Key: "Enter"})
 	if p.step != stepPick || p.token == "" {
@@ -213,14 +213,14 @@ func TestTabCyclesTheSignIn(t *testing.T) {
 	typeText(p2, "abc")
 	tab(p2)
 	tab(p2)
-	if p2.field != focusCancel {
-		t.Fatalf("Tab ×3 focused %d, want Cancel", p2.field)
+	if p2.field() != focusCancel {
+		t.Fatalf("Tab ×3 focused %d, want Cancel", p2.field())
 	}
 	p2.Key(plugin.Key{Key: "Enter"})
 	if h2.closed() != 1 {
 		t.Fatalf("Enter on Cancel sent host.close %d times, want once", h2.closed())
 	}
-	if len(p2.pass) != 0 {
+	if len(p2.passIn.Runes()) != 0 {
 		t.Fatal("Cancel left the passphrase typed held")
 	}
 	if len(db.took("auth.login")) != 1 {
@@ -235,8 +235,8 @@ func TestQInAFieldIsALetter(t *testing.T) {
 	typeText(p, "q")
 	tab(p)
 	typeText(p, "q")
-	if string(p.name) != "q" || string(p.pass) != "q" {
-		t.Fatalf("q in the fields made the name %q and the passphrase %q, want q each", string(p.name), string(p.pass))
+	if p.nameIn.Value() != "q" || string(p.passIn.Runes()) != "q" {
+		t.Fatalf("q in the fields made the name %q and the passphrase %q, want q each", p.nameIn.Value(), string(p.passIn.Runes()))
 	}
 	if h.closed() != 0 {
 		t.Fatalf("q in a field sent host.close %d times", h.closed())
@@ -249,7 +249,7 @@ func TestQInAFieldIsALetter(t *testing.T) {
 	if h.closed() != 1 {
 		t.Fatalf("q on Sign in sent host.close %d times, want once", h.closed())
 	}
-	if len(p.pass) != 0 {
+	if len(p.passIn.Runes()) != 0 {
 		t.Fatal("closing left the passphrase typed held")
 	}
 }
@@ -319,7 +319,7 @@ func TestHideKeepsTheCardAndShowRedrawsIt(t *testing.T) {
 	tab(p)
 	typeText(p, "half")
 	p.Hide()
-	if len(p.pass) != 0 {
+	if len(p.passIn.Runes()) != 0 {
 		t.Fatal("a hidden card holds the passphrase half typed")
 	}
 	before := h.frames
@@ -358,20 +358,8 @@ func TestTheCardFitsItsSize(t *testing.T) {
 		}
 	}
 
-	path := "into /home/me/.local/share/autodoc/plugins/autodb/bin/autodb."
-	rows := wrap(path, 22)
-	if strings.Join(rows, "") != strings.Replace(path, " ", "", 1) {
-		t.Fatalf("wrapping %q lost text: %q", path, rows)
-	}
-	for _, r := range rows[1 : len(rows)-1] {
-		if !strings.HasSuffix(r, "/") {
-			t.Fatalf("a path too long for a row is cut inside a name, not after a /: %q", rows)
-		}
-	}
-
-	if got := wrap("autodb-v0.4.2-linux-amd64.tar.gz", 30); len(got) != 2 || got[0] != "autodb-v0.4.2-linux-" {
-		t.Fatalf("a file name too long for a row is cut at %q, want after its last - that fits", got)
-	}
+	// a path or file name too long for a row is cut after its last / or - that fits: the card's kit
+	// wraps so (plugin/card TestWrapAndElideMeasureWidths)
 
 	short, sh := atSignIn(t, newFakeDB(t), 48, 9)
 	short.noUsers = true

@@ -42,17 +42,25 @@ func press(p *Plugin, keys ...string) {
 	}
 }
 
-// chosenRow is the text of the tree's selected row, the "> " row in the selection's style, its
-// spaces run together; "" when none is.
+// chosenRow is the text of the selected row, the "> " row the card's kit draws in the selection's
+// style, its spaces run together; "" when none is.
 func chosenRow(h *fakeHost, p *Plugin) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, row := range h.frame.Rows() {
 		for _, r := range row {
-			if r.Style == p.chosenStyle() && strings.HasPrefix(r.Text, "> ") {
+			if strings.HasPrefix(r.Text, "> ") {
 				return strings.Join(strings.Fields(r.Text), " ")
 			}
 		}
+	}
+	return ""
+}
+
+// selectedName is the tree's selected node's text, "" on an Empty row.
+func selectedName(p *Plugin) string {
+	if n := p.selected(); n != nil {
+		return n.Text
 	}
 	return ""
 }
@@ -67,42 +75,41 @@ func TestPointerSelectsAndScrollsTheReadyCard(t *testing.T) {
 		t.Fatalf("audit is not visible: %q", h.lines())
 	}
 	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: audit, Count: 1})
-	if p.tree.sel != 1 || !strings.Contains(chosenRow(h, p), "audit") {
-		t.Fatalf("press on the second schema selected %d: %q", p.tree.sel, chosenRow(h, p))
+	if selectedName(p) != "audit" || !strings.Contains(chosenRow(h, p), "audit") {
+		t.Fatalf("press on the second schema selected %q: %q", selectedName(p), chosenRow(h, p))
 	}
 	p.Pointer(plugin.Pointer{Kind: "wheel", Button: "up", X: 4, Y: 4, Count: 1})
-	if p.tree.sel != 0 || !strings.Contains(chosenRow(h, p), "public") {
-		t.Fatalf("wheel up selected %d: %q", p.tree.sel, chosenRow(h, p))
+	if selectedName(p) != "public" || !strings.Contains(chosenRow(h, p), "public") {
+		t.Fatalf("wheel up selected %q: %q", selectedName(p), chosenRow(h, p))
 	}
 	press(p, "Enter") // expand public, creating enough rows to scroll the short card
 	p.Resize(48, 10)
 	p.Pointer(plugin.Pointer{Kind: "wheel", Button: "down", X: 4, Y: 4, Count: 2})
-	last := len(p.tree.items()) - 1
-	if p.tree.sel != last || p.scroll == 0 || chosenRow(h, p) == "" {
-		t.Fatalf("wheel did not reveal the selected row: selected %d, scroll %d, row %q", p.tree.sel, p.scroll, chosenRow(h, p))
+	if selectedName(p) != "audit" || !strings.Contains(chosenRow(h, p), "audit") {
+		t.Fatalf("the wheel did not reveal the last row, audit: selected %q, row %q\n%s", selectedName(p), chosenRow(h, p), strings.Join(h.lines(), "\n"))
 	}
-	// Select another visible item after the viewport moved: the frame y is not the item index.
+	// Select another visible row after the viewport moved: the frame y is not the row's index.
 	p.Resize(48, 12)
-	l := p.lines(p.w - 2)
-	top, _, from := l.fit(p.h)
+	lines := h.lines()
 	selected := false
-	for y := l.fixed; y < len(top); y++ {
-		index := from + y - len(l.top)
-		if index >= 0 && index < len(p.tree.items()) && index != last {
-			p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: y, Count: 1})
-			if p.tree.sel != index {
-				t.Fatalf("scrolled row y=%d selected %d, wanted %d", y, p.tree.sel, index)
-			}
-			selected = true
-			break
+	for _, name := range []string{"users (table)", "Order Lines (view)", "legacy (table)", "public"} {
+		y := rowOf(lines, 0, has(name))
+		if y < 0 || strings.HasPrefix(lines[y], "> ") {
+			continue // not in view, or the row already selected
 		}
+		p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: y, Count: 1})
+		if got := selectedName(p); got != name {
+			t.Fatalf("a press on row y=%d (%q) selected %q:\n%s", y, name, got, strings.Join(lines, "\n"))
+		}
+		selected = true
+		break
 	}
 	if !selected {
-		t.Fatalf("no other tree row visible after scroll: from=%d, top=%d", from, len(top))
+		t.Fatalf("no other tree row visible after the scroll:\n%s", strings.Join(lines, "\n"))
 	}
-	beforeFooter := p.tree.sel
-	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: p.h - 1, Count: 1})
-	if p.tree.sel != beforeFooter {
+	before := p.selected()
+	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: 11, Count: 1})
+	if p.selected() != before {
 		t.Fatal("press on the footer moved the tree selection")
 	}
 }
@@ -328,15 +335,6 @@ func TestTheTreeScrollsWithTheSelection(t *testing.T) {
 		t.Fatalf("PageUp moved the bar to %q", got)
 	}
 
-	made := 0
-	l := p.lines(30)
-	inner := l.list.row
-	l.list.row = func(i int) row { made++; return inner(i) }
-	l.from = p.scroll
-	l.fit(12)
-	if l.list.n < 5000 || made > 12 {
-		t.Fatalf("a tree of %d rows made %d of them for a card 12 high", l.list.n, made)
-	}
 }
 
 func autodbTable(schema, name string) autodb.Table { return autodb.Table{Schema: schema, Name: name} }
