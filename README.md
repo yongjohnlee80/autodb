@@ -56,6 +56,14 @@ name on it.
 
 ![autodb themes](docs/media/autodb-themes.png)
 
+### AutoDoc plugin
+
+The AutoDB card in AutoDoc requires **AutoDoc v0.1.54 or newer**. Its manifest uses
+plugin protocol 6 so a click selects a connection or tree row and the wheel moves
+through the list. Older AutoDoc versions refuse the manifest; update AutoDoc
+before updating this plugin. When the card is hidden, open **SPC p**, choose
+**AutoDB**, then press **o**, or use **Plugins › AutoDB › Reopen card**.
+
 ## Motivation
 
 I live in Neovim and in terminal apps for my dev work, and I could never find a
