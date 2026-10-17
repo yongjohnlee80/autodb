@@ -43,6 +43,22 @@ func typeText(p *Plugin, s string) {
 func tab(p *Plugin)      { p.Key(plugin.Key{Key: "Tab"}) }
 func shiftTab(p *Plugin) { p.Key(plugin.Key{Key: "Tab", Shift: true}) }
 
+func TestPointerChoosesAConnectionFromItsVisibleRow(t *testing.T) {
+	p, h := atPick(t, 32, 12)
+	first := rowOf(h.lines(), p.lines(p.w-2).pickStart, has("scratch (postgres)"))
+	if first < 0 {
+		t.Fatalf("first connection is not visible: %q", h.lines())
+	}
+	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 2, Y: first, Count: 1})
+	if p.pick != 0 {
+		t.Fatalf("press on the first connection kept selection %d", p.pick)
+	}
+	p.Pointer(plugin.Pointer{Kind: "wheel", Button: "down", X: 2, Y: first, Count: 1})
+	if p.pick != 1 {
+		t.Fatalf("wheel down kept selection %d", p.pick)
+	}
+}
+
 // a passphrase made for the run, never written down
 func freshPass(t *testing.T) string {
 	t.Helper()

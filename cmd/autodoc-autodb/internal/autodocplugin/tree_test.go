@@ -57,6 +57,36 @@ func chosenRow(h *fakeHost, p *Plugin) string {
 	return ""
 }
 
+// A press chooses the row actually painted at that y, and a wheel advances the tree selection.
+// This exercises the card's scroll mapping, including a fixed heading above the moving rows.
+func TestPointerSelectsAndScrollsTheReadyCard(t *testing.T) {
+	p, h := connected(t, treeDB(t))
+	p.Resize(48, 14)
+	audit := rowOf(h.lines(), 0, has("audit"))
+	if audit < 0 {
+		t.Fatalf("audit is not visible: %q", h.lines())
+	}
+	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: audit, Count: 1})
+	if p.tree.sel != 1 || !strings.Contains(chosenRow(h, p), "audit") {
+		t.Fatalf("press on the second schema selected %d: %q", p.tree.sel, chosenRow(h, p))
+	}
+	p.Pointer(plugin.Pointer{Kind: "wheel", Button: "up", X: 4, Y: 4, Count: 1})
+	if p.tree.sel != 0 || !strings.Contains(chosenRow(h, p), "public") {
+		t.Fatalf("wheel up selected %d: %q", p.tree.sel, chosenRow(h, p))
+	}
+	press(p, "Enter") // expand public, creating enough rows to scroll the short card
+	p.Resize(48, 10)
+	p.Pointer(plugin.Pointer{Kind: "wheel", Button: "down", X: 4, Y: 4, Count: 2})
+	last := len(p.tree.items()) - 1
+	if p.tree.sel != last || p.scroll == 0 || chosenRow(h, p) == "" {
+		t.Fatalf("wheel did not reveal the selected row: selected %d, scroll %d, row %q", p.tree.sel, p.scroll, chosenRow(h, p))
+	}
+	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: p.h - 1, Count: 1})
+	if p.tree.sel != last {
+		t.Fatal("press on the footer moved the tree selection")
+	}
+}
+
 // The ready card lists no help rows: SPC p shows the commands itself. Its keys row names the
 // tree's keys, another connection and close.
 func TestTheReadyCardHasNoHelpRows(t *testing.T) {
