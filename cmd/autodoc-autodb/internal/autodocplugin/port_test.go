@@ -5,8 +5,8 @@ import (
 	"github.com/yongjohnlee80/autodoc/plugin/card"
 )
 
-// THE CARD'S STATE, as the cells read it: the card is drawn by plugin/card (ADR 1792254331), and
-// these name its controls and styles the way the cells did when the card drew itself.
+// THE CARD'S STATE, as the cells read it: AutoDoc's plugin/card kit draws the card, and these name
+// its controls and styles the way the cells did when the card drew itself.
 
 // The sign-in's controls, in Tab order.
 const (

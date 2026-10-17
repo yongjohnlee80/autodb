@@ -9,9 +9,10 @@ import (
 )
 
 // THE CARD — what each step shows and the keys it takes, drawn by AutoDoc's plugin/card kit
-// (ADR 1792254331): a heading, the content, then at the foot a rule, the buttons (the sign-in's),
-// the keys, what was done last and what went wrong. Once a connection is picked, every step's first
-// line names it, and so do the card's title and the results' title.
+// (github.com/yongjohnlee80/autodoc, docs/plugins.md, "Drawing a card"): a heading, the content,
+// then at the foot a rule, the buttons (the sign-in's), the keys, what was done last and what went
+// wrong. Once a connection is picked, every step's first line names it, and so do the card's title
+// and the results' title.
 //
 //	finding    "Looking for AutoDB…"
 //	install    where it looked; i downloads the release matching this plugin, checked by its .sha256
