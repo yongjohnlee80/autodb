@@ -43,7 +43,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.x"
+          go-version: "1.26.9"
       - name: the window system's libraries (Linux GUI build)
         if: matrix.goos == 'linux' && matrix.tags == 'gui'
         # golib/gui's window libraries (Wayland/X11/Vulkan), per
