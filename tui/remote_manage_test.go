@@ -380,10 +380,18 @@ func TestALostRemoteSignInAsksOnAFreshConnection(t *testing.T) {
 		Set(meta.SessRevoked, int64(1)).Update(); err != nil {
 		t.Fatal(err)
 	}
-	// Any authenticated call notices; My devices' listing is one.
+	// Any authenticated call notices. My devices' listing is one; but a call already on its way
+	// when the session was revoked can notice first, and then the sign-in is up before the menu
+	// (1 run in 100 on main, 2026-10-18). Either way the card must ask for a sign-in.
 	r.s.Keys(t, decltest.Alt('h'))
-	r.s.WaitForText(t, "My SSH keys…")
-	r.s.Keys(t, key('s'))
+	menu := false
+	r.s.WaitFor(t, "the My devices menu, or the sign-in", func(sc string) bool {
+		menu = strings.Contains(sc, "My SSH keys…")
+		return menu || strings.Contains(sc, "┌ sign in ")
+	})
+	if menu {
+		r.s.Keys(t, key('s'))
+	}
 	loginAs(t, r.s, "alice", remotetest.AlicePass)
 	r.s.WaitFor(t, "signed in on the server again", func(string) bool {
 		return r.h.Auth() == "signed-in" && strings.Contains(r.h.SourceText("App.status"), "as alice")
