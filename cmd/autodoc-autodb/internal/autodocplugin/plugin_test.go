@@ -1,7 +1,6 @@
 package autodocplugin
 
 import (
-	"context"
 	"slices"
 	"strconv"
 	"strings"
@@ -64,7 +63,7 @@ func TestACursorInACommentNeverSendsTheCommentedText(t *testing.T) {
 	db := newFakeDB(t)
 	db.engine = "mysql"
 	db.query = whole
-	p, h := connected(t, db)
+	p, _ := connected(t, db)
 
 	for _, c := range []struct{ doc, want string }{
 		{"SELECT 1 # ; |DROP TABLE t;\n", "SELECT 1 # ; DROP TABLE t;"},
@@ -84,7 +83,7 @@ func TestACursorInACommentNeverSendsTheCommentedText(t *testing.T) {
 		if got := db.queries()[before:]; len(got) != 0 {
 			t.Errorf("a note of only %q sent %q", doc, got)
 		}
-		if card := h.card(); !strings.Contains(card, "no statement here") {
+		if card := said(p); !strings.Contains(card, "no statement here") {
 			t.Errorf("a note of only %q: the card does not say there is nothing to run:\n%s", doc, card)
 		}
 	}
@@ -280,39 +279,29 @@ func TestALockedTokenGoesBackToTheSignIn(t *testing.T) {
 	if p.step != stepLogin || p.token != "" {
 		t.Fatalf("after a locked store the card is at step %d with a token %t, want the sign-in and none", p.step, p.token != "")
 	}
-	if card := h.card(); !strings.Contains(card, "Sign in") || !strings.Contains(card, "locked") {
+	if card := said(p); !strings.Contains(card, "Sign in") || !strings.Contains(card, "locked") {
 		t.Fatalf("the card does not ask for a sign-in, saying why:\n%s", card)
 	}
 	locked = false
 	signIn(p, "right")
-	p.Key(plugin.Key{Key: "Enter"})
+	p.useNode([]string{"w1", "c7"}) // the connection chosen again in the tree
 	run(p, docAt("SELECT 1|"))
 	if len(h.tables) != 1 {
 		t.Fatalf("after signing in again the run opened %d tables", len(h.tables))
 	}
 }
 
-// A sign-in AutoDB refuses stays on the sign-in, saying so; the passphrase typed is not kept.
+// A sign-in AutoDB refuses stays on the sign-in, saying so, and opens the dialog again. (The
+// passphrase is never held: login takes it, and the panel clears its field as it sends it.)
 func TestARefusedSignInStays(t *testing.T) {
 	db := newFakeDB(t)
-	p := newPlugin("v0.0.1", t.TempDir())
-	t.Cleanup(p.Close)
-	p.find = func(context.Context) (autodb.Binary, []autodb.Tried, error) {
-		return autodb.Binary{Path: "autodb"}, nil, nil
-	}
-	p.start = func(ctx context.Context, _ autodb.Binary) (*autodb.Client, error) {
-		return autodb.Dial(ctx, "tcp", db.addr, "test")
-	}
-	h := &fakeHost{}
-	p.attach(h, 60, 24)
+	p, h := testPlugin(t, db)
+	p.attach(h)
 	signIn(p, "wrong")
-	if p.step != stepLogin || p.token != "" {
-		t.Fatalf("a refused sign-in left the card at step %d", p.step)
+	if p.step != stepLogin || p.token != "" || p.shown != stepLogin {
+		t.Fatalf("a refused sign-in left the plugin at step %d (shown %d)", p.step, p.shown)
 	}
-	if len(p.passIn.Runes()) != 0 {
-		t.Fatal("the refused passphrase is still held")
-	}
-	if card := h.card(); !strings.Contains(card, "bad credentials") {
+	if card := said(p); !strings.Contains(card, "bad credentials") {
 		t.Fatalf("the card does not say the sign-in was refused:\n%s", card)
 	}
 }
@@ -333,7 +322,7 @@ func TestAFailedFetchEndsTheTableSayingWhy(t *testing.T) {
 	if len(h.ends) != 1 || h.ends[0].id != "cur-f" || !strings.Contains(h.ends[0].why, "statement timeout") {
 		t.Fatalf("a failed fetch ended the table as %+v, want cur-f with AutoDB's reason", h.ends)
 	}
-	if card := h.card(); !strings.Contains(card, "statement timeout") {
+	if card := said(p); !strings.Contains(card, "statement timeout") {
 		t.Fatalf("the card does not say why the rows ended:\n%s", card)
 	}
 }
@@ -342,14 +331,14 @@ func TestAFailedFetchEndsTheTableSayingWhy(t *testing.T) {
 func TestANoteTooLargeRunsNothing(t *testing.T) {
 	db := newFakeDB(t)
 	db.query = whole
-	p, h := connected(t, db)
+	p, _ := connected(t, db)
 	p.Document(plugin.Document{Path: "big.sql", Version: 3, TooLarge: true})
 	p.Command("run")
 	p.Command("script")
 	if q := db.queries(); len(q) != 0 || len(db.took("exec.run_script")) != 0 {
 		t.Fatalf("a note too large to send ran %q", q)
 	}
-	if card := h.card(); !strings.Contains(card, "too large") {
+	if card := said(p); !strings.Contains(card, "too large") {
 		t.Fatalf("the card does not say the note is too large:\n%s", card)
 	}
 }
@@ -391,7 +380,7 @@ func TestACommandStopsWhenEndingTheLastTableLosesTheConnection(t *testing.T) {
 			if p.step != stepFailed || p.cli != nil {
 				t.Fatalf("after the lost connection: step %d, client kept %t; want the reconnect state", p.step, p.cli != nil)
 			}
-			if card := h.card(); !strings.Contains(card, "connection to AutoDB ended") {
+			if card := said(p); !strings.Contains(card, "connection to AutoDB ended") {
 				t.Fatalf("the card does not say the connection ended:\n%s", card)
 			}
 			if q := db.queries(); len(q) != 1 || len(db.took("exec.run_script")) != 0 {

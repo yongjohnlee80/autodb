@@ -1,11 +1,13 @@
-// Package autodocplugin is AutoDB as an AutoDoc plugin: a card beside the page that finds (or
-// installs) AutoDB, starts its server, signs in and picks a connection, and runs the statement
-// under the cursor, the selection or the whole note, sending the rows to AutoDoc's results table
-// a page at a time.
+// Package autodocplugin is AutoDB as an AutoDoc plugin: a panel beside the page that finds (or
+// installs) AutoDB, starts its server, signs in, shows the workspaces' connections as a tree, and
+// runs the statement under the cursor, the selection or the whole note, sending the rows to
+// AutoDoc's results table a page at a time.
 //
-// It is an AutoDoc plugin.Handler. Serve calls its methods one at a time on one goroutine, so its
-// state needs no lock: every AutoDB call runs on that goroutine too, and the card is drawn after
-// each step.
+// It is an AutoDoc plugin.Handler. Its state has one owner: the plugin's own goroutine (loop).
+// Serve's calls that touch it (Document, Command, FetchRows, TableClosed, Close) and the panel's
+// events post a step there and return; every AutoDB call runs there, under its deadline, and the
+// panel is updated from there (draw). The panel's own methods (keys, size, pointer, focus, theme)
+// go straight to its card, which runs its program on a loop of its own.
 package autodocplugin
 
 import (
@@ -21,14 +23,14 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
+	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/panel"
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodoc/plugin"
-	"github.com/yongjohnlee80/autodoc/plugin/card"
 )
 
-// host is what the plugin sends to AutoDoc: *plugin.Peer, or a test's recorder.
+// host is what the plugin sends to AutoDoc besides the panel's frames: *plugin.Peer, or a test's
+// recorder.
 type host interface {
-	Frame(f *plugin.Frame) error
 	Table(t plugin.TableOpen) error
 	Rows(id string, rows [][]string, more bool) error
 	TableEnd(id string, err error) error
@@ -41,7 +43,7 @@ type host interface {
 	Call(id string, args ...string) (bool, error)
 }
 
-// step is what the card is doing.
+// step is what the panel is doing.
 type step int
 
 const (
@@ -49,14 +51,14 @@ const (
 	stepInstall              // none found: an install is offered
 	stepStarting             // reaching its server, starting it if need be
 	stepLogin                // signing in
-	stepPick                 // choosing a connection
+	stepPick                 // signed in: a connection is chosen in the tree
 	stepReady                // connected: the commands run
-	stepFailed               // the server could not be reached; Enter tries again
+	stepFailed               // the server could not be reached; Retry tries again
 )
 
 // The deadlines of AutoDB calls that are not statements.
 //
-// NOTE: deadlines: a server that stops answering must not hold the card forever, and a reply
+// NOTE: deadlines: a server that stops answering must not hold the panel forever, and a reply
 // that never comes announces nothing to wait on. A statement (run, script, fetch) has none: it
 // runs as long as the database takes, under the server's own limits.
 const (
@@ -67,7 +69,7 @@ const (
 	closeBudget = 1500 * time.Millisecond
 )
 
-// Plugin is the handler.
+// Plugin is the handler. Every field below the panel is its goroutine's (loop).
 type Plugin struct {
 	plugin.Base
 
@@ -81,35 +83,41 @@ type Plugin struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	host   host
-	theme  plugin.Theme // the screen's, as plugin.open and plugin.theme send it
-	doc    plugin.Document
+	work   chan func() // the steps the plugin's goroutine runs, in order
+	done   chan struct{}
+	// inline runs each step at once, on the caller's goroutine: a test driving the plugin one call
+	// at a time, never concurrently. The real link never sets it.
+	inline bool
 
-	// the card, drawn by AutoDoc's plugin/card kit, and its controls (card.go)
-	ui       *card.Card
-	nameIn   card.Input   // the sign-in's name: the one this server was last signed in to with, or empty
-	passIn   card.Input   // the passphrase, masked, kept only until it is sent, or the card closes or hides
-	signIn   card.Buttons // Sign in, Cancel
-	connList card.List    // the connections to pick from
+	// ui is the panel, drawn by AutoDoc's plugin/decl (internal/panel)
+	ui *panel.Panel
+
+	host  host
+	doc   plugin.Document
+	title string // the card's title, as last sent
 
 	step  step
+	shown step // the step the panel was last drawn at: a dialog opens as its step is reached
 	tried []autodb.Tried
 	bin   autodb.Binary
 	cli   *autodb.Client
 	// noUsers is a store with no user yet: nobody can sign in until one is made.
 	noUsers bool
+	tab     int // the panel's tab
 
+	prefill string // the name the Sign in dialog last opened with
 	// logins is the file of the names last signed in with, a server's each ("" keeps none), and
-	// loginsTold that one which could not be read has been said so on the card
+	// loginsTold that one which could not be read has been said so on the panel
 	logins     string
 	loginsTold bool
 
 	token string // auth.login's, in memory only
-	conns []autodb.Connection
 	conn  *autodb.Connection
 	eng   engine.Name
 	sid   string // the session, opened once on the chosen connection
-	tree  *tree  // the connection's schemas, read on connect; nil when they could not be
+	tree  *tree  // the connections' tree (tree.go)
+	// treeSent is told each part of the tree sent to the panel: a test's recorder
+	treeSent func(parent []string, nodes []panel.Node)
 
 	table    *results // the table shown, nil when none of ours is
 	idPrefix string
@@ -155,32 +163,106 @@ func newPlugin(version, dir string) *Plugin {
 	_, _ = rand.Read(b[:])
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Plugin{version: version, pluginDir: dir, ctx: ctx, cancel: cancel,
-		idPrefix: "res-" + hex.EncodeToString(b[:])}
-	p.newCard()
+		work: make(chan func(), 64), done: make(chan struct{}), idPrefix: "res-" + hex.EncodeToString(b[:])}
+	p.ui = panel.New(p.events())
+	go p.loop()
 	return p
 }
 
-// Open is the card opened: it looks for AutoDB at once.
+// loop is the plugin's goroutine: it runs each step posted, in order, until the plugin closes.
+func (p *Plugin) loop() {
+	defer close(p.done)
+	for {
+		select {
+		case fn := <-p.work:
+			fn()
+		case <-p.ctx.Done():
+			return
+		}
+	}
+}
+
+// post hands fn to the plugin's goroutine; dropped once the plugin has closed.
+func (p *Plugin) post(fn func()) {
+	if p.inline {
+		fn()
+		return
+	}
+	select {
+	case p.work <- fn:
+	case <-p.ctx.Done():
+	}
+}
+
+// settle waits until every step posted before it has run: for a caller that must read the state
+// those steps leave (a test, Close).
+func (p *Plugin) settle() {
+	ran := make(chan struct{})
+	p.post(func() { close(ran) })
+	select {
+	case <-ran:
+	case <-p.ctx.Done():
+	}
+}
+
+// events are the panel's: each posts its step to the plugin's goroutine.
+func (p *Plugin) events() panel.Events {
+	return panel.Events{
+		SignIn:          func(name, pass string) { p.post(func() { p.login(name, pass) }) },
+		SignInCancelled: func() { p.post(func() { p.problem = "not signed in: Menu › Sign in"; p.draw() }) },
+		Install:         func() { p.post(p.doInstall) },
+		Tab:             func(i int) { p.post(func() { p.tab = i; p.draw() }) },
+		Menu:            func(id string) { p.post(func() { p.menuRow(id) }) },
+		Opened:          func(keys []string) { p.post(func() { p.opened(keys) }) },
+		Use:             func(keys []string) { p.post(func() { p.useNode(keys) }) },
+	}
+}
+
+// Open opens the panel, then looks for AutoDB.
 func (p *Plugin) Open(peer *plugin.Peer, o plugin.Open) {
-	p.theme = o.Theme
-	p.attach(peer, o.Width, o.Height)
+	p.ui.Card().Open(peer, o)
+	p.attach(peer)
 }
 
-func (p *Plugin) attach(h host, w, hh int) {
-	p.host = h
-	p.ui.Attach(h, w, hh, p.theme)
-	p.boot()
+// attach is the plugin given its host: AutoDB is looked for at once.
+func (p *Plugin) attach(h host) {
+	p.post(func() {
+		p.host = h
+		p.boot()
+	})
 }
 
-// Resize redraws the card at its new size.
-func (p *Plugin) Resize(w, h int) { p.ui.Resize(w, h) }
+// The panel's own: its card takes them.
+func (p *Plugin) Key(k plugin.Key)          { p.ui.Card().Key(k) }
+func (p *Plugin) Resize(w, h int)           { p.ui.Card().Resize(w, h) }
+func (p *Plugin) Pointer(at plugin.Pointer) { p.ui.Card().Pointer(at) }
+func (p *Plugin) Focus(focused bool)        { p.ui.Card().Focus(focused) }
+func (p *Plugin) Theme(t plugin.Theme)      { p.ui.Card().Theme(t) }
+func (p *Plugin) Hide()                     { p.ui.Card().Hide() }
+func (p *Plugin) Show()                     { p.ui.Card().Show() }
 
 // Document keeps the latest note: the feed's, or the one a command carries.
-func (p *Plugin) Document(d plugin.Document) { p.doc = d }
+func (p *Plugin) Document(d plugin.Document) { p.post(func() { p.doc = d }) }
 
-// Close lets go of what the plugin holds on the server: the cursor, the session and the token.
+// Close lets go of what the plugin holds on the server (the cursor, the session and the token)
+// within its budget, then closes the panel and stops the plugin's goroutine.
 func (p *Plugin) Close() {
-	defer p.cancel()
+	ended := make(chan struct{})
+	p.post(func() {
+		defer close(ended)
+		p.letGo()
+	})
+	select {
+	case <-ended:
+	case <-time.After(closeBudget):
+	}
+	p.ui.Card().Close()
+	p.cancel()
+	<-p.done
+}
+
+// letGo closes the cursor, the session and the token on the server.
+func (p *Plugin) letGo() {
 	if p.cli == nil {
 		return
 	}
@@ -234,24 +316,18 @@ func (p *Plugin) connect() {
 	defer cancel()
 	p.noUsers, _ = cli.NeedsBootstrap(ctx)
 	p.step, p.problem = stepLogin, ""
-	p.prefill()
 	p.draw()
 }
 
-// prefill starts the sign-in with the name this server was last signed in to with, the focus on
-// the passphrase; with none recorded the name is empty and has the focus. A record that cannot be
-// read counts as none, said once on the card.
-func (p *Plugin) prefill() {
+// lastName is the name this server was last signed in to with, "" for none. A record that cannot
+// be read counts as none, said once on the panel.
+func (p *Plugin) lastName() string {
 	m, err := readLogins(p.logins)
 	if err != nil && !p.loginsTold {
 		p.loginsTold = true
 		p.problem = "the names last signed in with could not be read (" + err.Error() + "): type yours"
 	}
-	p.nameIn.Set(m[serverKey(p.cli)])
-	p.ui.FocusOn(&p.nameIn)
-	if p.nameIn.Value() != "" {
-		p.ui.FocusOn(&p.passIn)
-	}
+	return m[serverKey(p.cli)]
 }
 
 // doInstall installs the release matching this plugin, then looks again.
@@ -271,13 +347,16 @@ func (p *Plugin) doInstall() {
 	p.boot()
 }
 
-// login signs in with the form's name and passphrase; the passphrase is dropped either way.
-func (p *Plugin) login() {
-	name, pass := strings.TrimSpace(p.nameIn.Value()), string(p.passIn.Runes())
-	p.passIn.Clear()
+// login signs in with the sign-in's name and passphrase; the passphrase is not kept.
+func (p *Plugin) login(name, pass string) {
+	name = strings.TrimSpace(name)
+	if p.cli == nil {
+		return
+	}
 	if name == "" {
 		p.problem = "type your AutoDB user name"
-		p.ui.FocusOn(&p.nameIn)
+		p.shown = -1 // the sign-in opens again
+		p.draw()
 		return
 	}
 	p.status, p.problem = "signing in…", ""
@@ -292,7 +371,8 @@ func (p *Plugin) login() {
 			return
 		}
 		p.problem = "sign-in refused: " + autodb.Message(err)
-		p.ui.FocusOn(&p.passIn)
+		p.shown = -1
+		p.draw()
 		return
 	}
 	p.token = token
@@ -304,33 +384,21 @@ func (p *Plugin) login() {
 	}
 }
 
-// choose lists the connections for the card to pick from.
+// choose shows the workspaces and their connections as the tree, a connection to choose.
 func (p *Plugin) choose() {
 	if p.cli == nil || p.token == "" {
 		p.draw()
 		return
 	}
-	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
-	defer cancel()
-	conns, err := p.cli.Connections(ctx, p.token)
-	if err != nil {
-		p.failed("listing the connections", err)
-		p.draw()
-		return
+	if p.step != stepReady {
+		p.step = stepPick
 	}
-	p.conns, p.connList.Sel, p.step, p.problem = conns, 0, stepPick, ""
-	for i, c := range conns {
-		if p.conn != nil && c.ID == p.conn.ID {
-			p.connList.Sel = i
-		}
-	}
-	if len(conns) == 0 {
-		p.problem = "AutoDB has no connection you may use: add one in `autodb --ui`, then press c"
-	}
+	p.problem = ""
+	p.loadTree()
 	p.draw()
 }
 
-// use opens a session on the connection picked; the session on the last one, if another, closes.
+// use opens a session on the connection chosen; the session on the last one, if another, closes.
 func (p *Plugin) use(c autodb.Connection) {
 	eng, err := engine.Parse(c.Engine)
 	if err != nil {
@@ -358,7 +426,6 @@ func (p *Plugin) use(c autodb.Connection) {
 	}
 	p.conn, p.eng, p.sid = &c, eng, sid
 	p.step, p.problem, p.status = stepReady, "", "connected to "+c.Name+" ("+c.Engine+")"
-	p.loadSchemas()
 	p.draw()
 }
 
@@ -401,7 +468,6 @@ func (p *Plugin) signedOut(why string) {
 	p.forgetTable(errors.New("signed out of AutoDB"))
 	p.token, p.sid = "", ""
 	p.step = stepLogin
-	p.ui.FocusOn(&p.passIn)
 	p.problem = "signed out (" + why + "): sign in again"
 }
 
@@ -446,8 +512,10 @@ func (p *Plugin) ready() bool {
 
 // ---------------------------------------------------------------- the commands
 
-// Command runs one of the manifest's commands.
-func (p *Plugin) Command(id string) {
+// Command runs one of the manifest's commands, on the plugin's goroutine.
+func (p *Plugin) Command(id string) { p.post(func() { p.command(id) }) }
+
+func (p *Plugin) command(id string) {
 	switch id {
 	case "run":
 		p.run()
@@ -606,9 +674,12 @@ func (p *Plugin) freshID() string {
 	return fmt.Sprintf("%s-%d", p.idPrefix, p.seq)
 }
 
-// FetchRows answers AutoDoc asking for more of the table: rows read and not yet sent first, then
-// the cursor's next page. An ended cursor or a failed fetch ends the table, saying why.
-func (p *Plugin) FetchRows(f plugin.TableFetch) {
+// FetchRows answers AutoDoc asking for more of the table, on the plugin's goroutine.
+func (p *Plugin) FetchRows(f plugin.TableFetch) { p.post(func() { p.fetchRows(f) }) }
+
+// fetchRows sends rows read and not yet sent first, then the cursor's next page. An ended cursor
+// or a failed fetch ends the table, saying why.
+func (p *Plugin) fetchRows(f plugin.TableFetch) {
 	t := p.table
 	if t == nil || t.id != f.ID {
 		_ = p.host.TableEnd(f.ID, errors.New("this table's query has been closed"))
@@ -645,7 +716,9 @@ func (p *Plugin) FetchRows(f plugin.TableFetch) {
 // TableClosed is the table gone from AutoDoc (its panel closed, or a newer table replaced it): the
 // cursor serving it closes. A table already replaced by one of the plugin's own is not the one
 // served.
-func (p *Plugin) TableClosed(id string) {
+func (p *Plugin) TableClosed(id string) { p.post(func() { p.tableClosed(id) }) }
+
+func (p *Plugin) tableClosed(id string) {
 	if p.table == nil || p.table.id != id {
 		return
 	}

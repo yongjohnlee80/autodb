@@ -4,142 +4,239 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
+	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/panel"
 	"github.com/yongjohnlee80/autodoc/plugin"
-	"github.com/yongjohnlee80/autodoc/plugin/card"
 )
 
-// THE TREE — the ready card's body: the connection's schemas, a schema's tables and views, a
-// table's columns. Each level is read from AutoDB when it is first opened (schema.schemas on
-// connect, schema.tables on a schema, schema.columns on a table), and the card's kit draws only the
-// rows in view, so a schema of thousands of tables is a list in memory, never a frame of thousands
-// of rows. Enter on a table opens a SELECT of it in a new AutoDoc buffer.
+// THE TREE — CONNECTIONS' tree: the workspaces, each one's connections, a connection's schemas, a
+// schema's tables and views, a table's columns. The top is read at sign-in (workspace.list); each
+// level below is read from AutoDB when its node first opens (schema.schemas, schema.tables,
+// schema.columns). A node is named by its keys from the top, so an answer arriving after the tree
+// changed lands where its node still is, or nowhere. Enter on a connection connects to it; Enter on
+// a table opens a SELECT of it in a new AutoDoc buffer.
 
-// tree is the connection's schemas, and the card.Tree that shows them: one node per schema, table
-// and column, each schema and table node's Value its schemaNode or tableNode.
+// The keys' prefixes, a level each.
+const (
+	keyWorkspace = "w"
+	keyConn      = "c"
+	keySchema    = "s:"
+	keyTable     = "t:"
+	keyColumn    = "col:"
+)
+
+// tree is what the tree's nodes stand for: its workspaces' connections, and the tables read, by
+// their node's keys.
 type tree struct {
-	schemas []*schemaNode
-	view    *card.Tree
+	workspaces []autodb.Workspace
+	conns      map[string]autodb.Connection // by the connection node's key
+	tables     map[string]autodb.Table      // by the table node's keys, joined by /
 }
 
-type schemaNode struct {
-	name   string
-	loaded bool
-	tables []*tableNode
-}
-
-type tableNode struct {
-	schema *schemaNode
-	t      autodb.Table
-	loaded bool
-	cols   []autodb.Column
-}
-
-// newTree is the tree of schemas, its nodes opening as the card's kit asks: a schema reads its
-// tables, a table its columns, the first time each opens; Enter on a table opens a SELECT of it.
-func (p *Plugin) newTree(names []string) *tree {
-	tr := &tree{view: &card.Tree{}}
-	for _, n := range names {
-		s := &schemaNode{name: n}
-		tr.schemas = append(tr.schemas, s)
-		tr.view.Roots = append(tr.view.Roots, &card.Node{Text: n, Empty: "(no tables)", Value: s})
-	}
-	tr.view.OnOpen = func(n *card.Node) bool {
-		switch v := n.Value.(type) {
-		case *schemaNode:
-			if !p.loadTables(v) {
-				return false
-			}
-			n.Children = n.Children[:0]
-			for _, t := range v.tables {
-				n.Children = append(n.Children, &card.Node{Text: t.t.Name + " (" + t.t.Kind + ")", Empty: "(no columns)", Value: t})
-			}
-		case *tableNode:
-			if !p.loadColumns(v) {
-				return false
-			}
-			n.Children = n.Children[:0]
-			for _, c := range v.cols {
-				text := c.Name + " " + c.Type
-				if c.PK {
-					text += " · pk"
-				}
-				n.Children = append(n.Children, &card.Node{Text: text, Leaf: true})
-			}
-		}
-		return true
-	}
-	tr.view.OnEnter = func(n *card.Node) bool {
-		t, ok := n.Value.(*tableNode)
-		if ok {
-			p.openTable(t)
-		}
-		return ok // a schema: Enter opens or closes it
-	}
-	return tr
-}
-
-// treeBlocks adds the tree to the ready card's body.
-func (p *Plugin) treeBlocks(pg *card.Page) {
-	switch {
-	case p.tree == nil:
-		pg.Body = append(pg.Body, card.Text(card.Dim, "the schemas could not be read: c to choose the connection again"))
-	case len(p.tree.schemas) == 0:
-		pg.Body = append(pg.Body, card.Text(card.Dim, "(no schemas)"))
-	default:
-		pg.Body = append(pg.Body, p.tree.view)
-	}
-}
-
-// loadSchemas reads the connection's schemas into a new tree.
-func (p *Plugin) loadSchemas() {
-	p.tree = nil
+// loadTree reads the workspaces and their connections, the tree's top.
+func (p *Plugin) loadTree() {
 	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
 	defer cancel()
-	names, err := p.cli.Schemas(ctx, p.token, p.conn.ID)
+	ws, err := p.cli.Workspaces(ctx, p.token)
 	if err != nil {
-		p.failed("listing the schemas", err)
+		p.failed("listing the workspaces", err)
 		return
 	}
-	p.tree = p.newTree(names)
+	all, err := p.cli.Connections(ctx, p.token)
+	if err != nil {
+		p.failed("listing the connections", err)
+		return
+	}
+	// a connection made outside a workspace (conn.create alone) is in none: it is listed under a
+	// group of its own, or it could not be chosen
+	in := map[int64]bool{}
+	for _, w := range ws {
+		for _, c := range w.Connections {
+			in[c.ID] = true
+		}
+	}
+	loose := autodb.Workspace{ID: 0, Name: "(no workspace)"}
+	for _, c := range all {
+		if !in[c.ID] {
+			loose.Connections = append(loose.Connections, c)
+		}
+	}
+	if len(loose.Connections) > 0 {
+		ws = append(ws, loose)
+	}
+	t := &tree{workspaces: ws, conns: map[string]autodb.Connection{}, tables: map[string]autodb.Table{}}
+	top := make([]panel.Node, 0, len(ws))
+	for _, w := range ws {
+		top = append(top, panel.Node{Key: keyWorkspace + strconv.FormatInt(w.ID, 10), Label: w.Name, Children: true})
+		for _, c := range w.Connections {
+			t.conns[keyConn+strconv.FormatInt(c.ID, 10)] = c
+		}
+	}
+	p.tree = t
+	if len(ws) == 0 {
+		p.problem = "AutoDB has no connection you may use yet"
+	}
+	p.sendTree(nil, top)
 }
 
-// loadTables reads s's tables the first time; it reports whether they are there.
-func (p *Plugin) loadTables(s *schemaNode) bool {
-	if s.loaded {
-		return true
+// sendTree puts nodes under the node at parent (nil: the top) in the panel's tree.
+func (p *Plugin) sendTree(parent []string, nodes []panel.Node) {
+	if p.treeSent != nil {
+		p.treeSent(parent, nodes)
+	}
+	p.ui.Do(func(v panel.View) { v.Tree(parent, nodes) })
+}
+
+// opened reads a node's children the first time it opens.
+func (p *Plugin) opened(keys []string) {
+	if p.tree == nil || p.cli == nil {
+		return
+	}
+	var kids []panel.Node
+	var err error
+	switch len(keys) {
+	case 1:
+		kids = p.workspaceKids(keys[0])
+	case 2:
+		kids, err = p.schemaKids(keys)
+	case 3:
+		kids, err = p.tableKids(keys)
+	case 4:
+		kids, err = p.columnKids(keys)
+	}
+	if err != nil {
+		kids = []panel.Node{{Key: "error", Label: "(could not be read: " + autodb.Message(err) + ")"}}
+		p.failed("reading "+nodeName(keys[len(keys)-1]), err)
+		p.draw()
+	}
+	p.sendTree(keys, kids)
+}
+
+// nodeName is a node's name, its key's level prefix taken off.
+func nodeName(key string) string {
+	for _, pre := range []string{keySchema, keyTable, keyColumn} {
+		if name, ok := strings.CutPrefix(key, pre); ok {
+			return name
+		}
+	}
+	return key
+}
+
+func (p *Plugin) workspaceKids(key string) []panel.Node {
+	id, _ := strconv.ParseInt(strings.TrimPrefix(key, keyWorkspace), 10, 64)
+	for _, w := range p.tree.workspaces {
+		if w.ID != id {
+			continue
+		}
+		out := make([]panel.Node, 0, len(w.Connections))
+		for _, c := range w.Connections {
+			out = append(out, panel.Node{Key: keyConn + strconv.FormatInt(c.ID, 10), Label: c.Name + " (" + c.Engine + ")", Children: true})
+		}
+		if len(out) == 0 {
+			out = append(out, panel.Node{Key: "none", Label: "(no connections: Menu › Add connection)"})
+		}
+		return out
+	}
+	return nil
+}
+
+func (p *Plugin) schemaKids(keys []string) ([]panel.Node, error) {
+	c, ok := p.tree.conns[keys[1]]
+	if !ok {
+		return nil, errors.New("the connection is gone")
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
 	defer cancel()
-	tables, err := p.cli.Tables(ctx, p.token, p.conn.ID, s.name)
+	names, err := p.cli.Schemas(ctx, p.token, c.ID)
 	if err != nil {
-		p.failed("listing "+s.name+"'s tables", err)
-		return false
+		return nil, err
 	}
-	s.tables = s.tables[:0]
+	out := make([]panel.Node, 0, len(names))
+	for _, n := range names {
+		out = append(out, panel.Node{Key: keySchema + n, Label: n, Children: true})
+	}
+	if len(out) == 0 {
+		out = append(out, panel.Node{Key: "none", Label: "(no schemas)"})
+	}
+	return out, nil
+}
+
+func (p *Plugin) tableKids(keys []string) ([]panel.Node, error) {
+	c, ok := p.tree.conns[keys[1]]
+	if !ok {
+		return nil, errors.New("the connection is gone")
+	}
+	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
+	defer cancel()
+	tables, err := p.cli.Tables(ctx, p.token, c.ID, strings.TrimPrefix(keys[2], keySchema))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]panel.Node, 0, len(tables))
 	for _, t := range tables {
-		s.tables = append(s.tables, &tableNode{schema: s, t: t})
+		k := keyTable + t.Name
+		p.tree.tables[strings.Join(append(append([]string(nil), keys...), k), "/")] = t
+		out = append(out, panel.Node{Key: k, Label: t.Name + " (" + t.Kind + ")", Children: true})
 	}
-	s.loaded = true
-	return true
+	if len(out) == 0 {
+		out = append(out, panel.Node{Key: "none", Label: "(no tables)"})
+	}
+	return out, nil
 }
 
-// loadColumns reads t's columns the first time; it reports whether they are there.
-func (p *Plugin) loadColumns(t *tableNode) bool {
-	if t.loaded {
-		return true
+func (p *Plugin) columnKids(keys []string) ([]panel.Node, error) {
+	c, t, ok := p.tableAt(keys)
+	if !ok {
+		return nil, errors.New("the table is gone")
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
 	defer cancel()
-	cols, err := p.cli.Columns(ctx, p.token, p.conn.ID, t.schema.name, t.t.Name)
+	cols, err := p.cli.Columns(ctx, p.token, c.ID, t.Schema, t.Name)
 	if err != nil {
-		p.failed("listing "+t.t.Name+"'s columns", err)
-		return false
+		return nil, err
 	}
-	t.cols, t.loaded = cols, true
-	return true
+	out := make([]panel.Node, 0, len(cols))
+	for _, col := range cols {
+		label := col.Name + " " + col.Type
+		if col.PK {
+			label += " · pk"
+		}
+		out = append(out, panel.Node{Key: keyColumn + col.Name, Label: label})
+	}
+	if len(out) == 0 {
+		out = append(out, panel.Node{Key: "none", Label: "(no columns)"})
+	}
+	return out, nil
+}
+
+// tableAt is the connection and table a table node's keys name.
+func (p *Plugin) tableAt(keys []string) (autodb.Connection, autodb.Table, bool) {
+	if p.tree == nil || len(keys) != 4 {
+		return autodb.Connection{}, autodb.Table{}, false
+	}
+	c, ok := p.tree.conns[keys[1]]
+	t, ok2 := p.tree.tables[strings.Join(keys, "/")]
+	return c, t, ok && ok2
+}
+
+// useNode is Enter on a node: a connection connects, a table opens a SELECT of it.
+func (p *Plugin) useNode(keys []string) {
+	if p.tree == nil {
+		return
+	}
+	switch len(keys) {
+	case 2:
+		if c, ok := p.tree.conns[keys[1]]; ok {
+			p.use(c)
+		}
+	case 4:
+		if c, t, ok := p.tableAt(keys); ok {
+			p.openTable(c, t)
+		}
+	}
 }
 
 // maxBufferText is the most text AutoDoc's buffer.new takes; a longer scaffold is sent as
@@ -190,18 +287,22 @@ func bufferName(t autodb.Table) string {
 }
 
 // openTable opens a SELECT of t in a new AutoDoc buffer, reading its columns first.
-func (p *Plugin) openTable(t *tableNode) {
-	if !p.loadColumns(t) {
+func (p *Plugin) openTable(c autodb.Connection, t autodb.Table) {
+	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
+	defer cancel()
+	cols, err := p.cli.Columns(ctx, p.token, c.ID, t.Schema, t.Name)
+	if err != nil {
+		p.failed("listing "+t.Name+"'s columns", err)
 		p.draw()
 		return
 	}
-	text := scaffold(t.t, t.cols)
+	text := scaffold(t, cols)
 	if text == "" {
-		p.problem = "AutoDB gave " + t.t.Name + " no quoted name, so there is no safe query to open"
+		p.problem = "AutoDB gave " + t.Name + " no quoted name, so there is no safe query to open"
 		p.draw()
 		return
 	}
-	name := bufferName(t.t)
+	name := bufferName(t)
 	ok, err := p.host.Call("buffer.new", name, text)
 	var ce *plugin.CallError
 	switch {

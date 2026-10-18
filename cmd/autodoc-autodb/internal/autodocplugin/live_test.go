@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +16,6 @@ import (
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodoc/plugin"
-	"github.com/yongjohnlee80/autodoc/plugin/card"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
 )
@@ -60,10 +60,11 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	p := New("dev")
+	p.inline = true // each step at once, on this goroutine
 	h := &fakeHost{}
-	p.attach(h, 70, 30)
+	p.attach(h)
 	if p.step != stepLogin {
-		t.Fatalf("the plugin did not reach the sign-in: step %d\n%s", p.step, h.card())
+		t.Fatalf("the plugin did not reach the sign-in: step %d\n%s", p.step, said(p))
 	}
 	if p.bin.Via != "PATH" || p.bin.Path != filepath.Join(bin, "autodb") {
 		t.Fatalf("found %+v, want the build on PATH", p.bin)
@@ -104,7 +105,7 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 
 	signIn(p, pass)
 	if p.step != stepPick {
-		t.Fatalf("after signing in: step %d\n%s", p.step, h.card())
+		t.Fatalf("after signing in: step %d\n%s", p.step, said(p))
 	}
 
 	// The sign-in is recorded under the temporary state directory, keyed by the store the server
@@ -132,27 +133,24 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 		t.Fatalf("the record's mode is %o, want 600", m)
 	}
 	next := New("dev")
+	next.inline = true
 	nh := &fakeHost{}
-	next.attach(nh, 70, 30)
-	if next.step != stepLogin || next.nameIn.Value() != "admin" || next.field() != focusPass {
-		t.Fatalf("the next start opened at step %d with the name %q, focus %d; want the sign-in, admin, the passphrase\n%s",
-			next.step, next.nameIn.Value(), next.field(), nh.card())
+	next.attach(nh)
+	if next.step != stepLogin || next.lastName() != "admin" {
+		t.Fatalf("the next start opened at step %d with the name %q; want the sign-in, admin\n%s",
+			next.step, next.lastName(), said(next))
 	}
 	next.Close()
-	for i, c := range p.conns {
-		if c.Name == "scratch" {
-			p.connList.Sel = i
-		}
-	}
-	p.Key(plugin.Key{Key: "Enter"})
+	scratch := fmt.Sprintf("c%d", created) // made with conn.create alone: in no workspace
+	p.useNode([]string{"w0", scratch})
 	if p.step != stepReady {
-		t.Fatalf("after choosing scratch: step %d\n%s", p.step, h.card())
+		t.Fatalf("after choosing scratch: step %d\n%s", p.step, said(p))
 	}
 
 	const total = 1234
 	run(p, docAt("SELECT g, md5(g::text) AS h FROM generate_series(1, "+strconv.Itoa(total)+") AS g|;\n"))
 	if len(h.tables) != 1 {
-		t.Fatalf("the run opened %d tables\n%s", len(h.tables), h.card())
+		t.Fatalf("the run opened %d tables\n%s", len(h.tables), said(p))
 	}
 	tab := h.tables[0]
 	if !strings.HasPrefix(tab.ID, "cur-") || !tab.More {
@@ -166,7 +164,7 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 		before := len(h.rows)
 		p.FetchRows(plugin.TableFetch{ID: tab.ID, N: 300})
 		if len(h.rows) != before+1 {
-			t.Fatalf("a fetch was not answered with rows (ends %+v)\n%s", h.ends, h.card())
+			t.Fatalf("a fetch was not answered with rows (ends %+v)\n%s", h.ends, said(p))
 		}
 		for _, r := range h.rows[len(h.rows)-1].rows {
 			got = append(got, r[0])
@@ -184,7 +182,7 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 	// the cursor ended with its last page: the session takes another statement, a new table
 	run(p, docAt("SELECT 1 AS one|"))
 	if len(h.tables) != 2 || h.tables[1].ID == tab.ID || h.tables[1].More {
-		t.Fatalf("the second run's table: %+v\n%s", h.tables[1:], h.card())
+		t.Fatalf("the second run's table: %+v\n%s", h.tables[1:], said(p))
 	}
 
 	// The tree reads the real catalog, and Enter on a table sends a SELECT built from the server's
@@ -200,33 +198,13 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 	if p.problem != "" {
 		t.Fatalf("creating %s: %s", tbl, p.problem)
 	}
-	selectRow := func(match func(*card.Node) bool) {
-		t.Helper()
-		var walk func([]*card.Node) bool
-		walk = func(ns []*card.Node) bool {
-			for _, n := range ns {
-				if match(n) {
-					p.tree.view.Select(n)
-					p.draw()
-					return true
-				}
-				if n.Open && walk(n.Children) {
-					return true
-				}
-			}
-			return false
-		}
-		if !walk(p.tree.view.Roots) {
-			t.Fatalf("no such row in the tree:\n%s", h.card())
-		}
-	}
 	if p.tree == nil {
-		t.Fatalf("the ready card has no tree: %s", p.problem)
+		t.Fatalf("the panel has no tree: %s", p.problem)
 	}
-	selectRow(func(n *card.Node) bool { s, ok := n.Value.(*schemaNode); return ok && s.name == "public" })
-	p.Key(plugin.Key{Key: "l", Text: "l"})
-	selectRow(func(n *card.Node) bool { tn, ok := n.Value.(*tableNode); return ok && tn.t.Name == tbl })
-	p.Key(plugin.Key{Key: "Enter"})
+	conn := []string{"w0", scratch}
+	p.opened(conn)
+	p.opened(append(conn, "s:public"))
+	p.useNode(append(conn, "s:public", "t:"+tbl))
 	if len(h.calls) != 1 || h.calls[0].id != "buffer.new" || h.calls[0].args[0] != "public."+tbl+".sql" {
 		t.Fatalf("Enter on %s sent %q (%s)", tbl, h.calls, p.problem)
 	}

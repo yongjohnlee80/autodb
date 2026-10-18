@@ -2,6 +2,8 @@ package autodocplugin
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strings"
@@ -35,8 +37,9 @@ type fakeDB struct {
 	storeID string
 	// pass is the passphrase auth.login takes, "right" when "".
 	pass string
-	// more are connections conn.list lists after the first, scratch (id 7).
-	more []map[string]any
+	// more are connections conn.list lists after the first, scratch (id 7), all in the workspace
+	// AutoDoc (id 1); loose ones conn.list lists in no workspace.
+	more, loose []map[string]any
 	// schemas answer schema.schemas (public alone when nil); tables answer schema.tables by
 	// schema, columns schema.columns by "schema.table", each row as AutoDB's wire carries it.
 	schemas []string
@@ -90,8 +93,20 @@ func newFakeDB(t *testing.T) *fakeDB {
 		for _, c := range f.more {
 			list = append(list, c)
 		}
+		for _, c := range f.loose {
+			list = append(list, c)
+		}
 		f.mu.Unlock()
 		return list, nil
+	})
+	handle("workspace.list", func([]any) (any, error) {
+		conns := []any{map[string]any{"id": int64(7), "name": "scratch", "engine": f.engineName()}}
+		f.mu.Lock()
+		for _, c := range f.more {
+			conns = append(conns, c)
+		}
+		f.mu.Unlock()
+		return []any{map[string]any{"id": int64(1), "name": "AutoDoc", "connections": conns}}, nil
 	})
 	handle("schema.schemas", func([]any) (any, error) {
 		f.mu.Lock()
@@ -354,10 +369,12 @@ func (h *fakeHost) card() string {
 	return strings.Join(strings.Fields(b.String()), " ")
 }
 
-// connected is a plugin signed in to db and connected to its one connection, sending to h.
-func connected(t *testing.T, db *fakeDB) (*Plugin, *fakeHost) {
+// testPlugin is a plugin over db, run inline (each step at once on the test's goroutine), its
+// panel not opened: the cells read its state, and serve_test.go drives the panel over the link.
+func testPlugin(t *testing.T, db *fakeDB) (*Plugin, *fakeHost) {
 	t.Helper()
 	p := newPlugin("v0.0.1", t.TempDir())
+	p.inline = true
 	t.Cleanup(p.Close)
 	p.find = func(context.Context) (autodb.Binary, []autodb.Tried, error) {
 		return autodb.Binary{Path: "autodb", Version: "v-fake", Via: "test"}, nil, nil
@@ -365,34 +382,34 @@ func connected(t *testing.T, db *fakeDB) (*Plugin, *fakeHost) {
 	p.start = func(ctx context.Context, _ autodb.Binary) (*autodb.Client, error) {
 		return autodb.Dial(ctx, "tcp", db.addr, "test")
 	}
-	h := &fakeHost{}
-	p.attach(h, 60, 24)
+	return p, &fakeHost{}
+}
+
+// connected is a plugin signed in to db and connected to its first connection, sending to h.
+func connected(t *testing.T, db *fakeDB) (*Plugin, *fakeHost) {
+	t.Helper()
+	p, h := testPlugin(t, db)
+	p.attach(h)
 	if p.step != stepLogin {
-		t.Fatalf("after open the card is at step %d, want the sign-in (%s)", p.step, h.card())
+		t.Fatalf("after open the plugin is at step %d, want the sign-in (%s)", p.step, said(p))
 	}
 	signIn(p, "right")
 	if p.step != stepPick {
-		t.Fatalf("after signing in the card is at step %d, want the connections (%s)", p.step, h.card())
+		t.Fatalf("after signing in the plugin is at step %d, want the connections (%s)", p.step, said(p))
 	}
-	p.Key(plugin.Key{Key: "Enter"})
+	p.useNode([]string{"w1", "c7"})
 	if p.step != stepReady {
-		t.Fatalf("after choosing the card is at step %d, want ready (%s)", p.step, h.card())
+		t.Fatalf("after choosing the plugin is at step %d, want ready (%s)", p.step, said(p))
 	}
 	return p, h
 }
 
-// signIn types the name "admin" and pass into the card and presses Enter in the passphrase.
-func signIn(p *Plugin, pass string) {
-	p.focus(focusName)
-	p.Key(plugin.Key{Key: "u", Ctrl: true}) // a name left from an earlier sign-in goes
-	for _, r := range "admin" {
-		p.Key(plugin.Key{Key: string(r), Text: string(r)})
-	}
-	p.Key(plugin.Key{Key: "Tab"})
-	for _, r := range pass {
-		p.Key(plugin.Key{Key: string(r), Text: string(r)})
-	}
-	p.Key(plugin.Key{Key: "Enter"})
+// signIn is the Sign in dialog accepted with the name "admin" and pass.
+func signIn(p *Plugin, pass string) { p.events().SignIn("admin", pass) }
+
+// said is what the panel says: the status, the problem and the step's own text.
+func said(p *Plugin) string {
+	return strings.Join([]string{p.where(), p.status, p.problem, p.stepText()}, " · ")
 }
 
 // docAt is a note of text with the cursor at the byte where mark (removed) was.
@@ -402,4 +419,14 @@ func docAt(text string) plugin.Document {
 		panic(fmt.Sprintf("docAt: no | in %q", text))
 	}
 	return plugin.Document{Path: "q.sql", Text: text[:at] + text[at+1:], CursorByte: at, Version: 1}
+}
+
+// freshPass is a passphrase made for the run, never written down.
+func freshPass(t *testing.T) string {
+	t.Helper()
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatal(err)
+	}
+	return "Pp" + hex.EncodeToString(b[:])
 }

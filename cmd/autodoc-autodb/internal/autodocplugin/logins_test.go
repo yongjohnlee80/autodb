@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
-	"github.com/yongjohnlee80/autodoc/plugin"
 )
 
 // serverAt is a fake AutoDB serving the meta store store ("" none), taking pass.
@@ -26,6 +25,7 @@ func serverAt(t *testing.T, store, pass string) *fakeDB {
 func openAt(t *testing.T, db *fakeDB, path string) (*Plugin, *fakeHost) {
 	t.Helper()
 	p := newPlugin("v0.0.1", t.TempDir())
+	p.inline = true
 	p.logins = path
 	t.Cleanup(p.Close)
 	p.find = func(context.Context) (autodb.Binary, []autodb.Tried, error) {
@@ -35,30 +35,23 @@ func openAt(t *testing.T, db *fakeDB, path string) (*Plugin, *fakeHost) {
 		return autodb.Dial(ctx, "tcp", db.addr, "test")
 	}
 	h := &fakeHost{}
-	p.attach(h, 60, 24)
+	p.attach(h)
 	if p.step != stepLogin {
-		t.Fatalf("after open the card is at step %d, want the sign-in (%s)", p.step, h.card())
+		t.Fatalf("after open the card is at step %d, want the sign-in (%s)", p.step, said(p))
 	}
 	return p, h
 }
 
-// signInAs types name over the one in the field, then pass, and presses Enter on the passphrase.
-func signInAs(p *Plugin, name, pass string) {
-	p.focus(focusName)
-	p.Key(plugin.Key{Key: "u", Ctrl: true})
-	typeText(p, name)
-	tab(p)
-	typeText(p, pass)
-	p.Key(plugin.Key{Key: "Enter"})
-}
+// signInAs is the Sign in dialog accepted with name and pass.
+func signInAs(p *Plugin, name, pass string) { p.events().SignIn(name, pass) }
 
 // signedInAs opens a plugin on db and signs in as name, which db takes.
 func signedInAs(t *testing.T, db *fakeDB, path, name, pass string) {
 	t.Helper()
-	p, h := openAt(t, db, path)
+	p, _ := openAt(t, db, path)
 	signInAs(p, name, pass)
 	if p.step != stepPick {
-		t.Fatalf("signing in as %s: the card is at step %d (%s)", name, p.step, h.card())
+		t.Fatalf("signing in as %s: the plugin is at step %d (%s)", name, p.step, said(p))
 	}
 }
 
@@ -76,24 +69,11 @@ func record(t *testing.T, path string) map[string]string {
 	return m
 }
 
-// wantPrefilled is the sign-in opened with name typed in and the focus on the passphrase; "" is
-// an empty name with the focus on it.
-func wantPrefilled(t *testing.T, p *Plugin, h *fakeHost, name string) {
+// wantPrefilled is the Sign in dialog opened with name filled in; "" with none.
+func wantPrefilled(t *testing.T, p *Plugin, _ *fakeHost, name string) {
 	t.Helper()
-	if got := p.nameIn.Value(); got != name {
-		t.Fatalf("the sign-in opened with the name %q, want %q", got, name)
-	}
-	if name == "" {
-		if p.field() != focusName {
-			t.Fatalf("an empty name opened with the focus on %d, want the name", p.field())
-		}
-		return
-	}
-	if p.field() != focusPass {
-		t.Fatalf("the name %q opened with the focus on %d, want the passphrase", name, p.field())
-	}
-	if card := h.card(); !strings.Contains(card, name) || !strings.Contains(card, "Enter: sign in") {
-		t.Fatalf("the card does not show %q with the passphrase focused:\n%s", name, card)
+	if p.prefill != name {
+		t.Fatalf("the sign-in opened with the name %q, want %q", p.prefill, name)
 	}
 }
 
@@ -119,10 +99,9 @@ func TestARestartPrefillsTheLastName(t *testing.T) {
 	again := serverAt(t, "store-a", pass) // restarted, at another address
 	p, h := openAt(t, again, path)
 	wantPrefilled(t, p, h, "alice")
-	typeText(p, pass)
-	p.Key(plugin.Key{Key: "Enter"})
+	signInAs(p, p.prefill, pass)
 	if p.step != stepPick {
-		t.Fatalf("the passphrase and Enter did not sign in: step %d (%s)", p.step, h.card())
+		t.Fatalf("the passphrase and Enter did not sign in: step %d (%s)", p.step, said(p))
 	}
 	if l := again.took("auth.login"); len(l) != 1 || l[0].params[0] != "alice" {
 		t.Fatalf("auth.login took %+v, want alice", l)
@@ -163,7 +142,7 @@ func TestAFailedSignInLeavesTheRecord(t *testing.T) {
 	p, h := openAt(t, serverAt(t, "store-a", pass), path)
 	signInAs(p, "mallory", "wrong")
 	if p.step != stepLogin {
-		t.Fatalf("a wrong passphrase signed in: step %d (%s)", p.step, h.card())
+		t.Fatalf("a wrong passphrase signed in: step %d (%s)", p.step, said(p))
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("a refused first sign-in left a record (%v)", err)
@@ -177,7 +156,7 @@ func TestAFailedSignInLeavesTheRecord(t *testing.T) {
 	p, h = openAt(t, serverAt(t, "store-a", pass), path)
 	signInAs(p, "mallory", "wrong")
 	if p.step != stepLogin {
-		t.Fatalf("a wrong passphrase signed in: step %d (%s)", p.step, h.card())
+		t.Fatalf("a wrong passphrase signed in: step %d (%s)", p.step, said(p))
 	}
 	if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
 		t.Fatalf("a refused sign-in changed the record from %q to %q (%v)", before, after, err)
@@ -200,12 +179,12 @@ func TestARecordThatCannotBeReadNeverBlocksTheSignIn(t *testing.T) {
 		}
 		p, h := openAt(t, serverAt(t, "store-a", pass), path)
 		wantPrefilled(t, p, h, "")
-		if card := h.card(); !strings.Contains(card, "could not be read") {
+		if card := said(p); !strings.Contains(card, "could not be read") {
 			t.Fatalf("the card does not say the record could not be read:\n%s", card)
 		}
 		signInAs(p, "alice", pass)
 		if p.step != stepPick {
-			t.Fatalf("a corrupt record blocked the sign-in: step %d (%s)", p.step, h.card())
+			t.Fatalf("a corrupt record blocked the sign-in: step %d (%s)", p.step, said(p))
 		}
 		if got := record(t, path); !maps.Equal(got, map[string]string{"store:store-a": "alice"}) {
 			t.Fatalf("the corrupt record was replaced by %v", got)
@@ -218,17 +197,17 @@ func TestARecordThatCannotBeReadNeverBlocksTheSignIn(t *testing.T) {
 		}
 		p, h := openAt(t, serverAt(t, "store-a", pass), path)
 		wantPrefilled(t, p, h, "")
-		if card := h.card(); !strings.Contains(card, "could not be read") {
+		if card := said(p); !strings.Contains(card, "could not be read") {
 			t.Fatalf("the card does not say the record could not be read:\n%s", card)
 		}
 		signInAs(p, "alice", pass)
 		if p.step != stepPick {
-			t.Fatalf("an unreadable record blocked the sign-in: step %d (%s)", p.step, h.card())
+			t.Fatalf("an unreadable record blocked the sign-in: step %d (%s)", p.step, said(p))
 		}
-		if card := h.card(); !strings.Contains(card, "could not be kept") {
+		if card := said(p); !strings.Contains(card, "could not be kept") {
 			t.Fatalf("the card does not say the name could not be kept:\n%s", card)
 		}
-		if strings.Contains(h.card(), pass) {
+		if strings.Contains(said(p), pass) {
 			t.Fatal("the card shows the passphrase")
 		}
 	})
@@ -238,10 +217,10 @@ func TestARecordThatCannotBeReadNeverBlocksTheSignIn(t *testing.T) {
 func TestTheRecordHoldsNoSecret(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", loginsFile)
 	pass := freshPass(t)
-	p, h := openAt(t, serverAt(t, "store-a", pass), path)
+	p, _ := openAt(t, serverAt(t, "store-a", pass), path)
 	signInAs(p, "alice", pass)
 	if p.step != stepPick || p.token == "" {
-		t.Fatalf("the sign-in did not sign in: step %d (%s)", p.step, h.card())
+		t.Fatalf("the sign-in did not sign in: step %d (%s)", p.step, said(p))
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {

@@ -2,10 +2,12 @@ package autodocplugin
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
+	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/panel"
 	"github.com/yongjohnlee80/autodoc/plugin"
 )
 
@@ -35,182 +37,100 @@ func treeDB(t *testing.T) *fakeDB {
 	return db
 }
 
-// press sends keys to the card, one a name.
-func press(p *Plugin, keys ...string) {
-	for _, k := range keys {
-		p.Key(plugin.Key{Key: k, Text: k})
+// scratch is the scratch connection's node: in the workspace AutoDoc.
+var scratch = []string{"w1", "c7"}
+
+func at(keys ...string) []string { return append(append([]string(nil), scratch...), keys...) }
+
+// sentTree records the tree the plugin sends the panel: each node's children, by its keys.
+type sentTree map[string][]panel.Node
+
+func recordTree(p *Plugin) sentTree {
+	got := sentTree{}
+	p.treeSent = func(parent []string, nodes []panel.Node) { got[strings.Join(parent, "/")] = nodes }
+	return got
+}
+
+func (s sentTree) labels(keys ...string) []string {
+	var out []string
+	for _, n := range s[strings.Join(keys, "/")] {
+		out = append(out, n.Label)
+	}
+	return out
+}
+
+// The workspaces are the tree's top, each with its connections; a connection in no workspace is
+// listed under one of its own, so it can still be chosen.
+func TestTheWorkspacesAreTheTreesTop(t *testing.T) {
+	db := treeDB(t)
+	db.loose = []map[string]any{{"id": int64(9), "name": "stray", "engine": "postgres"}}
+	p, h := testPlugin(t, db)
+	got := recordTree(p)
+	p.attach(h)
+	signIn(p, "right")
+	if top := got.labels(); !slices.Equal(top, []string{"AutoDoc", "(no workspace)"}) {
+		t.Fatalf("the top: %q", top)
+	}
+	p.opened([]string{"w1"})
+	p.opened([]string{"w0"})
+	if a, b := got.labels("w1"), got.labels("w0"); !slices.Equal(a, []string{"scratch (postgres)"}) || !slices.Equal(b, []string{"stray (postgres)"}) {
+		t.Fatalf("the connections: %q and %q", a, b)
+	}
+	p.useNode([]string{"w0", "c9"})
+	if p.step != stepReady || p.conn == nil || p.conn.Name != "stray" {
+		t.Fatalf("Enter on stray: step %d (%s)", p.step, said(p))
 	}
 }
 
-// chosenRow is the text of the selected row, the "> " row the card's kit draws in the selection's
-// style, its spaces run together; "" when none is.
-func chosenRow(h *fakeHost, p *Plugin) string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, row := range h.frame.Rows() {
-		for _, r := range row {
-			if strings.HasPrefix(r.Text, "> ") {
-				return strings.Join(strings.Fields(r.Text), " ")
-			}
-		}
-	}
-	return ""
-}
-
-// selectedName is the tree's selected node's text, "" on an Empty row.
-func selectedName(p *Plugin) string {
-	if n := p.selected(); n != nil {
-		return n.Text
-	}
-	return ""
-}
-
-// A press chooses the row actually painted at that y, and a wheel advances the tree selection.
-// This exercises the card's scroll mapping, including a fixed heading above the moving rows.
-func TestPointerSelectsAndScrollsTheReadyCard(t *testing.T) {
-	p, h := connected(t, treeDB(t))
-	p.Resize(48, 14)
-	audit := rowOf(h.lines(), 0, has("audit"))
-	if audit < 0 {
-		t.Fatalf("audit is not visible: %q", h.lines())
-	}
-	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: audit, Count: 1})
-	if selectedName(p) != "audit" || !strings.Contains(chosenRow(h, p), "audit") {
-		t.Fatalf("press on the second schema selected %q: %q", selectedName(p), chosenRow(h, p))
-	}
-	p.Pointer(plugin.Pointer{Kind: "wheel", Button: "up", X: 4, Y: 4, Count: 1})
-	if selectedName(p) != "public" || !strings.Contains(chosenRow(h, p), "public") {
-		t.Fatalf("wheel up selected %q: %q", selectedName(p), chosenRow(h, p))
-	}
-	press(p, "Enter") // expand public, creating enough rows to scroll the short card
-	p.Resize(48, 10)
-	p.Pointer(plugin.Pointer{Kind: "wheel", Button: "down", X: 4, Y: 4, Count: 2})
-	if selectedName(p) != "audit" || !strings.Contains(chosenRow(h, p), "audit") {
-		t.Fatalf("the wheel did not reveal the last row, audit: selected %q, row %q\n%s", selectedName(p), chosenRow(h, p), strings.Join(h.lines(), "\n"))
-	}
-	// Select another visible row after the viewport moved: the frame y is not the row's index.
-	p.Resize(48, 12)
-	lines := h.lines()
-	selected := false
-	for _, name := range []string{"users (table)", "Order Lines (view)", "legacy (table)", "public"} {
-		y := rowOf(lines, 0, has(name))
-		if y < 0 || strings.HasPrefix(lines[y], "> ") {
-			continue // not in view, or the row already selected
-		}
-		p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: y, Count: 1})
-		if got := selectedName(p); got != name {
-			t.Fatalf("a press on row y=%d (%q) selected %q:\n%s", y, name, got, strings.Join(lines, "\n"))
-		}
-		selected = true
-		break
-	}
-	if !selected {
-		t.Fatalf("no other tree row visible after the scroll:\n%s", strings.Join(lines, "\n"))
-	}
-	before := p.selected()
-	p.Pointer(plugin.Pointer{Kind: "press", Button: "left", X: 4, Y: 11, Count: 1})
-	if p.selected() != before {
-		t.Fatal("press on the footer moved the tree selection")
-	}
-}
-
-// The ready card lists no help rows: SPC p shows the commands itself. Its keys row names the
-// tree's keys, another connection and close.
-func TestTheReadyCardHasNoHelpRows(t *testing.T) {
-	p, h := connected(t, treeDB(t))
-	p.Resize(48, 24)
-	card := h.card()
-	if strings.Contains(card, "SPC p") {
-		t.Fatalf("the ready card still lists the SPC p rows:\n%s", strings.Join(h.lines(), "\n"))
-	}
-	for _, want := range []string{"j k: move", "l h: open, close", "Enter: query", "c: another connection", "q: close"} {
-		if !strings.Contains(card, want) {
-			t.Errorf("the keys row does not name %q:\n%s", want, strings.Join(h.lines(), "\n"))
-		}
-	}
-}
-
-// The tree reads each level as it is opened: the schemas on connect, a schema's tables when it is
-// opened, a table's columns when it is opened. l and → open, h and ← close or step out, j k and
-// the arrows move the bar.
+// Each level is read from AutoDB the first time its node opens: a connection's schemas, a
+// schema's tables and views, a table's columns; an empty level says so.
 func TestTheTreeOpensLevelByLevel(t *testing.T) {
 	db := treeDB(t)
-	p, h := connected(t, db)
-	p.Resize(48, 24)
-	if got := chosenRow(h, p); got != "> ▸ public" {
-		t.Fatalf("on connect the bar is on %q, want public:\n%s", got, strings.Join(h.lines(), "\n"))
+	p, _ := connected(t, db)
+	got := recordTree(p)
+	if n := len(db.took("schema.schemas")); n != 0 {
+		t.Fatalf("connecting read the schemas %d times, want none until the connection opens", n)
 	}
-	if rowOf(h.lines(), 0, is("▸ audit")) < 0 {
-		t.Fatalf("the schemas are not listed:\n%s", strings.Join(h.lines(), "\n"))
+	p.opened(scratch)
+	if s := got.labels(scratch...); !slices.Equal(s, []string{"public", "audit"}) {
+		t.Fatalf("the schemas: %q", s)
 	}
-	if n := len(db.took("schema.tables")); n != 0 {
-		t.Fatalf("connecting read %d schemas' tables, want none until one is opened", n)
-	}
-
-	press(p, "l")
-	lines := h.lines()
-	if chosenRow(h, p) != "> ▾ public" || rowOf(lines, 0, is("▸ users (table)")) < 0 || rowOf(lines, 0, is("▸ Order Lines (view)")) < 0 {
-		t.Fatalf("public opened:\n%s", strings.Join(lines, "\n"))
+	p.opened(at("s:public"))
+	if s := got.labels(at("s:public")...); !slices.Equal(s, []string{"users (table)", "Order Lines (view)", "legacy (table)"}) {
+		t.Fatalf("public's tables: %q", s)
 	}
 	if tk := db.took("schema.tables"); len(tk) != 1 || tk[0].params[2] != "public" {
 		t.Fatalf("opening public read %+v", tk)
 	}
-	press(p, "Down")
-	if got := chosenRow(h, p); got != "> ▸ users (table)" {
-		t.Fatalf("Down moved the bar to %q", got)
-	}
 	if n := len(db.took("schema.columns")); n != 0 {
-		t.Fatalf("reaching users read its columns %d times before it was opened", n)
+		t.Fatalf("listing the tables read columns %d times", n)
 	}
-	press(p, "Right")
-	lines = h.lines()
-	if rowOf(lines, 0, is("id integer · pk")) < 0 || rowOf(lines, 0, is("Full Name text")) < 0 {
-		t.Fatalf("users opened:\n%s", strings.Join(lines, "\n"))
+	p.opened(at("s:public", "t:users"))
+	if s := got.labels(at("s:public", "t:users")...); !slices.Equal(s, []string{"id integer · pk", "Full Name text"}) {
+		t.Fatalf("users' columns: %q", s)
 	}
-	press(p, "j")
-	if got := chosenRow(h, p); got != "> id integer · pk" {
-		t.Fatalf("j moved the bar to %q", got)
+	p.opened(at("s:public", "t:Order Lines"))
+	if s := got.labels(at("s:public", "t:Order Lines")...); !slices.Equal(s, []string{"(no columns)"}) {
+		t.Fatalf("a view with no columns: %q", s)
 	}
-	press(p, "h")
-	if got := chosenRow(h, p); got != "> ▾ users (table)" {
-		t.Fatalf("h on a column stepped to %q, want its table", got)
-	}
-	press(p, "Left")
-	if got := chosenRow(h, p); got != "> ▸ users (table)" || rowOf(h.lines(), 0, is("id integer · pk")) >= 0 {
-		t.Fatalf("← on an open table left the bar on %q:\n%s", got, strings.Join(h.lines(), "\n"))
-	}
-	press(p, "h")
-	if got := chosenRow(h, p); got != "> ▾ public" {
-		t.Fatalf("h on a closed table stepped to %q, want its schema", got)
-	}
-	press(p, "j", "j", "l")
-	if rowOf(h.lines(), 0, is("(no columns)")) < 0 {
-		t.Fatalf("a view with no columns:\n%s", strings.Join(h.lines(), "\n"))
-	}
-	press(p, "k", "k", "Enter")
-	if got := chosenRow(h, p); got != "> ▸ public" {
-		t.Fatalf("Enter on an open schema left %q, want it closed", got)
-	}
-	press(p, "j", "Enter")
-	if rowOf(h.lines(), 0, is("(no tables)")) < 0 {
-		t.Fatalf("Enter on a schema with no tables:\n%s", strings.Join(h.lines(), "\n"))
-	}
-	if n := len(db.took("schema.columns")); n != 2 {
-		t.Fatalf("schema.columns was read %d times, want once for each table opened", n)
+	p.opened(at("s:audit"))
+	if s := got.labels(at("s:audit")...); !slices.Equal(s, []string{"(no tables)"}) {
+		t.Fatalf("a schema with no tables: %q", s)
 	}
 }
 
-// A schema AutoDB will not list says why on the problem line; the tree stays.
+// A schema AutoDB will not list says why on the problem line, and in its node.
 func TestATreeLoadErrorIsTheProblem(t *testing.T) {
 	db := treeDB(t)
 	db.schemas = []string{"broken"}
-	p, h := connected(t, db)
-	press(p, "l")
-	if p.step != stepReady || !strings.Contains(h.card(), "listing broken's tables: exec: permission denied for schema broken") {
-		t.Fatalf("the load error is not the problem (step %d):\n%s", p.step, strings.Join(h.lines(), "\n"))
+	p, _ := connected(t, db)
+	got := recordTree(p)
+	p.opened(at("s:broken"))
+	if p.step != stepReady || !strings.Contains(said(p), "reading broken: exec: permission denied for schema broken") {
+		t.Fatalf("the load error is not the problem (step %d): %s", p.step, said(p))
 	}
-	if got := chosenRow(h, p); got != "> ▸ broken" {
-		t.Fatalf("after the error the bar is on %q", got)
+	if s := got.labels(at("s:broken")...); len(s) != 1 || !strings.Contains(s[0], "could not be read") {
+		t.Fatalf("the node says %q", s)
 	}
 }
 
@@ -220,20 +140,20 @@ func TestATreeLoadErrorIsTheProblem(t *testing.T) {
 func TestEnterOnATableOpensASelect(t *testing.T) {
 	db := treeDB(t)
 	p, h := connected(t, db)
-	p.Resize(48, 24)
-	press(p, "l", "j", "Enter")
+	p.opened(at("s:public"))
+	p.useNode(at("s:public", "t:users"))
 	want := hostCall{"buffer.new", []string{"public.users.sql",
 		"SELECT\n  \"id\",\n  \"Full Name\"\nFROM \"public\".\"users\"\nLIMIT 100;\n"}}
 	if len(h.calls) != 1 || fmt.Sprint(h.calls[0]) != fmt.Sprint(want) {
 		t.Fatalf("Enter on users sent %q, want %q", h.calls, want)
 	}
-	if !strings.Contains(h.card(), "opened public.users.sql") {
-		t.Fatalf("the card does not say the query opened:\n%s", strings.Join(h.lines(), "\n"))
+	if !strings.Contains(said(p), "opened public.users.sql") {
+		t.Fatalf("the panel does not say the query opened: %s", said(p))
 	}
-	press(p, "j", "j", "Enter")
+	p.useNode(at("s:public", "t:legacy"))
 	want = hostCall{"buffer.new", []string{"public.legacy.sql", "SELECT *\nFROM \"public\".\"legacy\"\nLIMIT 100;\n"}}
 	if len(h.calls) != 2 || fmt.Sprint(h.calls[1]) != fmt.Sprint(want) {
-		t.Fatalf("Enter on legacy sent %q, want %q:\n%s", h.calls[1:], want, strings.Join(h.lines(), "\n"))
+		t.Fatalf("Enter on legacy sent %q, want %q", h.calls[1:], want)
 	}
 	if strings.Contains(h.calls[1].args[1], "DROP") {
 		t.Fatal("a raw column name went into the query")
@@ -252,11 +172,11 @@ func TestBufferNewAnswersOnTheProblemLine(t *testing.T) {
 		{&plugin.CallError{Code: plugin.CallRefused, Message: "buffer.new is not in the manifest's calls"}, "AutoDoc refused to open public.users.sql: buffer.new is not in the manifest's calls"},
 	} {
 		p, h := connected(t, treeDB(t))
-		p.Resize(60, 24)
 		h.answer = c.answer
-		press(p, "l", "j", "Enter")
-		if !strings.Contains(h.card(), c.want) {
-			t.Errorf("answered %v, the card does not say %q:\n%s", c.answer, c.want, strings.Join(h.lines(), "\n"))
+		p.opened(at("s:public"))
+		p.useNode(at("s:public", "t:users"))
+		if !strings.Contains(said(p), c.want) {
+			t.Errorf("answered %v, the panel does not say %q: %s", c.answer, c.want, said(p))
 		}
 	}
 }
@@ -270,7 +190,7 @@ func TestABufferNameIsOneAutoDocTakes(t *testing.T) {
 		{`c:\`, "..", "c:.sql"},
 		{"..", "..", "query.sql"},
 	} {
-		got := bufferName(autodbTable(c.schema, c.table))
+		got := bufferName(autodb.Table{Schema: c.schema, Name: c.table})
 		if got != c.want || strings.ContainsAny(got, `/\`) || strings.Contains(got, "..") {
 			t.Errorf("schema %q table %q is named %q, want %q", c.schema, c.table, got, c.want)
 		}
@@ -292,49 +212,9 @@ func TestAScaffoldPastTheCapIsSelectStar(t *testing.T) {
 		t.Fatalf("the cell's columns come to %d bytes, not past the %d cap", n, maxBufferText)
 	}
 	p, h := connected(t, db)
-	press(p, "l", "j", "j", "j", "j", "Enter")
+	p.opened(at("s:public"))
+	p.useNode(at("s:public", "t:wide"))
 	if len(h.calls) != 1 || h.calls[0].args[0] != "public.wide.sql" || h.calls[0].args[1] != "SELECT *\nFROM \"public\".\"wide\"\nLIMIT 100;\n" {
 		t.Fatalf("Enter on wide sent %d calls, the first %.80q", len(h.calls), h.calls)
 	}
 }
-
-// A schema of thousands of tables scrolls: the bar stays in view, the view moves only as far as
-// it must, the connection and the heading stay, and only the rows in view are made.
-func TestTheTreeScrollsWithTheSelection(t *testing.T) {
-	db := treeDB(t)
-	var many []map[string]any
-	for i := range 5000 {
-		name := fmt.Sprintf("t%04d", i)
-		many = append(many, map[string]any{"schema": "public", "name": name, "kind": "table", "quoted": `"public"."` + name + `"`})
-	}
-	db.tables["public"] = many
-	p, h := connected(t, db)
-	p.Resize(32, 12)
-	press(p, "l")
-	for range 100 {
-		press(p, "j")
-	}
-	lines := h.lines()
-	if got := chosenRow(h, p); got != "> ▸ t0099 (table)" {
-		t.Fatalf("after 100 j the bar is on %q:\n%s", got, strings.Join(lines, "\n"))
-	}
-	if lines[0] != "Connection: scratch (postgres)" || lines[1] != "Ready" {
-		t.Fatalf("scrolled, the card lost its fixed rows:\n%s", strings.Join(lines, "\n"))
-	}
-	press(p, "k")
-	lines = h.lines()
-	if chosenRow(h, p) != "> ▸ t0098 (table)" || rowOf(lines, 0, is("▸ t0099 (table)")) < 0 {
-		t.Fatalf("k jumped the view instead of moving the bar within it:\n%s", strings.Join(lines, "\n"))
-	}
-	p.Key(plugin.Key{Key: "d", Ctrl: true})
-	if got := chosenRow(h, p); got != fmt.Sprintf("> ▸ t%04d (table)", 98+max(12/2, 1)) {
-		t.Fatalf("Ctrl+d moved the bar to %q", got)
-	}
-	press(p, "PageUp")
-	if got := chosenRow(h, p); got != "> ▸ t0098 (table)" {
-		t.Fatalf("PageUp moved the bar to %q", got)
-	}
-
-}
-
-func autodbTable(schema, name string) autodb.Table { return autodb.Table{Schema: schema, Name: name} }
