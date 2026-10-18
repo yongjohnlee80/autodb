@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodoc/plugin"
@@ -400,6 +401,37 @@ func TestACommandStopsWhenEndingTheLastTableLosesTheConnection(t *testing.T) {
 			}
 			if q := db.queries(); len(q) != 1 || len(db.took("exec.run_script")) != 0 {
 				t.Fatalf("a command ran after the connection was lost: queries %q, scripts %d", q, len(db.took("exec.run_script")))
+			}
+		})
+	}
+}
+
+// Close keeps to its budget whatever the plugin's goroutine is doing: busy on a call, with its
+// queue full behind it, Close still cancels it rather than waiting to queue its own step.
+func TestCloseKeepsItsBudgetBehindAFullQueue(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		name := "room"
+		if full {
+			name = "full"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := newPlugin("test", t.TempDir())
+			busy := make(chan struct{})
+			p.post(func() { close(busy); <-p.ctx.Done() }) // a call that ends only when cancelled
+			<-busy
+			if full {
+				for range cap(p.work) {
+					p.post(func() {})
+				}
+			}
+			done := make(chan struct{})
+			go func() { p.Close(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(3 * closeBudget):
+				p.cancel()
+				<-done
+				t.Fatal("Close waited past its budget to queue its step")
 			}
 		})
 	}

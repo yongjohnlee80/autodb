@@ -1,16 +1,20 @@
 package autodocplugin
 
 import (
+	"context"
 	"net"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/panel"
 	"github.com/yongjohnlee80/autodb/core/remoteclient"
 	"github.com/yongjohnlee80/autodb/internal/remotetest"
+	"github.com/yongjohnlee80/autodb/tui/remotedial"
+	"github.com/yongjohnlee80/autodoc/plugin"
 )
 
 // remoteSetup is a plugin signed in to a local fake (store-a), with AutoDB's remote fixture added
@@ -126,5 +130,29 @@ func TestAnAnswerForTheOldServerIsDropped(t *testing.T) {
 	p.events().Confirmed()
 	if len(db.took("conn.delete")) != 0 || !strings.Contains(p.problem, "changed since") {
 		t.Fatalf("conn.delete took %+v (%s)", db.took("conn.delete"), said(p))
+	}
+}
+
+// Turned off (or updated) while connected to a remote server, the plugin keeps that server's
+// sign-in: its token is not logged out, so the next start resumes it on a new connection.
+func TestTurningOffKeepsTheRemoteSignIn(t *testing.T) {
+	p, h, _ := remoteNotes(t)
+	pr := p.remote.on.prof
+	device, token := p.remote.keys[pr.ID], p.token
+	d, err := p.dialer(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.reason = plugin.CloseOff
+	p.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := d.Dial(ctx, remotedial.Unlock{Key: device})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Resume(ctx, token); err != nil {
+		t.Fatalf("after Turn off the remote sign-in does not resume: %v", err)
 	}
 }

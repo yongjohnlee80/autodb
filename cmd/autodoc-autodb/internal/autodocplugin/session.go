@@ -167,7 +167,7 @@ func (p *Plugin) logoutOnClose() bool {
 	}
 	switch s.CloseReason() {
 	case plugin.CloseOff, plugin.CloseUpdate:
-		_, kept := p.creds[localTarget(p.cli)]
+		_, kept := p.creds[p.targetKey()] // the target connected: a remote server's record too
 		return !kept
 	}
 	return true

@@ -366,13 +366,26 @@ func (p *Plugin) Close() { p.closeOnce.Do(p.close) }
 
 func (p *Plugin) close() {
 	ended := make(chan struct{})
-	p.post(func() {
+	step := func() {
 		defer close(ended)
 		p.letGo(p.logoutOnClose())
-	})
-	select {
-	case <-ended:
-	case <-time.After(closeBudget):
+	}
+	// One budget for queueing the step and running it: a busy goroutine behind a full queue must
+	// not hold Close past it, since only the cancel below can end what it waits on.
+	budget := time.NewTimer(closeBudget)
+	defer budget.Stop()
+	if p.inline {
+		step()
+	} else {
+		select {
+		case p.work <- step:
+			select {
+			case <-ended:
+			case <-budget.C:
+			}
+		case <-budget.C:
+		case <-p.ctx.Done():
+		}
 	}
 	p.ui.Card().Close()
 	p.cancel()

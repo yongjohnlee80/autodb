@@ -196,3 +196,33 @@ func TestAnUnwrittenSidecarIsRetriedAndAStaleOneSaysTheCopiesAreEqual(t *testing
 		t.Fatalf("the server holding the same text: %s", said(p))
 	}
 }
+
+// A working copy replaced by a link, even with its own sidecar beside it, is neither saved nor
+// opened: AutoDoc's save would write the link's target, outside the cache.
+func TestAWorkingCopyLinkedOutOfTheCacheIsRefused(t *testing.T) {
+	p, h, s := remoteNotes(t)
+	path := newRemoteNote(t, p, h)
+	before, ver := serverNote(t, p, s.Workspace)
+	outside := filepath.Join(t.TempDir(), "outside.sql")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatal(err)
+	}
+	calls := len(h.calls)
+	save(p, path, "select 9", 2)
+	if body, after := serverNote(t, p, s.Workspace); after != ver || body != before || !strings.Contains(p.problem, "not a plain file") {
+		t.Fatalf("a linked copy was saved: the version moved %v, the note %q (%s)", after != ver, body, said(p))
+	}
+	p.openRemoteNote(s.Workspace, "q.sql")
+	if len(h.calls) != calls || !strings.Contains(p.problem, "not a plain file") {
+		t.Fatalf("a linked copy was opened: %+v (%s)", h.calls[calls:], said(p))
+	}
+	if b, _ := os.ReadFile(outside); string(b) != "outside" {
+		t.Fatalf("the link's target was written: %q", b)
+	}
+}

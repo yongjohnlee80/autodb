@@ -184,6 +184,11 @@ func (p *Plugin) openRemoteNote(ws int64, name string) {
 		return
 	}
 	fresh := sidecar{V: sidecarV, Target: target, Subject: p.who.Name, WS: ws, Name: name, Base: ver, BaseHash: textHash(body)}
+	if why := cachePlace(root, path); why != "" {
+		p.problem = "opening " + name + ": " + why
+		p.draw()
+		return
+	}
 	working, rerr := os.ReadFile(path)
 	sc, serr := p.sidecarOf(path)
 	switch {
@@ -230,6 +235,47 @@ func (p *Plugin) openRemoteNote(ws int64, name string) {
 		return
 	}
 	p.callOpen(path, name)
+}
+
+// plainFile says why rel, under r, is not a plain file of the cache ("" when it is): a link, even
+// to a file inside, is refused, so the note's bytes are never written anywhere but the cache.
+func plainFile(r *os.Root, rel string) string {
+	fi, err := r.Lstat(rel)
+	switch {
+	case err != nil:
+		return "its working copy cannot be read (" + err.Error() + ")"
+	case !fi.Mode().IsRegular():
+		return "its working copy is not a plain file of the cache (a link, or not a file)"
+	}
+	return ""
+}
+
+// cachePlace says why path may not be a working copy under root ("" when it may): none yet, in
+// the cache's own directories, or a plain file there.
+func cachePlace(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "its working copy would be outside the cache"
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return err.Error()
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return err.Error()
+	}
+	defer r.Close()
+	if _, err := r.Lstat(rel); errors.Is(err, fs.ErrNotExist) {
+		fi, derr := r.Lstat(filepath.Dir(rel))
+		switch {
+		case errors.Is(derr, fs.ErrNotExist): // the write makes it, under the root
+			return ""
+		case derr == nil && fi.IsDir():
+			return ""
+		}
+		return "its working copy's directory is not one of the cache's own"
+	}
+	return plainFile(r, rel)
 }
 
 // conflict writes the server's text beside the working copy, read-only, and records its version.
@@ -337,12 +383,16 @@ func (p *Plugin) boundNote(d plugin.Document) (sidecar, string, string) {
 	if d.Path == "" || !filepath.IsAbs(d.Path) || err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 		return sidecar{}, "", "this buffer is not a remote note's working copy"
 	}
-	// os.Root confines the sidecar's read: a link out of the cache is refused
+	// os.Root confines the reads: a link out of the cache is refused, and the working copy must be
+	// a plain file of the cache, not a link to one elsewhere that AutoDoc's save would write
 	r, err := os.OpenRoot(root)
 	if err != nil {
 		return sidecar{}, "", err.Error()
 	}
 	defer r.Close()
+	if why := plainFile(r, rel); why != "" {
+		return sidecar{}, "", why
+	}
 	b, err := r.ReadFile(rel + ".autodb")
 	var sc sidecar
 	if err == nil {
