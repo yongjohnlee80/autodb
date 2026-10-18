@@ -131,7 +131,11 @@ func writeFile(path string, b []byte, mode os.FileMode) error {
 // open of path.
 func (p *Plugin) writeSidecar(path string, sc sidecar) error {
 	b, _ := json.Marshal(sc)
-	if err := writeFile(sidecarPath(path), b, 0o600); err != nil {
+	write := writeFile
+	if p.sidecarWrite != nil {
+		write = p.sidecarWrite
+	}
+	if err := write(sidecarPath(path), b, 0o600); err != nil {
 		if p.pendingSidecars == nil {
 			p.pendingSidecars = map[string]sidecar{}
 		}

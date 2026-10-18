@@ -3,6 +3,7 @@ package autodocplugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,5 +167,34 @@ func TestReopeningNeverLosesAnEdit(t *testing.T) {
 	sb, _ := os.ReadFile(serverPath(path))
 	if len(*opened) != 0 || string(b) != "my edit" || string(sb) != "server again" {
 		t.Fatalf("an edited copy: dialogs %q, the copy %q, the server's beside it %q", *opened, b, sb)
+	}
+}
+
+// A sidecar that cannot be written after a save is kept in memory and used: the next save in the
+// run expects the version the server gave, with no conflict, and writes it once it can. After a
+// restart (the sidecar stale), the server holding the same text says the copies are equal (ADR
+// result 10b).
+func TestAnUnwrittenSidecarIsRetriedAndAStaleOneSaysTheCopiesAreEqual(t *testing.T) {
+	p, h, s := remoteNotes(t)
+	path := newRemoteNote(t, p, h)
+	stale, _ := p.sidecarOf(path)
+	p.sidecarWrite = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	save(p, path, "select 1", 2)
+	if _, ok := p.pendingSidecars[path]; !ok || !strings.Contains(p.problem, "retried") {
+		t.Fatalf("a sidecar that could not be written: pending %v (%s)", p.pendingSidecars, said(p))
+	}
+	p.sidecarWrite = nil
+	save(p, path, "select 2", 3)
+	if body, _ := serverNote(t, p, s.Workspace); body != "select 2" || len(p.pendingSidecars) != 0 {
+		t.Fatalf("the retry: the server has %q, pending %v (%s)", body, p.pendingSidecars, said(p))
+	}
+
+	b, _ := json.Marshal(stale) // a restart before the sidecar was written: its Base is old
+	if err := os.WriteFile(sidecarPath(path), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	save(p, path, "select 2", 4)
+	if !strings.Contains(p.problem, "equals yours") {
+		t.Fatalf("the server holding the same text: %s", said(p))
 	}
 }

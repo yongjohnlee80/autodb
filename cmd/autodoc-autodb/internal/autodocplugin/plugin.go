@@ -152,6 +152,8 @@ type Plugin struct {
 	// are sidecars a write failed for, retried at the next save or open of their note
 	cacheDir        string
 	pendingSidecars map[string]sidecar
+	// sidecarWrite writes a sidecar; writeFile when nil (a test's, failing)
+	sidecarWrite func(path string, b []byte, mode os.FileMode) error
 	// goTab is the panel to be shown p.tab at the next draw
 	goTab            bool
 	offeredWorkspace bool // the first workspace has been offered, once a run
