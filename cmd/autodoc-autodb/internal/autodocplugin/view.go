@@ -78,6 +78,8 @@ func (p *Plugin) stepText() string {
 		return "Sign in to AutoDB"
 	case stepFailed:
 		return "AutoDB could not be reached: Menu › Retry"
+	case stepMismatch:
+		return p.mismatchText()
 	}
 	return ""
 }
@@ -90,13 +92,15 @@ func (p *Plugin) menu() []panel.MenuRow {
 		return p.connectionRows()
 	case panel.TabNotes:
 		return p.noteRows()
+	case panel.TabSystem:
+		return p.systemRows()
 	}
 	return []panel.MenuRow{{ID: "conn.refresh", Label: "&Refresh", Enabled: signedIn}}
 }
 
 // menuRow is a row of the ☰ menu chosen.
 func (p *Plugin) menuRow(id string) {
-	if p.connectionRow(id) || p.noteRow(id) {
+	if p.connectionRow(id) || p.noteRow(id) || p.systemRow(id) {
 		return
 	}
 	switch id {
@@ -130,6 +134,10 @@ func (p *Plugin) draw() {
 	if p.status == "" && p.problem == "" {
 		sources["status"] = p.stepText()
 	}
+	if p.goTab {
+		p.goTab = false
+		sources["tabIndex"] = p.tab
+	}
 	var open string
 	if p.step != p.shown {
 		p.shown = p.step
@@ -161,18 +169,6 @@ func (p *Plugin) draw() {
 			v.Open(open)
 		}
 	})
-}
-
-// systemText is the SYSTEM tab: the server and this plugin.
-func (p *Plugin) systemText() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "plugin  %s\n", p.version)
-	if p.cli == nil {
-		b.WriteString("server  not reached")
-		return b.String()
-	}
-	fmt.Fprintf(&b, "server  %s at %s\nstore   %s", p.cli.Hello.Version, p.cli.Addr, p.cli.Hello.StoreID)
-	return b.String()
 }
 
 // closeCard asks AutoDoc to close the card.

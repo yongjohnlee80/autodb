@@ -56,6 +56,7 @@ const (
 	stepPick                 // signed in: a connection is chosen in the tree
 	stepReady                // connected: the commands run
 	stepFailed               // the server could not be reached; Retry tries again
+	stepMismatch             // the server speaks another protocol: SYSTEM says which way, and repairs it
 )
 
 // The deadlines of AutoDB calls that are not statements.
@@ -82,6 +83,8 @@ type Plugin struct {
 	find    func(ctx context.Context) (autodb.Binary, []autodb.Tried, error)
 	start   func(ctx context.Context, bin autodb.Binary) (*autodb.Client, error)
 	install func(ctx context.Context) error
+	// lifecycle dials a mismatched server at its own protocol; autodb.DialLifecycle when nil
+	lifecycle func(ctx context.Context, network, addr string, protocol int) (*autodb.Lifecycle, error)
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -129,8 +132,15 @@ type Plugin struct {
 	notesSent func(names []string)
 	addTo     int64 // the workspace the Add connection dialog was opened for
 	// onName and onConfirm are what the name dialog's OK and the confirm dialog's Yes do
-	onName           func(name string)
-	onConfirm        func()
+	onName    func(name string)
+	onConfirm func()
+	// onSignIn takes the sign-in dialog's answer instead of the working connection's login: the
+	// lifecycle connection's (an upgrade)
+	onSignIn func(name, pass string)
+	// mis is the server of another protocol found, nil when none
+	mis *mismatch
+	// goTab is the panel to be shown p.tab at the next draw
+	goTab            bool
 	offeredWorkspace bool // the first workspace has been offered, once a run
 	// dialogOpened is told each dialog the plugin opens: a test's recorder
 	dialogOpened func(id string)
@@ -166,6 +176,9 @@ func New(version string) *Plugin {
 	p := newPlugin(version, dir)
 	p.logins = loginsPath(os.Getenv)
 	env := autodb.Env{Getenv: os.Getenv, PluginDir: dir}
+	if autodb.IsRelease(version) {
+		env.Want = version // an upgrade's install outranks an older AutoDB on PATH
+	}
 	p.find = func(ctx context.Context) (autodb.Binary, []autodb.Tried, error) { return autodb.Find(ctx, env) }
 	p.start = func(ctx context.Context, bin autodb.Binary) (*autodb.Client, error) {
 		return autodb.Starter{Bin: bin.Path, ClientVersion: version}.Start(ctx)
@@ -226,14 +239,33 @@ func (p *Plugin) settle() {
 // events are the panel's: each posts its step to the plugin's goroutine.
 func (p *Plugin) events() panel.Events {
 	return panel.Events{
-		SignIn:          func(name, pass string) { p.post(func() { p.login(name, pass) }) },
-		SignInCancelled: func() { p.post(func() { p.problem = "not signed in: Menu › Sign in"; p.draw() }) },
-		Install:         func() { p.post(p.doInstall) },
-		Tab:             func(i int) { p.post(func() { p.tab = i; p.draw() }) },
-		Menu:            func(id string) { p.post(func() { p.menuRow(id) }) },
-		Opened:          func(keys []string) { p.post(func() { p.opened(keys) }) },
-		Use:             func(keys []string) { p.post(func() { p.useNode(keys) }) },
-		Current:         func(keys []string) { p.post(func() { p.sel = keys; p.draw() }) },
+		SignIn: func(name, pass string) {
+			p.post(func() {
+				if then := p.onSignIn; then != nil {
+					p.onSignIn = nil
+					then(name, pass)
+					return
+				}
+				p.login(name, pass)
+			})
+		},
+		SignInCancelled: func() {
+			p.post(func() {
+				if p.onSignIn != nil {
+					p.onSignIn = nil
+					p.problem = "the upgrade was not made: no sign-in"
+				} else {
+					p.problem = "not signed in: Menu › Sign in"
+				}
+				p.draw()
+			})
+		},
+		Install: func() { p.post(p.doInstall) },
+		Tab:     func(i int) { p.post(func() { p.tab = i; p.draw() }) },
+		Menu:    func(id string) { p.post(func() { p.menuRow(id) }) },
+		Opened:  func(keys []string) { p.post(func() { p.opened(keys) }) },
+		Use:     func(keys []string) { p.post(func() { p.useNode(keys) }) },
+		Current: func(keys []string) { p.post(func() { p.sel = keys; p.draw() }) },
 		Bootstrap: func(name, pass, again string) {
 			p.post(func() { p.bootstrap(name, pass, again) })
 		},
@@ -343,12 +375,17 @@ func (p *Plugin) connect() {
 	p.step, p.status = stepStarting, ""
 	p.draw()
 	cli, err := p.start(p.ctx, p.bin)
+	var me *autodb.MismatchError
+	if errors.As(err, &me) {
+		p.mismatched(me)
+		return
+	}
 	if err != nil {
 		p.step, p.problem = stepFailed, err.Error()
 		p.draw()
 		return
 	}
-	p.cli = cli
+	p.cli, p.mis = cli, nil
 	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
 	defer cancel()
 	p.noUsers, _ = cli.NeedsBootstrap(ctx)

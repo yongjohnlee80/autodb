@@ -43,6 +43,19 @@ type fakeDB struct {
 	// notes answer notes.list; notesDir is the hello's notes_dir
 	notes    []string
 	notesDir string
+	// protocol is the hello's, autodb.Protocol when 0; a client's hello of another is refused.
+	// nextProtocol is the protocol after a restart, the same when 0.
+	protocol, nextProtocol int64
+	// restart answers sys.restart_if_idle: "" stops (and restarts the fake), "busy", "denied",
+	// "unknown" (a release before the verb); restarts counts the restarts
+	restart  string
+	restarts int
+	// installs counts the plugin's installs (testPlugin's)
+	installs int
+	// the server: its verbs, its stop, and up, closed while it listens
+	handlers map[string]golibrpc.Handler
+	stop     func()
+	up       chan struct{}
 	// noWorkspaces answers workspace.list with none
 	noWorkspaces bool
 	// locked is a store restarted with no service keyslot: whoami says store_unlocked false;
@@ -66,17 +79,29 @@ func newFakeDB(t *testing.T) *fakeDB {
 		t.Fatal(err)
 	}
 	f.addr = ln.Addr().String()
-	srv := golibrpc.New(msgpackrpc.New(nil), golibrpc.WithListener(ln))
+	f.handlers = map[string]golibrpc.Handler{}
+	f.up = make(chan struct{})
+	close(f.up)
 	handle := func(method string, h func(p []any) (any, error)) {
-		srv.Handle(method, func(_ context.Context, req *golibrpc.Request) (any, error) {
+		f.handlers[method] = (func(_ context.Context, req *golibrpc.Request) (any, error) {
 			f.mu.Lock()
 			f.calls = append(f.calls, call{method, req.Params})
 			f.mu.Unlock()
 			return h(req.Params)
 		})
 	}
-	handle("sys.hello", func([]any) (any, error) {
-		m := map[string]any{"protocol": autodb.Protocol, "server": "autodb", "version": "v-fake", "instance": "i1"}
+	handle("sys.hello", func(p []any) (any, error) {
+		f.mu.Lock()
+		proto := f.protocol
+		f.mu.Unlock()
+		if proto == 0 {
+			proto = autodb.Protocol
+		}
+		if info, _ := p[0].(map[string]any); info["protocol"] != nil && toInt(info["protocol"]) != proto {
+			return nil, &golibrpc.Error{Code: autodb.CodeProtocolMismatch,
+				Message: fmt.Sprintf("protocol mismatch: the server speaks protocol %d", proto)}
+		}
+		m := map[string]any{"protocol": proto, "server": "autodb", "version": "v-fake", "instance": "i1"}
 		f.mu.Lock()
 		if f.notesDir != "" {
 			m["notes_dir"] = f.notesDir
@@ -118,6 +143,21 @@ func newFakeDB(t *testing.T) *fakeDB {
 		return map[string]any{"version": "v0"}, nil
 	})
 	handle("notes.delete", ok)
+	handle("sys.restart_if_idle", func([]any) (any, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch f.restart {
+		case "busy":
+			return map[string]any{"stopping": false, "busy": map[string]any{"executing": int64(1), "in_transaction": int64(2)}}, nil
+		case "denied":
+			return nil, &golibrpc.Error{Code: autodb.CodeDenied, Message: "denied: admin only"}
+		case "unknown":
+			return nil, &golibrpc.Error{Code: golibrpc.CodeMethodNotFound, Message: "unknown method: sys.restart_if_idle"}
+		}
+		f.up = make(chan struct{})
+		go f.bounce()
+		return map[string]any{"stopping": true}, nil
+	})
 	handle("workspace.create", func([]any) (any, error) { return int64(2), nil })
 	handle("conn.create", func([]any) (any, error) { return int64(8), nil })
 	handle("conn.delete", func([]any) (any, error) { return map[string]any{"archived": false}, nil })
@@ -225,11 +265,80 @@ func newFakeDB(t *testing.T) *fakeDB {
 		}
 		return map[string]any{"statements": int64(2), "result": res}, nil
 	})
+	f.serve(ln)
+	t.Cleanup(func() {
+		<-f.listening()
+		f.mu.Lock()
+		stop := f.stop
+		f.mu.Unlock()
+		stop()
+	})
+	return f
+}
+
+// serve runs a server of the fake's verbs on ln.
+func (f *fakeDB) serve(ln net.Listener) {
+	srv := golibrpc.New(msgpackrpc.New(nil), golibrpc.WithListener(ln))
+	for m, h := range f.handlers {
+		srv.Handle(m, h)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); _ = srv.Run(ctx) }()
-	t.Cleanup(func() { cancel(); <-done })
-	return f
+	f.mu.Lock()
+	f.stop = func() { cancel(); <-done }
+	f.mu.Unlock()
+}
+
+// bounce is the server restarting (sys.restart_if_idle stopping): its connections end, it listens
+// again at its address, at nextProtocol when one is set, and f.up is closed.
+func (f *fakeDB) bounce() {
+	f.mu.Lock()
+	stop, up := f.stop, f.up
+	f.restarts++
+	if f.nextProtocol != 0 {
+		f.protocol = f.nextProtocol
+	}
+	f.mu.Unlock()
+	stop()
+	ln, err := net.Listen("tcp", f.addr)
+	if err != nil {
+		panic("the fake AutoDB could not listen again: " + err.Error())
+	}
+	f.serve(ln)
+	close(up)
+}
+
+// listening is closed once the server listens: at once, or after a restart under way.
+func (f *fakeDB) listening() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.up
+}
+
+// toInt reads a wire integer.
+func toInt(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case uint64:
+		return int64(n)
+	case int8:
+		return int64(n)
+	case uint8:
+		return int64(n)
+	case int16:
+		return int64(n)
+	case uint16:
+		return int64(n)
+	case int32:
+		return int64(n)
+	case uint32:
+		return int64(n)
+	}
+	return -1
 }
 
 func (f *fakeDB) engineName() string {
@@ -457,8 +566,10 @@ func testPlugin(t *testing.T, db *fakeDB) (*Plugin, *fakeHost) {
 		return autodb.Binary{Path: "autodb", Version: "v-fake", Via: "test"}, nil, nil
 	}
 	p.start = func(ctx context.Context, _ autodb.Binary) (*autodb.Client, error) {
+		<-db.listening() // a restart under way: the server listens again
 		return autodb.Dial(ctx, "tcp", db.addr, "test")
 	}
+	p.install = func(context.Context) error { db.mu.Lock(); db.installs++; db.mu.Unlock(); return nil }
 	return p, &fakeHost{}
 }
 

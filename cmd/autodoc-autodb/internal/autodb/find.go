@@ -40,6 +40,9 @@ type Env struct {
 	Getenv func(string) string
 	// PluginDir is the plugin's own directory; its bin/autodb is the last place tried.
 	PluginDir string
+	// Want is the release the plugin matches, "" for none: a candidate of that version is taken
+	// over an earlier one of another (an upgrade's install outranks an older AutoDB on PATH).
+	Want string
 }
 
 // Candidates are the places AutoDB is looked for, in order: PATH, Neovim's managed cache
@@ -97,10 +100,14 @@ var ErrNotFound = errors.New("AutoDB was not found")
 // process that never exits announces nothing to wait on.
 const versionTimeout = 5 * time.Second
 
-// Find is the first candidate that answers --version as AutoDB does. When none does, it returns
-// ErrNotFound with every place it tried and why each was passed over.
+// Find is the first candidate that answers --version as AutoDB does, or the first of env.Want's
+// version when one is. When none answers, it returns ErrNotFound with every place it tried and why
+// each was passed over.
 func Find(ctx context.Context, env Env) (Binary, []Tried, error) {
-	var tried []Tried
+	var (
+		tried []Tried
+		first *Binary
+	)
 	for _, c := range Candidates(env) {
 		if c.Path == "" {
 			tried = append(tried, Tried{c, "not on PATH"})
@@ -111,7 +118,17 @@ func Find(ctx context.Context, env Env) (Binary, []Tried, error) {
 			tried = append(tried, Tried{c, err.Error()})
 			continue
 		}
-		return Binary{Path: c.Path, Version: v, Via: c.Via}, tried, nil
+		b := Binary{Path: c.Path, Version: v, Via: c.Via}
+		if env.Want == "" || v == env.Want {
+			return b, tried, nil
+		}
+		if first == nil {
+			first = &b
+		}
+		tried = append(tried, Tried{c, v + ", not " + env.Want})
+	}
+	if first != nil {
+		return *first, tried, nil
 	}
 	return Binary{}, tried, ErrNotFound
 }

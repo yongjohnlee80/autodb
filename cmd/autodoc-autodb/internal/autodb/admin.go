@@ -20,17 +20,7 @@ type Who struct {
 
 // Whoami is who the token signs in as, and whether the store is unlocked.
 func (c *Client) Whoami(ctx context.Context, token string) (Who, error) {
-	res, err := c.call(ctx, "auth.whoami", token)
-	if err != nil {
-		return Who{}, err
-	}
-	m, _ := res.(map[string]any)
-	w := Who{}
-	w.ID, _ = intOf(m["id"])
-	w.Name, _ = m["name"].(string)
-	w.Role, _ = m["role"].(string)
-	w.StoreUnlocked, w.Known = m["store_unlocked"].(bool)
-	return w, nil
+	return whoami(ctx, c.call, token)
 }
 
 // Bootstrap makes the store's first user, an administrator, and returns its session's token.

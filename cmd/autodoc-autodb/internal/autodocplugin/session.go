@@ -74,10 +74,18 @@ func (c creds) slot() map[string]string {
 
 // localTarget is the local server's key: its store, which a restart keeps.
 func localTarget(cli *autodb.Client) string {
-	if cli == nil || cli.Hello.StoreID == "" {
+	if cli == nil {
 		return ""
 	}
-	return "t:local:" + cli.Hello.StoreID
+	return localTargetOf(cli.Hello.StoreID)
+}
+
+// localTargetOf is the local target of the store storeID, "" for a server that names none.
+func localTargetOf(storeID string) string {
+	if storeID == "" {
+		return ""
+	}
+	return "t:local:" + storeID
 }
 
 // saveCreds sends the records to AutoDoc's slot. A host before protocol 7 keeps none: the sign-in

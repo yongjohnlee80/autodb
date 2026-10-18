@@ -85,6 +85,33 @@ func TestFindTakesTheFirstPlaceThatAnswers(t *testing.T) {
 	}
 }
 
+// With the plugin's release wanted, a candidate of that version is taken over an earlier one of
+// another (an upgrade installs into the plugin's bin/, last in order); with none of it, the first
+// that answers, the others' versions said.
+func TestFindPrefersThePluginsRelease(t *testing.T) {
+	root := t.TempDir()
+	pathDir, pluginDir := filepath.Join(root, "path"), filepath.Join(root, "plugin")
+	onPath, own := filepath.Join(pathDir, "autodb"), filepath.Join(pluginDir, "bin", "autodb")
+	fakeAutodb(t, onPath, "v1.0.0")
+	fakeAutodb(t, own, "v1.1.0")
+	env := Env{PluginDir: pluginDir, Want: "v1.1.0", Getenv: func(k string) string {
+		return map[string]string{"PATH": pathDir, "HOME": root, "XDG_DATA_HOME": filepath.Join(root, "none")}[k]
+	}}
+	b, tried, err := Find(context.Background(), env)
+	if err != nil || b.Path != own {
+		t.Fatalf("found %+v (%v), want the plugin's v1.1.0", b, err)
+	}
+	if len(tried) < 1 || tried[0].Path != onPath || tried[0].Why != "v1.0.0, not v1.1.0" {
+		t.Fatalf("the older one on PATH is not said: %+v", tried)
+	}
+	if err := os.Remove(own); err != nil {
+		t.Fatal(err)
+	}
+	if b, _, err := Find(context.Background(), env); err != nil || b.Path != onPath {
+		t.Fatalf("with no v1.1.0: found %+v (%v), want PATH's", b, err)
+	}
+}
+
 // The plugin's protocol and the codes it acts on are AutoDB's own numbers.
 func TestTheProtocolAndCodesAreAutoDBs(t *testing.T) {
 	for _, c := range []struct {
@@ -96,6 +123,7 @@ func TestTheProtocolAndCodesAreAutoDBs(t *testing.T) {
 		{"CodeAuth", CodeAuth, rpc.CodeAuth},
 		{"CodeSessionNotFound", CodeSessionNotFound, rpc.CodeSessionNotFound},
 		{"CodeTxState", CodeTxState, rpc.CodeTxState},
+		{"CodeDenied", CodeDenied, rpc.CodeDenied},
 	} {
 		if c.mine != c.real {
 			t.Errorf("%s is %d here and %d in AutoDB", c.name, c.mine, c.real)

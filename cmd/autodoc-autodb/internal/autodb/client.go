@@ -92,17 +92,22 @@ func Dial(ctx context.Context, network, addr, clientVersion string) (*Client, er
 	if err != nil {
 		_ = c.Close()
 		if IsCode(err, CodeProtocolMismatch) {
-			return nil, &MismatchError{Addr: addr, Message: Message(err)}
+			return nil, &MismatchError{Network: network, Addr: addr, Message: Message(err)}
 		}
 		return nil, fmt.Errorf("hello: %w", err)
 	}
 	m, _ := res.(map[string]any)
+	return &Client{rpc: c, Hello: helloOf(m), Addr: addr}, nil
+}
+
+// helloOf reads a sys.hello answer.
+func helloOf(m map[string]any) Hello {
 	h := Hello{}
 	h.Version, _ = m["version"].(string)
 	h.Instance, _ = m["instance"].(string)
 	h.StoreID, _ = m["store_id"].(string)
 	h.NotesDir, _ = m["notes_dir"].(string)
-	return &Client{rpc: c, Hello: h, Addr: addr}, nil
+	return h
 }
 
 // DialError is nothing answering at the address: no server is listening there.
@@ -115,8 +120,8 @@ func (e *DialError) Error() string { return fmt.Sprintf("nothing answers at %s: 
 
 func (e *DialError) Unwrap() error { return e.Err }
 
-// MismatchError is a server that speaks another protocol.
-type MismatchError struct{ Addr, Message string }
+// MismatchError is a server that speaks another protocol, at network/addr.
+type MismatchError struct{ Network, Addr, Message string }
 
 func (e *MismatchError) Error() string {
 	return fmt.Sprintf("the AutoDB at %s %s; this plugin speaks protocol %d: install the AutoDB release that matches it",
@@ -145,16 +150,7 @@ func (c *Client) NeedsBootstrap(ctx context.Context) (bool, error) {
 
 // Login signs in and returns the session's token.
 func (c *Client) Login(ctx context.Context, name, passphrase string) (token string, err error) {
-	res, err := c.call(ctx, "auth.login", name, passphrase)
-	if err != nil {
-		return "", err
-	}
-	m, _ := res.(map[string]any)
-	token, _ = m["token"].(string)
-	if token == "" {
-		return "", errors.New("auth.login answered without a token")
-	}
-	return token, nil
+	return login(ctx, c.call, name, passphrase)
 }
 
 // Logout ends the token's session.
