@@ -34,14 +34,14 @@ func restartWith(t *testing.T, db *fakeDB, slot map[string]string) (*Plugin, *fa
 func TestAKeptSignInResumes(t *testing.T) {
 	db := newFakeDB(t)
 	_, h := signedInOn(t, db)
-	logins := len(db.took("auth.login"))
+	logins, asked := len(db.took("auth.login")), len(db.took("auth.whoami"))
 	p, _ := restartWith(t, db, h.slot)
 	if p.step != stepPick || p.token != "tok-1" || len(db.took("auth.login")) != logins {
 		t.Fatalf("the restart: step %d, signed in %v, logins %d → %d (%s)", p.step, p.token != "", logins,
 			len(db.took("auth.login")), said(p))
 	}
-	if w := db.took("auth.whoami"); len(w) != 1 {
-		t.Fatalf("auth.whoami was asked %d times, want once", len(w))
+	if w := len(db.took("auth.whoami")) - asked; w != 1 {
+		t.Fatalf("the restart asked auth.whoami %d times, want once", w)
 	}
 }
 
