@@ -15,6 +15,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,10 +205,13 @@ func (m *fakeMySQL) seen() (clients, queries []string) {
 	return append([]string(nil), m.clients...), append([]string(nil), m.queries...)
 }
 
+// mysqlDSN is a DSN to addr with params, each "key=value" with its value escaped as the driver's
+// parser wants (a path's slashes): what the panel's TLS fields write.
 func mysqlDSN(addr string, params ...string) string {
 	dsn := "u:p@tcp(" + addr + ")/app"
-	if len(params) > 0 {
-		dsn += "?" + strings.Join(params, "&")
+	for i, p := range params {
+		k, v, _ := strings.Cut(p, "=")
+		dsn += map[bool]string{true: "?", false: "&"}[i == 0] + k + "=" + url.QueryEscape(v)
 	}
 	return dsn
 }
