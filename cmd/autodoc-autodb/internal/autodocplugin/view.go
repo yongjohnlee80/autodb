@@ -152,8 +152,13 @@ func (p *Plugin) draw() {
 				p.prefill = p.resumeName
 			}
 			sources["signInName"] = p.prefill
-			// the dialog is modal and the panel behind it not drawn: why it opens again is said in it
-			sources["signInNote"] = p.stepText()
+			// the dialog is modal and the panel behind it not drawn: why it opens again is said in it.
+			// Its title already says "Sign in to AutoDB", so the note is only a reason: a refusal,
+			// or a store with no user yet.
+			sources["signInNote"] = ""
+			if p.noUsers {
+				sources["signInNote"] = p.stepText()
+			}
 			if p.problem != "" {
 				sources["signInNote"] = p.problem
 			}

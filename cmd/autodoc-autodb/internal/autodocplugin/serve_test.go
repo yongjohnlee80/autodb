@@ -125,6 +125,18 @@ func (l *linked) text() string {
 	return l.frame
 }
 
+// waitGone waits for the panel to stop drawing s.
+func (l *linked) waitGone(s string) {
+	l.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for strings.Contains(l.text(), s) {
+		if time.Now().After(deadline) {
+			l.t.Fatalf("the panel still shows %q:\n%s", s, l.text())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // shows waits for the panel to draw s.
 func (l *linked) shows(s string) {
 	l.t.Helper()
@@ -302,4 +314,46 @@ func TestCloseKeepsTheHostsGraceWithThePanelBlocked(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The Sign in dialog says "Sign in to AutoDB" once, on its title, and labels its two fields: the
+// labels stay once the name is filled in and the passphrase typed, where a placeholder would not.
+func TestTheSignInDialogLabelsItsFieldsAndSaysItsTitleOnce(t *testing.T) {
+	l := serveOn(t, newFakeDB(t))
+	l.shows("Sign in to AutoDB")
+	l.typed("admin")
+	l.key("Tab")
+	l.typed("right")
+	l.shows("username")
+	l.shows("passphrase")
+	if n := strings.Count(l.text(), "Sign in to AutoDB"); n != 1 {
+		t.Fatalf("the dialog says %q %d times, want once (its title):\n%s", "Sign in to AutoDB", n, l.text())
+	}
+}
+
+// Enter on the card's tree does what AutoDB's own explorer does: a workspace and a schema open and
+// close, a connection connects and opens; a table keeps Enter for its SELECT. The arrow keys move
+// and open as j, k, l and h do.
+func TestEnterOpensTheTreesFoldersAndTheArrowsMoveItOverTheRealLink(t *testing.T) {
+	db := treeDB(t)
+	l := serveOn(t, db)
+	l.shows("Sign in to AutoDB")
+	l.typed("admin")
+	l.key("Tab")
+	l.typed("right")
+	l.key("Enter")
+	l.shows("AutoDoc")
+	l.key("Enter") // the workspace opens
+	l.shows("scratch (postgres)")
+	l.key("Down")
+	l.key("Enter") // the connection connects and opens
+	l.shows("Connection: scratch (postgres)")
+	l.shows("audit")
+	l.key("Down") // public
+	l.key("Right")
+	l.shows("users")
+	l.key("Left") // closed again, as h closes it
+	l.waitGone("users")
+	l.key("Enter") // and Enter opens it
+	l.shows("users")
 }

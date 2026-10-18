@@ -181,7 +181,7 @@ func New(ev Events) *Panel {
 				call1(ev.Menu, id)
 				return nil
 			},
-			"App.use":     p.indexHandler(ev.Use),
+			"App.use":     p.useHandler(ev.Use),
 			"App.current": p.indexHandler(ev.Current),
 			"App.bootstrap": func(args []qml.SpecValue) error {
 				vals := strArgs(args, 3)
@@ -373,6 +373,30 @@ func (p *Panel) indexHandler(fn func([]string)) gdecl.HandlerFunc {
 		return nil
 	}
 }
+
+// useHandler is Enter on a tree row, as AutoDB's own explorer has it: the row is used (a
+// connection connects, a table scaffolds its SELECT), and a workspace, a connection or a schema
+// also opens or closes. A table does not: Enter is its SELECT, and l or Right opens it.
+func (p *Panel) useHandler(fn func([]string)) gdecl.HandlerFunc {
+	return func(args []qml.SpecValue) error {
+		if len(args) == 0 {
+			return fmt.Errorf("panel: an index wanted")
+		}
+		ix, ok := args[0].Obj.(tuidecl.Index)
+		if !ok {
+			return fmt.Errorf("panel: an index wanted, not %q", args[0].Raw)
+		}
+		keys := p.keysOf(ix)
+		call1(fn, keys)
+		if len(keys) <= levelSchema {
+			return p.card.Program().Call("tree", "toggleExpanded", ix)
+		}
+		return nil
+	}
+}
+
+// levelSchema is a schema row's depth: a workspace is 1, a connection 2, a schema 3, a table 4.
+const levelSchema = 3
 
 func (p *Panel) rowHandler(fn func(int)) gdecl.HandlerFunc {
 	return func(args []qml.SpecValue) error {
