@@ -35,6 +35,10 @@ title = "Run statement or selection"
 key   = "r"
 
 [[commands]]
+id    = "query"
+title = "Run a query (:autodb query <sql>)" # its arguments are the SQL, joined by spaces
+
+[[commands]]
 id    = "script"
 title = "Run whole script"
 key   = "s"                    # a command's key is one lower-case letter or digit

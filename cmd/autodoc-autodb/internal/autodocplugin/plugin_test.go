@@ -42,6 +42,21 @@ func TestRunSendsTheStatementAtTheCursor(t *testing.T) {
 	}
 }
 
+// :autodb query <sql> runs its arguments, joined, whatever the note holds; with none it says how.
+func TestQueryRunsItsArguments(t *testing.T) {
+	db := newFakeDB(t)
+	db.query = whole
+	p, _ := connected(t, db)
+	p.CommandArgs("query", []string{"select", "a,", "b", "from", "t"})
+	if got := db.queries(); len(got) != 1 || got[0] != "select a, b from t" {
+		t.Fatalf("query sent %q", got)
+	}
+	p.CommandArgs("query", nil)
+	if len(db.queries()) != 1 || !strings.Contains(p.problem, "no SQL") {
+		t.Fatalf("an empty query: sent %q, said %s", db.queries(), said(p))
+	}
+}
+
 // "run" sends the selection's bytes when there is a selection, whatever the cursor is on.
 func TestRunSendsTheSelection(t *testing.T) {
 	db := newFakeDB(t)

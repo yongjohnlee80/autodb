@@ -192,6 +192,15 @@ func TestThePanelSignsInConnectsAndRunsOverTheRealLink(t *testing.T) {
 	if q := db.queries(); len(q) != 1 || q[0] != "SELECT n FROM t" {
 		t.Fatalf("the command ran %q, want the statement of the note it carried", q)
 	}
+
+	// :autodb query select 1 — the command's arguments are the SQL (protocol 7)
+	l.send(plugin.MethodCommand, plugin.CommandArgsParams("query", []string{"select", "1"}))
+	if _, _, err := plugin.ReadTable(l.waitFor(plugin.MethodTable).params); err != nil {
+		t.Fatal(err)
+	}
+	if q := db.queries(); len(q) != 2 || q[1] != "select 1" {
+		t.Fatalf(":autodb query select 1 ran %q", q)
+	}
 }
 
 // A refused sign-in opens the dialog again, saying why; the ☰ menu's rows follow the state.

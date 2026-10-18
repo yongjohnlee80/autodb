@@ -1,0 +1,6 @@
+# The AutoDB plugin's Lua package for AutoDoc: AutoDoc loads lua/package.toml and lua/init.lua of an
+# installed plugin, under the plugin's name. (lua/autodb/ beside it is the Neovim plugin, which
+# AutoDoc does not read.)
+name = "autodb"
+version = "1.0.0"
+description = ":autodb runs the AutoDB plugin's commands"

@@ -565,12 +565,18 @@ func (p *Plugin) ready() bool {
 // ---------------------------------------------------------------- the commands
 
 // Command runs one of the manifest's commands, on the plugin's goroutine.
-func (p *Plugin) Command(id string) { p.post(func() { p.command(id) }) }
+func (p *Plugin) Command(id string) { p.post(func() { p.command(id, nil) }) }
 
-func (p *Plugin) command(id string) {
+// CommandArgs is a command with its arguments (protocol 7): :autodb query <sql>, from the plugin's
+// Lua package.
+func (p *Plugin) CommandArgs(id string, args []string) { p.post(func() { p.command(id, args) }) }
+
+func (p *Plugin) command(id string, args []string) {
 	switch id {
 	case "run":
 		p.run()
+	case "query":
+		p.runQuery(strings.TrimSpace(strings.Join(args, " ")))
 	case "script":
 		p.script()
 	case "connect":
@@ -612,6 +618,24 @@ func (p *Plugin) run() {
 		p.draw()
 		return
 	}
+	p.runSQL(sql)
+}
+
+// runQuery runs sql, the arguments of :autodb query, as run does the statement under the cursor.
+func (p *Plugin) runQuery(sql string) {
+	if sql == "" {
+		p.problem, p.status = "query: no SQL (:autodb query select 1)", ""
+		p.draw()
+		return
+	}
+	if !p.ready() {
+		return
+	}
+	p.runSQL(sql)
+}
+
+// runSQL runs one statement and shows its rows.
+func (p *Plugin) runSQL(sql string) {
 	p.endTable(nil)
 	if p.lostItsWay() {
 		return
