@@ -87,18 +87,16 @@ func (p *Plugin) menu() []panel.MenuRow {
 	signedIn := p.cli != nil && p.token != ""
 	switch p.tab {
 	case panel.TabConnections:
-		return []panel.MenuRow{
-			{ID: "conn.refresh", Label: "&Refresh", Enabled: signedIn},
-			{ID: "auth.signin", Label: "&Sign in…", Enabled: p.cli != nil && !signedIn},
-			{ID: "sys.retry", Label: "Re&try", Enabled: p.step == stepFailed},
-			{ID: "sys.install", Label: "&Install AutoDB…", Enabled: p.step == stepInstall && autodb.IsRelease(p.version)},
-		}
+		return p.connectionRows()
 	}
 	return []panel.MenuRow{{ID: "conn.refresh", Label: "&Refresh", Enabled: signedIn}}
 }
 
 // menuRow is a row of the ☰ menu chosen.
 func (p *Plugin) menuRow(id string) {
+	if p.connectionRow(id) {
+		return
+	}
 	switch id {
 	case "conn.refresh":
 		p.choose()

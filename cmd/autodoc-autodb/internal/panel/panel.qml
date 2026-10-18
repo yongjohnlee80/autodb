@@ -25,7 +25,8 @@ Window {
         TabView { id: tabs; currentIndex: App.tabIndex; onCurrentIndexChanged: App.tab(index)
             Tab { title: "CONNECTIONS"
                 TreeView { id: tree; focus: true; model: App.tree; textRole: "label"
-                    onActivated: App.use(index); onExpanded: App.opened(index) } }
+                    onActivated: App.use(index); onExpanded: App.opened(index)
+                    onCurrentIndexChanged: App.current(index) } }
             Tab { title: "NOTES"; Text { text: App.notes } }
             Tab { title: "REMOTE"; Text { text: App.remote } }
             Tab { title: "SYSTEM"; Text { text: App.system } } }
@@ -40,6 +41,39 @@ Window {
             Text { text: App.signInNote }
             TextField { id: signInName; placeholderText: "name"; text: App.signInName }
             TextField { id: signInPass; placeholderText: "passphrase"; echoMode: TextInput.Password } } }
+
+    Dialog { id: bootstrap; title: "Make the first AutoDB user"
+        standardButtons: Dialog.Ok | Dialog.Cancel; defaultButton: Dialog.Ok
+        onAccepted: App.bootstrap(bootName.text, bootPass.text, bootAgain.text)
+        Flex { direction: Tui.Vertical
+            Text { text: App.bootstrapNote }
+            TextField { id: bootName; placeholderText: "name"; text: "root" }
+            TextField { id: bootPass; placeholderText: "passphrase, 8 characters or more"; echoMode: TextInput.Password }
+            TextField { id: bootAgain; placeholderText: "the passphrase again"; echoMode: TextInput.Password } } }
+
+    Dialog { id: nameDialog; title: App.nameTitle
+        standardButtons: Dialog.Ok | Dialog.Cancel; defaultButton: Dialog.Ok
+        onAccepted: App.named(nameField.text)
+        Flex { direction: Tui.Vertical
+            Text { text: App.nameNote }
+            TextField { id: nameField; placeholderText: "name"; text: App.nameValue } } }
+
+    Dialog { id: confirm; title: App.confirmTitle
+        standardButtons: Dialog.Yes | Dialog.No; defaultButton: Dialog.No
+        onAccepted: App.confirmed()
+        Text { text: App.confirmText } }
+
+    Dialog { id: addConn; title: "Add connection"
+        standardButtons: Dialog.Ok | Dialog.Cancel; defaultButton: Dialog.Ok
+        onAccepted: App.addConnection(connEngine.currentValue, connName.text, connDSN.text, connCA.text, connCert.text, connKey.text)
+        Flex { direction: Tui.Vertical
+            Text { text: App.addConnNote }
+            ComboBox { id: connEngine; model: App.engines; textRole: "label"; valueRole: "key"; placeholderText: "database type" }
+            TextField { id: connName; placeholderText: "name" }
+            TextField { id: connDSN; placeholderText: "DSN"; echoMode: TextInput.Password }
+            TextField { id: connCA; placeholderText: "TLS: CA file (optional)" }
+            TextField { id: connCert; placeholderText: "TLS: certificate file (optional)" }
+            TextField { id: connKey; placeholderText: "TLS: key file (optional)" } } }
 
     Dialog { id: install; title: "Install AutoDB"
         standardButtons: Dialog.Ok | Dialog.Cancel; defaultButton: Dialog.Ok

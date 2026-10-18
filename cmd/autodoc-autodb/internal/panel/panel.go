@@ -29,9 +29,19 @@ const (
 
 // The dialogs, by the id the layout gives them.
 const (
-	DialogSignIn  = "signIn"
-	DialogInstall = "install"
+	DialogSignIn    = "signIn"
+	DialogInstall   = "install"
+	DialogBootstrap = "bootstrap"
+	DialogName      = "nameDialog"
+	DialogConfirm   = "confirm"
+	DialogAddConn   = "addConn"
 )
+
+// The fields a dialog clears as it opens, so it never shows the last entry.
+var dialogFields = map[string][]string{
+	DialogBootstrap: {"bootPass", "bootAgain"},
+	DialogAddConn:   {"connName", "connDSN", "connCA", "connCert", "connKey"},
+}
 
 // Events are what the user does on the panel. Each is called on the program's loop, so it must not
 // block: the plugin posts it to its own goroutine.
@@ -43,8 +53,21 @@ type Events struct {
 	Menu            func(id string)
 	// Opened is a tree node opened for the first time: its children are wanted, by Do and Tree.
 	Opened func(keys []string)
-	// Use is Enter on a tree node.
-	Use func(keys []string)
+	// Use is Enter on a tree node; Current the tree's selection moved to a node.
+	Use, Current func(keys []string)
+	// Bootstrap is the first user's dialog accepted: the name and the passphrase, twice.
+	Bootstrap func(name, pass, again string)
+	// Named is the name dialog accepted; Confirmed the confirm dialog's Yes.
+	Named     func(name string)
+	Confirmed func()
+	// AddConnection is the Add connection dialog accepted.
+	AddConnection func(f ConnForm)
+}
+
+// ConnForm is the Add connection dialog's fields.
+type ConnForm struct {
+	Engine, Name, DSN string
+	CA, Cert, Key     string // TLS files, "" for none
 }
 
 // MenuRow is a row of the ☰ menu: a row that does not apply is disabled, never hidden.
@@ -61,16 +84,19 @@ type Node struct {
 
 // Panel is the program and its models.
 type Panel struct {
-	card *decl.Card
-	ev   Events
-	menu *tuidecl.ListModel
-	tree *tuidecl.TreeListModel
+	card    *decl.Card
+	ev      Events
+	menu    *tuidecl.ListModel
+	tree    *tuidecl.TreeListModel
+	engines *tuidecl.ListModel
 }
 
 // New is the panel, its first state the sources' initial values.
 func New(ev Events) *Panel {
 	p := &Panel{ev: ev, menu: tuidecl.NewListModel("key", "label", "id", "enabled"),
-		tree: tuidecl.NewTreeListModel("key", "label")}
+		tree: tuidecl.NewTreeListModel("key", "label"), engines: tuidecl.NewListModel("key", "label")}
+	p.engines.Reset([]tuidecl.Row{{"key": "postgres", "label": "PostgreSQL"}, {"key": "mysql", "label": "MySQL"},
+		{"key": "sqlite", "label": "SQLite"}})
 	p.tree.OnFetch = func(ix tuidecl.Index) { call1(ev.Opened, p.keysOf(ix)) }
 	p.card = decl.New(decl.Options{Program: []tuidecl.ProgramOption{
 		tuidecl.LayoutSource("panel.qml", layout),
@@ -80,7 +106,9 @@ func New(ev Events) *Panel {
 			"App.menu": p.menu, "App.tree": p.tree, "App.tabIndex": 0,
 			"App.where": "AutoDB", "App.status": "", "App.problem": "",
 			"App.notes": "", "App.remote": "", "App.system": "",
-			"App.signInName": "", "App.signInNote": "", "App.installNote": "",
+			"App.signInName": "", "App.signInNote": "", "App.installNote": "", "App.engines": p.engines,
+			"App.bootstrapNote": "", "App.nameTitle": "", "App.nameNote": "", "App.nameValue": "",
+			"App.confirmTitle": "", "App.confirmText": "", "App.addConnNote": "",
 		}),
 		tuidecl.Handlers(map[string]gdecl.HandlerFunc{
 			"App.signIn": func(args []qml.SpecValue) error {
@@ -119,7 +147,28 @@ func New(ev Events) *Panel {
 				call1(ev.Menu, id)
 				return nil
 			},
-			"App.use":    p.indexHandler(ev.Use),
+			"App.use":     p.indexHandler(ev.Use),
+			"App.current": p.indexHandler(ev.Current),
+			"App.bootstrap": func(args []qml.SpecValue) error {
+				vals := strArgs(args, 3)
+				p.clear("bootPass")
+				p.clear("bootAgain")
+				if ev.Bootstrap != nil {
+					ev.Bootstrap(vals[0], vals[1], vals[2])
+				}
+				return nil
+			},
+			"App.named": func(args []qml.SpecValue) error {
+				call1(ev.Named, strArgs(args, 1)[0])
+				return nil
+			},
+			"App.confirmed": func([]qml.SpecValue) error { call0(ev.Confirmed); return nil },
+			"App.addConnection": func(args []qml.SpecValue) error {
+				v := strArgs(args, 6)
+				p.clear("connDSN")
+				call1(ev.AddConnection, ConnForm{Engine: v[0], Name: v[1], DSN: v[2], CA: v[3], Cert: v[4], Key: v[5]})
+				return nil
+			},
 			"App.opened": func([]qml.SpecValue) error { return nil }, // OnFetch reads the first opening
 		}),
 	}})
@@ -173,8 +222,13 @@ func (v View) Tree(parent []string, nodes []Node) bool {
 	return true
 }
 
-// Open and Close open and close a dialog.
-func (v View) Open(dialog string)  { _ = v.p.card.Program().Call(dialog, "open") }
+// Open opens a dialog, its fields cleared first; Close closes one.
+func (v View) Open(dialog string) {
+	for _, f := range dialogFields[dialog] {
+		v.p.clear(f)
+	}
+	_ = v.p.card.Program().Call(dialog, "open")
+}
 func (v View) Close(dialog string) { _ = v.p.card.Program().Call(dialog, "close") }
 
 // keysOf is a tree index as the keys of its rows from the top.
@@ -220,6 +274,15 @@ func (p *Panel) indexHandler(fn func([]string)) gdecl.HandlerFunc {
 }
 
 func (p *Panel) clear(field string) { _ = p.card.Program().Call(field, "clear") }
+
+// strArgs is args as n strings, "" for one missing.
+func strArgs(args []qml.SpecValue, n int) []string {
+	out := make([]string, n)
+	for i := range n {
+		out[i], _ = tuidecl.Arg(args, i)
+	}
+	return out
+}
 
 func intArg(args []qml.SpecValue) (int, error) {
 	s, err := tuidecl.Arg(args, 0)

@@ -38,6 +38,10 @@ type fakeDB struct {
 	storeID string
 	// pass is the passphrase auth.login takes, "right" when "".
 	pass string
+	// noUsers is a store with no user yet: auth.needs_bootstrap says so until auth.bootstrap
+	noUsers bool
+	// noWorkspaces answers workspace.list with none
+	noWorkspaces bool
 	// locked is a store restarted with no service keyslot: whoami says store_unlocked false;
 	// revoked refuses every token auth.whoami is asked about
 	locked, revoked bool
@@ -77,7 +81,24 @@ func newFakeDB(t *testing.T) *fakeDB {
 		f.mu.Unlock()
 		return m, nil
 	})
-	handle("auth.needs_bootstrap", func([]any) (any, error) { return false, nil })
+	handle("auth.needs_bootstrap", func([]any) (any, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.noUsers, nil
+	})
+	handle("auth.bootstrap", func(p []any) (any, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.noUsers = false
+		return map[string]any{"token": "tok-1", "user": map[string]any{"name": p[0]}}, nil
+	})
+	ok := func([]any) (any, error) { return nil, nil }
+	for _, m := range []string{"workspace.rename", "workspace.delete", "workspace.attach", "conn.rename", "conn.test"} {
+		handle(m, ok)
+	}
+	handle("workspace.create", func([]any) (any, error) { return int64(2), nil })
+	handle("conn.create", func([]any) (any, error) { return int64(8), nil })
+	handle("conn.delete", func([]any) (any, error) { return map[string]any{"archived": false}, nil })
 	handle("auth.login", func(p []any) (any, error) {
 		want := "right"
 		f.mu.Lock()
@@ -112,6 +133,12 @@ func newFakeDB(t *testing.T) *fakeDB {
 		return list, nil
 	})
 	handle("workspace.list", func([]any) (any, error) {
+		f.mu.Lock()
+		empty := f.noWorkspaces
+		f.mu.Unlock()
+		if empty {
+			return []any{}, nil
+		}
 		conns := []any{map[string]any{"id": int64(7), "name": "scratch", "engine": f.engineName()}}
 		f.mu.Lock()
 		for _, c := range f.more {

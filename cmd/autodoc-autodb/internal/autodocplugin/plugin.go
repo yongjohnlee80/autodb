@@ -119,8 +119,16 @@ type Plugin struct {
 	resumeName string
 	conn       *autodb.Connection
 	eng        engine.Name
-	sid        string // the session, opened once on the chosen connection
-	tree       *tree  // the connections' tree (tree.go)
+	sid        string   // the session, opened once on the chosen connection
+	tree       *tree    // the connections' tree (tree.go)
+	sel        []string // the tree's selection, by its keys
+	addTo      int64    // the workspace the Add connection dialog was opened for
+	// onName and onConfirm are what the name dialog's OK and the confirm dialog's Yes do
+	onName           func(name string)
+	onConfirm        func()
+	offeredWorkspace bool // the first workspace has been offered, once a run
+	// dialogOpened is told each dialog the plugin opens: a test's recorder
+	dialogOpened func(id string)
 	// treeSent is told each part of the tree sent to the panel: a test's recorder
 	treeSent func(parent []string, nodes []panel.Node)
 
@@ -220,6 +228,13 @@ func (p *Plugin) events() panel.Events {
 		Menu:            func(id string) { p.post(func() { p.menuRow(id) }) },
 		Opened:          func(keys []string) { p.post(func() { p.opened(keys) }) },
 		Use:             func(keys []string) { p.post(func() { p.useNode(keys) }) },
+		Current:         func(keys []string) { p.post(func() { p.sel = keys; p.draw() }) },
+		Bootstrap: func(name, pass, again string) {
+			p.post(func() { p.bootstrap(name, pass, again) })
+		},
+		Named:         func(name string) { p.post(func() { p.named(name) }) },
+		Confirmed:     func() { p.post(p.confirmed) },
+		AddConnection: func(f panel.ConnForm) { p.post(func() { p.addConnection(f) }) },
 	}
 }
 
@@ -329,6 +344,9 @@ func (p *Plugin) connect() {
 		return
 	}
 	p.step = stepLogin
+	if p.firstRun() { // no user yet: the first one is made, not signed in as
+		p.shown = stepLogin
+	}
 	p.draw()
 }
 
@@ -410,6 +428,7 @@ func (p *Plugin) choose() {
 	p.problem = ""
 	p.loadTree()
 	p.draw()
+	p.firstWorkspace()
 }
 
 // use opens a session on the connection chosen; the session on the last one, if another, closes.
