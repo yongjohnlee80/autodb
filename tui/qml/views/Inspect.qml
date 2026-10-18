@@ -1,5 +1,6 @@
 // One result row: full values behind compact one-line column summaries.
 Dialog {
+    keyScope: "autodb.inspect" // its keys' commands (tui/keys.go)
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
@@ -15,5 +16,5 @@ Dialog {
         textRole: "line"
         onActivated: App.openValue(index)
     }
-    Shortcut { sequence: "y"; onActivated: App.copyInspected(columns.currentIndex) }
+    Shortcut { sequence: keyId("autodb.inspect.copy"); onActivated: App.copyInspected(columns.currentIndex) }
 }

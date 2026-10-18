@@ -54,19 +54,19 @@ Window {
     //
     // A Shortcut sees only what the focused widget leaves, and none is live
     // while a dialog is open — the dialog has the keyboard.
-    Shortcut { sequence: "Space";  onActivated: leader.open() }
-    Shortcut { sequence: "q";      onActivated: App.run("app.quit") }
-    Shortcut { sequence: "Ctrl+Q"; onActivated: App.run("app.quit") }
-    Shortcut { sequence: "?";      onActivated: App.showHints() }
-    Shortcut { sequence: "/";      onActivated: App.openSearch() }
-    Shortcut { sequence: "n";      onActivated: App.searchNext() }
-    Shortcut { sequence: "Shift+N"; onActivated: App.searchPrevious() }
+    // Each names its key command (tui/keys.go), which a user's keymap.xml may move.
+    Shortcut { sequence: keyId("autodb.window.leader"); onActivated: leader.open() }
+    Shortcut { sequence: keyId("autodb.window.quit"); onActivated: App.run("app.quit") }
+    Shortcut { sequence: keyId("autodb.window.hints"); onActivated: App.showHints() }
+    Shortcut { sequence: keyId("autodb.window.search"); onActivated: App.openSearch() }
+    Shortcut { sequence: keyId("autodb.window.searchNext"); onActivated: App.searchNext() }
+    Shortcut { sequence: keyId("autodb.window.searchPrevious"); onActivated: App.searchPrevious() }
     // Between the panes: Ctrl+h/j/k/l. There is no Alt+h/j/k/l: Alt+letter
     // opens the menu bar's menus, and Alt+H would take Home's.
-    Shortcut { sequence: "Ctrl+H"; onActivated: App.movePane("h") }
-    Shortcut { sequence: "Ctrl+J"; onActivated: App.movePane("j") }
-    Shortcut { sequence: "Ctrl+K"; onActivated: App.movePane("k") }
-    Shortcut { sequence: "Ctrl+L"; onActivated: App.movePane("l") }
+    Shortcut { sequence: keyId("autodb.window.movePane.h"); onActivated: App.movePane("h") }
+    Shortcut { sequence: keyId("autodb.window.movePane.j"); onActivated: App.movePane("j") }
+    Shortcut { sequence: keyId("autodb.window.movePane.k"); onActivated: App.movePane("k") }
+    Shortcut { sequence: keyId("autodb.window.movePane.l"); onActivated: App.movePane("l") }
 
     // ---- the menu bar: a view of the catalog -------------------------------
     //

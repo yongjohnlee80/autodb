@@ -1,5 +1,6 @@
 // Recorded query executions. The host owns selection, loading and copying.
 Dialog {
+    keyScope: "autodb.history" // its keys' commands (tui/keys.go)
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
@@ -22,10 +23,10 @@ Dialog {
         TableViewColumn { role: "took"; title: "TOOK"; width: 7 }
         TableViewColumn { role: "script"; title: "SCRIPT"; width: 0 }
     }
-    Shortcut { sequence: "e"; onActivated: App.historyLoad(table.currentIndex) }
-    Shortcut { sequence: "y"; onActivated: App.historyCopy(table.currentIndex) }
-    Shortcut { sequence: "f"; onActivated: App.historyFilter() }
-    Shortcut { sequence: "x"; onActivated: App.historyClearFilter() }
-    Shortcut { sequence: "n"; onActivated: App.historyNextPage() }
-    Shortcut { sequence: "p"; onActivated: App.historyPrevPage() }
+    Shortcut { sequence: keyId("autodb.history.load"); onActivated: App.historyLoad(table.currentIndex) }
+    Shortcut { sequence: keyId("autodb.history.copy"); onActivated: App.historyCopy(table.currentIndex) }
+    Shortcut { sequence: keyId("autodb.history.filter"); onActivated: App.historyFilter() }
+    Shortcut { sequence: keyId("autodb.history.clearFilter"); onActivated: App.historyClearFilter() }
+    Shortcut { sequence: keyId("autodb.history.nextPage"); onActivated: App.historyNextPage() }
+    Shortcut { sequence: keyId("autodb.history.previousPage"); onActivated: App.historyPrevPage() }
 }

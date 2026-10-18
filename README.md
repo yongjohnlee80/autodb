@@ -246,6 +246,95 @@ shows the keys that work in the panel or dialog you are in.
 The editor is vim-modal (`jk` escapes). Copying uses OSC 52, so it reaches
 your system clipboard over SSH and inside tmux.
 
+### Moving your keys
+
+Every key is a command with an id, so a `keymap.xml` beside the config file
+(`~/.config/autodb/keymap.xml` by default) can move it, unbind it, or give it
+several keys. AutoDB follows the file while it runs, and refuses one it
+cannot read whole, naming the line; the keys stay as they were.
+
+```xml
+<mapping>
+  <shortcut id="autodb.window.leader"><key value="F3"/></shortcut>
+  <shortcut id="autodb.leader.app.about"><key value="F2"/></shortcut>
+  <shortcut id="autodb.window.quit"><key value="Ctrl+Q"/></shortcut>
+  <shortcut id="tui.list.down"><key value="Ctrl+N"/></shortcut>
+</mapping>
+```
+
+- The Window's keys are `autodb.window.*`: `leader` (Space), `quit` (q,
+  Ctrl+Q), `hints` (?), `search` (/), `searchNext` (n), `searchPrevious` (N),
+  `movePane.h` … `movePane.l` (Ctrl+h/j/k/l).
+- A leader key is `autodb.leader.<command id>`: `autodb.leader.query.run` is
+  `SPC r`. The table below lists every one.
+- History's are `autodb.history.load`, `copy`, `filter`, `clearFilter`,
+  `nextPage`, `previousPage`; Audit's `autodb.audit.filter`, `clearFilter`,
+  `nextPage`, `previousPage`; Inspect's `autodb.inspect.copy`.
+- The editor and every list, table and field are golib's widgets, by golib's
+  ids (`tui.editor.vim.normal.undo`, `tui.table.yank`): golib's
+  `tui/keymap/README.md` lists them.
+- A menu's underlined letter stays its label's. The leader card names a
+  moved key by its new keys.
+
+Every key command AutoDB declares, with its default keys:
+
+<!-- the key commands: generated from tui/keys.go (go test ./tui -run TestTheReadmeListsEveryKeyCommand -update-keys) -->
+| id | scope | keys |
+| --- | --- | --- |
+| `autodb.window.leader` | `global` | Space |
+| `autodb.window.quit` | `global` | Q Ctrl+Q |
+| `autodb.window.hints` | `global` | ? |
+| `autodb.window.search` | `global` | / |
+| `autodb.window.searchNext` | `global` | N |
+| `autodb.window.searchPrevious` | `global` | Shift+N |
+| `autodb.window.movePane.h` | `global` | Ctrl+H |
+| `autodb.window.movePane.j` | `global` | Ctrl+J |
+| `autodb.window.movePane.k` | `global` | Ctrl+K |
+| `autodb.window.movePane.l` | `global` | Ctrl+L |
+| `autodb.history.load` | `autodb.history` | E |
+| `autodb.history.copy` | `autodb.history` | Y |
+| `autodb.history.filter` | `autodb.history` | F |
+| `autodb.history.clearFilter` | `autodb.history` | X |
+| `autodb.history.nextPage` | `autodb.history` | N |
+| `autodb.history.previousPage` | `autodb.history` | P |
+| `autodb.audit.filter` | `autodb.audit` | F |
+| `autodb.audit.clearFilter` | `autodb.audit` | X |
+| `autodb.audit.nextPage` | `autodb.audit` | N |
+| `autodb.audit.previousPage` | `autodb.audit` | P |
+| `autodb.inspect.copy` | `autodb.inspect` | Y |
+| `autodb.leader.query.run` | `autodb.leader` | R |
+| `autodb.leader.query.run_selection` | `autodb.leader` | Shift+R |
+| `autodb.leader.results.toggle_json` | `autodb.leader` | J |
+| `autodb.leader.view.zoom_toggle` | `autodb.leader` | Z |
+| `autodb.leader.focus.explorer` | `autodb.leader` | E |
+| `autodb.leader.focus.editor` | `autodb.leader` | Q |
+| `autodb.leader.focus.results` | `autodb.leader` | T |
+| `autodb.leader.note.new` | `autodb.leader` | N |
+| `autodb.leader.note.save` | `autodb.leader` | S |
+| `autodb.leader.conn.select` | `autodb.leader` | Shift+C |
+| `autodb.leader.conn.manage` | `autodb.leader` | C |
+| `autodb.leader.workspace.manage` | `autodb.leader` | W |
+| `autodb.leader.user.manage` | `autodb.leader` | U |
+| `autodb.leader.ip.mine` | `autodb.leader` | I |
+| `autodb.leader.token.mine` | `autodb.leader` | Shift+T |
+| `autodb.leader.history.open` | `autodb.leader` | Shift+H |
+| `autodb.leader.audit.open` | `autodb.leader` | A |
+| `autodb.leader.frontdoor.cacert` | `autodb.leader` | K |
+| `autodb.leader.explorer.refresh` | `autodb.leader` | G |
+| `autodb.leader.ip.allowlist` | `autodb.leader` | Shift+I |
+| `autodb.leader.keyslot.manage` | `autodb.leader` | Shift+K |
+| `autodb.leader.warning.dismiss_cleartext` | `autodb.leader` | ! |
+| `autodb.leader.session.login` | `autodb.leader` | Shift+L |
+| `autodb.leader.session.connection_toggle` | `autodb.leader` | X |
+| `autodb.leader.server.restart` | `autodb.leader` | Shift+X |
+| `autodb.leader.app.pressure` | `autodb.leader` | Shift+P |
+| `autodb.leader.app.profile` | `autodb.leader` | O |
+| `autodb.leader.app.about` | `autodb.leader` | Shift+A |
+| `autodb.leader.app.help` | `autodb.leader` | ? |
+| `autodb.leader.app.quit` | `autodb.leader` | Shift+Q |
+| `autodb.leader.note.open` | `autodb.leader` | Shift+O |
+<!-- end of the generated key commands -->
+
 ## Documentation
 
 | | |

@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -1324,7 +1325,8 @@ func runUIOn(ctx context.Context, backend tuicore.Backend, network string, cfg c
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	host, err := tuiapp.New(session, notesFor, cancel, tuiapp.Options{
-		Start: start,
+		Start:      start,
+		KeymapFile: keymapFileFor(configPath),
 		About: tuiapp.AboutInfo{
 			Version: b.version, Commit: b.commit, BuildDate: b.buildDate,
 			Repo: repoURL, Author: author,
@@ -1477,6 +1479,20 @@ func configPathFor(explicit string) string {
 		return ""
 	}
 	return p
+}
+
+// keymapFileFor is the user's keymap.xml: beside the config file, the default
+// one's when none is named (whether or not it exists yet); "" when there is no
+// config directory at all.
+func keymapFileFor(explicit string) string {
+	p := explicit
+	if p == "" {
+		var err error
+		if p, err = config.DefaultPath(); err != nil {
+			return ""
+		}
+	}
+	return filepath.Join(filepath.Dir(p), "keymap.xml")
 }
 
 // spawnServe starts a detached `autodb --serve` with stdio redirected to an

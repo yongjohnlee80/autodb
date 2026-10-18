@@ -1,5 +1,6 @@
 // The audit log, for an admin. The host owns the search, its filter and pages.
 Dialog {
+    keyScope: "autodb.audit" // its keys' commands (tui/keys.go)
     closeOnQ: true
     maxWidthPercent: 80
     maxHeightPercent: 80
@@ -23,8 +24,8 @@ Dialog {
             TableViewColumn { role: "detail"; title: "DETAIL"; width: 0 }
         }
     }
-    Shortcut { sequence: "f"; onActivated: App.auditFilter() }
-    Shortcut { sequence: "x"; onActivated: App.auditClearFilter() }
-    Shortcut { sequence: "n"; onActivated: App.auditNextPage() }
-    Shortcut { sequence: "p"; onActivated: App.auditPrevPage() }
+    Shortcut { sequence: keyId("autodb.audit.filter"); onActivated: App.auditFilter() }
+    Shortcut { sequence: keyId("autodb.audit.clearFilter"); onActivated: App.auditClearFilter() }
+    Shortcut { sequence: keyId("autodb.audit.nextPage"); onActivated: App.auditNextPage() }
+    Shortcut { sequence: keyId("autodb.audit.previousPage"); onActivated: App.auditPrevPage() }
 }

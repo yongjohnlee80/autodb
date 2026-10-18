@@ -276,6 +276,11 @@ type Options struct {
 	// Start is where the terminal's session begins ([tui] start, --remote);
 	// the zero value is this computer's daemon. The web frontend ignores it.
 	Start Start
+	// KeymapFile is the user's key-mapping scheme (golib's tui/keymap),
+	// keymap.xml beside the config file: it moves any key by its command's
+	// id (tui/keys.go), and is followed while the program runs. A missing
+	// file is no scheme; "" is none.
+	KeymapFile string
 }
 
 // New mounts qml/main.qml over session. Nothing runs until Run.
@@ -393,7 +398,7 @@ func (h *Host) options(opt Options) []tuidecl.ProgramOption {
 				// An edit may change the theme import: the screen then
 				// wears the new theme, and what the program says it wears
 				// — App.theme, the Theme menu's mark — must follow.
-				tuidecl.OnReload(func(decl.Result) { h.followLayoutTheme() })))
+				tuidecl.OnReload(func(decl.Result) { h.followLayoutTheme(); h.keysChanged() })))
 	} else {
 		src = opt.Layout
 		if src == nil {
@@ -401,6 +406,15 @@ func (h *Host) options(opt Options) []tuidecl.ProgramOption {
 		}
 		h.layoutSrc = src
 		opts = append(h.modulesFrom(qmlFiles), tuidecl.LayoutSource("main.qml", src))
+		if opt.KeymapFile != "" {
+			// the key file is followed from its first save; a refused one is reported as an edit is
+			opts = append(opts, tuidecl.HotReload(tuidecl.OnReloadError(func(err error) { h.setStatus(err.Error()) }),
+				tuidecl.OnReload(func(decl.Result) { h.keysChanged() })))
+		}
+	}
+	opts = append(opts, tuidecl.KeyCommands(keyCommands(h.catalog.Commands())...))
+	if opt.KeymapFile != "" {
+		opts = append(opts, tuidecl.Keymap(os.DirFS(filepath.Dir(opt.KeymapFile)), filepath.Base(opt.KeymapFile)))
 	}
 	opts = append(opts,
 		tuidecl.Sources(h.state(h.pickTheme(src))),

@@ -185,12 +185,12 @@ func (h *Host) projectLeader() {
 		if off.State == OfferHidden {
 			continue
 		}
-		text := fmt.Sprintf("%c  %s", cmd.Leader.Key, h.tr(cmd.Leader.leaderID(cmd.ID), cmd.Leader.text(h)))
+		text := h.keyLine(cmd.ID, cmd.Leader.Key, h.tr(cmd.Leader.leaderID(cmd.ID), cmd.Leader.text(h)))
 		if off.State == OfferDisabled {
 			text += "  — " + off.Reason
 		}
 		entries = append(entries, entry{cmd.Leader.Order, tuidecl.Row{
-			"key": leaderSequence(cmd.Leader.Key), "text": text,
+			"key": leaderSequence(cmd.Leader.Key), "text": text, "command": leaderCommand(cmd.ID),
 			"enabled": off.State == OfferOffered, "id": string(cmd.ID),
 		}})
 	}

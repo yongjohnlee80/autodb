@@ -12,12 +12,13 @@
 
 Dialog {
     id: leader
+    keyScope: "autodb.leader" // its rows' key commands, autodb.leader.<command id> (tui/keys.go)
     title: qsTrId("autodb.leader.title")
     dim: false        // the backdrop fades only for sign-in and quitting
     helpText: qsTrId("autodb.leader.helpText")
     Text { wrapMode: Tui.WordWrap; text: App.leaderText }
     Repeater {
         model: App.leader
-        Shortcut { sequence: model.key; onActivated: App.leaderKey(model.id) }
+        Shortcut { sequence: keyId(model.command); onActivated: App.leaderKey(model.id) }
     }
 }
