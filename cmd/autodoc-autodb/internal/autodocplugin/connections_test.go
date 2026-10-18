@@ -1,9 +1,20 @@
 package autodocplugin
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/panel"
 	"github.com/yongjohnlee80/autodb/core/engine"
@@ -127,20 +138,54 @@ func TestAConnectionIsAddedTestedRenamedAndDeleted(t *testing.T) {
 	}
 }
 
+// tlsFiles writes a self-signed certificate (its own CA) and its key under a temporary directory:
+// the server's parser reads the files a DSN names.
+func tlsFiles(t *testing.T) (ca, cert, key string) {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "db"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true,
+		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kder, err := x509.MarshalECPrivateKey(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	ca, cert, key = filepath.Join(dir, "ca.pem"), filepath.Join(dir, "c.pem"), filepath.Join(dir, "c.key")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	for path, b := range map[string][]byte{ca: certPEM, cert: certPEM,
+		key: pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder})} {
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return ca, cert, key
+}
+
 // tlsDSN writes each engine's TLS files as the AutoDB server reads them: its own ValidateDSN
-// takes the result, a certificate needs its key, and SQLite has none.
+// takes the result (reading the files, as pgx does), a certificate needs its key, and SQLite has
+// none.
 func TestTLSFilesAreWrittenAsTheServerReadsThem(t *testing.T) {
+	ca, cert, key := tlsFiles(t)
+	q := url.QueryEscape
 	for _, c := range []struct {
 		engine, dsn string
 		want        []string
 	}{
-		{"postgres", "postgres://u:p@db:5432/app", []string{"sslrootcert=%2Fca.pem", "sslcert=%2Fc.pem", "sslkey=%2Fc.key", "sslmode=verify-full"}},
+		{"postgres", "postgres://u:p@db:5432/app", []string{"sslrootcert=" + q(ca), "sslcert=" + q(cert), "sslkey=" + q(key), "sslmode=verify-full"}},
 		{"postgres", "postgres://u:p@db:5432/app?sslmode=require", []string{"sslmode=require&sslrootcert"}},
-		{"postgres", "host=db user=u dbname=app", []string{"sslrootcert='/ca.pem'", "sslmode='verify-full'"}},
-		{"mysql", "u:p@tcp(db:3306)/app", []string{"?tls-ca=%2Fca.pem&tls-cert=%2Fc.pem&tls-key=%2Fc.key"}},
-		{"mysql", "u:p@tcp(db:3306)/app?parseTime=true", []string{"&tls-ca=%2Fca.pem"}},
+		{"postgres", "host=db user=u dbname=app", []string{"sslrootcert='" + ca + "'", "sslmode='verify-full'"}},
+		{"mysql", "u:p@tcp(db:3306)/app", []string{"?tls-ca=" + q(ca) + "&tls-cert=" + q(cert) + "&tls-key=" + q(key)}},
+		{"mysql", "u:p@tcp(db:3306)/app?parseTime=true", []string{"&tls-ca=" + q(ca)}},
 	} {
-		got, err := tlsDSN(c.engine, c.dsn, "/ca.pem", "/c.pem", "/c.key")
+		got, err := tlsDSN(c.engine, c.dsn, ca, cert, key)
 		if err != nil {
 			t.Fatalf("%s: %v", c.dsn, err)
 		}
