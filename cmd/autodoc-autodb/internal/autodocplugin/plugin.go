@@ -139,6 +139,15 @@ type Plugin struct {
 	onSignIn func(name, pass string)
 	// mis is the server of another protocol found, nil when none
 	mis *mismatch
+	// remote is the REMOTE tab's state; target the target's generation, bumped by each change of
+	// server (an answer asked before it is dropped)
+	remote remoteState
+	target int
+	// onRemote takes the Add or Edit server dialog; onSecret the passphrase dialog
+	onRemote func(panel.RemoteForm)
+	onSecret func(pass, again string)
+	// profilesPath and keyDir are remotes.toml and the device keys' directory; AutoDB's own when ""
+	profilesPath, keyDir string
 	// goTab is the panel to be shown p.tab at the next draw
 	goTab            bool
 	offeredWorkspace bool // the first workspace has been offered, once a run
@@ -194,7 +203,7 @@ func newPlugin(version, dir string) *Plugin {
 	_, _ = rand.Read(b[:])
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Plugin{version: version, pluginDir: dir, ctx: ctx, cancel: cancel,
-		work: make(chan func(), 64), done: make(chan struct{}), creds: creds{}, idPrefix: "res-" + hex.EncodeToString(b[:])}
+		work: make(chan func(), 64), done: make(chan struct{}), creds: creds{}, remote: remoteState{sel: -1}, idPrefix: "res-" + hex.EncodeToString(b[:])}
 	p.ui = panel.New(p.events())
 	go p.loop()
 	return p
@@ -261,7 +270,15 @@ func (p *Plugin) events() panel.Events {
 			})
 		},
 		Install: func() { p.post(p.doInstall) },
-		Tab:     func(i int) { p.post(func() { p.tab = i; p.draw() }) },
+		Tab: func(i int) {
+			p.post(func() {
+				p.tab = i
+				if i == panel.TabRemote {
+					p.loadRemotes()
+				}
+				p.draw()
+			})
+		},
 		Menu:    func(id string) { p.post(func() { p.menuRow(id) }) },
 		Opened:  func(keys []string) { p.post(func() { p.opened(keys) }) },
 		Use:     func(keys []string) { p.post(func() { p.useNode(keys) }) },
@@ -279,8 +296,34 @@ func (p *Plugin) events() panel.Events {
 				}
 			})
 		},
-		NoteOpen:    func(row int) { p.post(func() { p.openNote(row) }) },
-		NoteCurrent: func(row int) { p.post(func() { p.notes.sel = row; p.draw() }) },
+		RemoteOpen: func(row int) {
+			p.post(func() {
+				p.remote.sel = row
+				if pr, ok := p.picked(); ok && (p.remote.on == nil || p.remote.on.prof.ID != pr.ID) {
+					p.connectRemote(pr)
+				}
+			})
+		},
+		RemoteCurrent: func(row int) { p.post(func() { p.remote.sel = row; p.draw() }) },
+		RemoteSaved: func(f panel.RemoteForm) {
+			p.post(func() {
+				if then := p.onRemote; then != nil {
+					p.onRemote = nil
+					then(f)
+				}
+			})
+		},
+		Secret: func(pass, again string) {
+			p.post(func() {
+				if then := p.onSecret; then != nil {
+					p.onSecret = nil
+					then(pass, again)
+				}
+			})
+		},
+		SecretCancelled: func() { p.post(func() { p.onSecret = nil; p.problem = "not connected: no passphrase"; p.draw() }) },
+		NoteOpen:        func(row int) { p.post(func() { p.openNote(row) }) },
+		NoteCurrent:     func(row int) { p.post(func() { p.notes.sel = row; p.draw() }) },
 	}
 }
 
@@ -567,6 +610,13 @@ func (p *Plugin) lost(err error) {
 		_ = p.cli.Close()
 	}
 	p.cli, p.token, p.sid = nil, "", ""
+	if on := p.remote.on; on != nil { // Retry reaches the local server; Connect this one again
+		p.remote.on = nil
+		p.target++
+		p.step, p.problem = stepFailed, "the connection to "+profileName(on.prof)+" ended: "+err.Error()
+		p.draw()
+		return
+	}
 	p.step, p.problem = stepFailed, "the connection to AutoDB ended: "+err.Error()
 	p.draw()
 }

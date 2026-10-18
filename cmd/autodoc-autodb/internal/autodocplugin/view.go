@@ -92,6 +92,8 @@ func (p *Plugin) menu() []panel.MenuRow {
 		return p.connectionRows()
 	case panel.TabNotes:
 		return p.noteRows()
+	case panel.TabRemote:
+		return p.remoteRows()
 	case panel.TabSystem:
 		return p.systemRows()
 	}
@@ -100,7 +102,7 @@ func (p *Plugin) menu() []panel.MenuRow {
 
 // menuRow is a row of the ☰ menu chosen.
 func (p *Plugin) menuRow(id string) {
-	if p.connectionRow(id) || p.noteRow(id) || p.systemRow(id) {
+	if p.connectionRow(id) || p.noteRow(id) || p.systemRow(id) || p.remoteRow(id) {
 		return
 	}
 	switch id {
@@ -130,6 +132,7 @@ func (p *Plugin) draw() {
 		"status":  p.status,
 		"problem": p.problem,
 		"system":  p.systemText(),
+		"remote":  p.remoteText(),
 	}
 	if p.status == "" && p.problem == "" {
 		sources["status"] = p.stepText()

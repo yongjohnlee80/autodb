@@ -112,9 +112,10 @@ func (p *Plugin) systemText() string {
 // systemRows are SYSTEM's menu rows.
 func (p *Plugin) systemRows() []panel.MenuRow {
 	signedIn := p.cli != nil && p.token != ""
+	local := p.remote.on == nil // a remote server is its administrator's to restart
 	m := p.mis
 	return []panel.MenuRow{
-		{ID: "sys.restart", Label: "&Restart server…", Enabled: signedIn},
+		{ID: "sys.restart", Label: "&Restart server…", Enabled: signedIn && local},
 		{ID: "sys.upgrade", Label: "&Upgrade AutoDB…", Enabled: p.step == stepMismatch && m != nil && m.gap == serverBehind},
 		{ID: "sys.update", Label: "Update the &plugin…", Enabled: p.step == stepMismatch && m != nil && m.gap == pluginBehind},
 		{ID: "auth.signout", Label: "Sign &out", Enabled: signedIn},

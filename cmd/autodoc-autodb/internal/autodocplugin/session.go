@@ -32,7 +32,9 @@ const maxTargets = 8
 type credRecord struct {
 	User  string `json:"user"`
 	Token string `json:"token"`
-	At    int64  `json:"at"` // unix seconds, for the oldest to go first
+	// Device is a remote record's device key fingerprint: it is resumed only with that key
+	Device string `json:"device,omitempty"`
+	At     int64  `json:"at"` // unix seconds, for the oldest to go first
 }
 
 // creds are the slot's records, by target key.
@@ -102,19 +104,23 @@ type sessionHost interface {
 	CloseReason() string
 }
 
-// keep records the sign-in to the local server, and sends the slot.
+// keep records the sign-in to the server connected, and sends the slot.
 func (p *Plugin) keep(user string) {
-	key := localTarget(p.cli)
+	key := p.targetKey()
 	if key == "" {
 		return // a server that names no store: no record can be matched to it again
 	}
-	p.creds[key] = credRecord{User: user, Token: p.token, At: time.Now().Unix()}
+	r := credRecord{User: user, Token: p.token, At: time.Now().Unix()}
+	if on := p.remote.on; on != nil {
+		r.Device = deviceFP(p.remote.keys[on.prof.ID])
+	}
+	p.creds[key] = r
 	p.saveCreds()
 }
 
-// forget drops the local server's record, and sends the slot.
+// forget drops the record of the server connected, and sends the slot.
 func (p *Plugin) forget() {
-	key := localTarget(p.cli)
+	key := p.targetKey()
 	if _, ok := p.creds[key]; !ok {
 		return
 	}
@@ -127,7 +133,7 @@ func (p *Plugin) forget() {
 // name filled in, saying so. The token refused: the record goes, and the sign-in opens. It reports
 // whether it signed in.
 func (p *Plugin) resume() bool {
-	key := localTarget(p.cli)
+	key := p.targetKey()
 	r, ok := p.creds[key]
 	if !ok {
 		return false

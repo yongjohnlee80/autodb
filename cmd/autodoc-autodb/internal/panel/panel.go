@@ -35,12 +35,15 @@ const (
 	DialogName      = "nameDialog"
 	DialogConfirm   = "confirm"
 	DialogAddConn   = "addConn"
+	DialogRemote    = "remoteDialog"
+	DialogSecret    = "secret"
 )
 
 // The fields a dialog clears as it opens, so it never shows the last entry.
 var dialogFields = map[string][]string{
 	DialogBootstrap: {"bootPass", "bootAgain"},
 	DialogAddConn:   {"connName", "connDSN", "connCA", "connCert", "connKey"},
+	DialogSecret:    {"secretPass", "secretAgain"},
 }
 
 // Events are what the user does on the panel. Each is called on the program's loop, so it must not
@@ -66,6 +69,20 @@ type Events struct {
 	// NoteCurrent the list's selection moved, each by its row.
 	NoteWorkspace         func(key string)
 	NoteOpen, NoteCurrent func(row int)
+	// RemoteOpen is Enter on a remote server, RemoteCurrent the list's selection moved, by row;
+	// RemoteSaved the Add or Edit server dialog accepted.
+	RemoteOpen, RemoteCurrent func(row int)
+	RemoteSaved               func(f RemoteForm)
+	// Secret is the passphrase dialog accepted (again "" when it asks once); SecretCancelled its
+	// Cancel.
+	Secret          func(pass, again string)
+	SecretCancelled func()
+}
+
+// RemoteForm is the Add or Edit server dialog's fields: Auth is "file" (the SSH key file) or
+// "agent" (the ssh agent signs for it).
+type RemoteForm struct {
+	Name, Host, Port, User, KeyFile, Auth string
 }
 
 // ConnForm is the Add connection dialog's fields.
@@ -95,13 +112,18 @@ type Panel struct {
 	engines *tuidecl.ListModel
 	noteWS  *tuidecl.ListModel
 	notes   *tuidecl.ListModel
+	remotes *tuidecl.ListModel
+	auths   *tuidecl.ListModel
 }
 
 // New is the panel, its first state the sources' initial values.
 func New(ev Events) *Panel {
 	p := &Panel{ev: ev, menu: tuidecl.NewListModel("key", "label", "id", "enabled"),
 		tree: tuidecl.NewTreeListModel("key", "label"), engines: tuidecl.NewListModel("key", "label"),
-		noteWS: tuidecl.NewListModel("key", "label"), notes: tuidecl.NewListModel("key", "label")}
+		noteWS: tuidecl.NewListModel("key", "label"), notes: tuidecl.NewListModel("key", "label"),
+		remotes: tuidecl.NewListModel("key", "label"), auths: tuidecl.NewListModel("key", "label")}
+	p.auths.Reset([]tuidecl.Row{{"key": "file", "label": "SSH key: its file"},
+		{"key": "agent", "label": "SSH key: the ssh agent signs"}})
 	p.engines.Reset([]tuidecl.Row{{"key": "postgres", "label": "PostgreSQL"}, {"key": "mysql", "label": "MySQL"},
 		{"key": "sqlite", "label": "SQLite"}})
 	p.tree.OnFetch = func(ix tuidecl.Index) { call1(ev.Opened, p.keysOf(ix)) }
@@ -116,6 +138,10 @@ func New(ev Events) *Panel {
 			"App.signInName": "", "App.signInNote": "", "App.installNote": "", "App.engines": p.engines,
 			"App.bootstrapNote": "", "App.nameTitle": "", "App.nameNote": "", "App.nameValue": "",
 			"App.confirmTitle": "", "App.confirmText": "", "App.addConnNote": "",
+			"App.remotes": p.remotes, "App.remoteTitle": "", "App.remoteNote": "", "App.remoteName": "",
+			"App.remoteHost": "", "App.remotePort": "", "App.remoteUser": "", "App.remoteKey": "",
+			"App.remoteAuths": p.auths, "App.remoteAuthIndex": 0,
+			"App.secretTitle": "", "App.secretNote": "", "App.secretTwice": false,
 		}),
 		tuidecl.Handlers(map[string]gdecl.HandlerFunc{
 			"App.signIn": func(args []qml.SpecValue) error {
@@ -181,8 +207,30 @@ func New(ev Events) *Panel {
 				call1(ev.NoteWorkspace, strArgs(args, 1)[0])
 				return nil
 			},
-			"App.noteOpen":    p.rowHandler(ev.NoteOpen),
-			"App.noteCurrent": p.rowHandler(ev.NoteCurrent),
+			"App.noteOpen":      p.rowHandler(ev.NoteOpen),
+			"App.noteCurrent":   p.rowHandler(ev.NoteCurrent),
+			"App.remoteOpen":    p.rowHandler(ev.RemoteOpen),
+			"App.remoteCurrent": p.rowHandler(ev.RemoteCurrent),
+			"App.remoteSaved": func(args []qml.SpecValue) error {
+				v := strArgs(args, 6)
+				call1(ev.RemoteSaved, RemoteForm{Name: v[0], Host: v[1], Port: v[2], User: v[3], KeyFile: v[4], Auth: v[5]})
+				return nil
+			},
+			"App.secret": func(args []qml.SpecValue) error {
+				v := strArgs(args, 2)
+				p.clear("secretPass")
+				p.clear("secretAgain")
+				if ev.Secret != nil {
+					ev.Secret(v[0], v[1])
+				}
+				return nil
+			},
+			"App.secretCancelled": func([]qml.SpecValue) error {
+				p.clear("secretPass")
+				p.clear("secretAgain")
+				call0(ev.SecretCancelled)
+				return nil
+			},
 		}),
 	}})
 	return p
@@ -207,6 +255,27 @@ func (v View) Set(values map[string]any) {
 	_ = v.p.card.Program().SetMany(m)
 }
 
+// Fill sets a dialog's prefilled sources: each is moved off its value and back, so a field the user
+// typed into since (its binding's value unchanged) shows it again.
+func (v View) Fill(values map[string]any) {
+	off := make(map[string]any, len(values))
+	on := make(map[string]any, len(values))
+	for k, val := range values {
+		switch x := val.(type) {
+		case string:
+			off["App."+k] = x + "\x00"
+		case int:
+			off["App."+k] = x + 1
+		case bool:
+			off["App."+k] = !x
+		}
+		on["App."+k] = val
+	}
+	prog := v.p.card.Program()
+	_ = prog.SetMany(off)
+	_ = prog.SetMany(on)
+}
+
 // Menu replaces the ☰ menu's rows.
 func (v View) Menu(rows []MenuRow) {
 	out := make([]tuidecl.Row, len(rows))
@@ -222,6 +291,9 @@ type Item struct{ Key, Label string }
 // NoteWorkspaces replaces the NOTES tab's workspaces; Notes its list.
 func (v View) NoteWorkspaces(items []Item) { v.p.noteWS.Reset(itemRows(items)) }
 func (v View) Notes(items []Item)          { v.p.notes.Reset(itemRows(items)) }
+
+// Remotes replaces the REMOTE tab's servers.
+func (v View) Remotes(items []Item) { v.p.remotes.Reset(itemRows(items)) }
 
 func itemRows(items []Item) []tuidecl.Row {
 	out := make([]tuidecl.Row, len(items))

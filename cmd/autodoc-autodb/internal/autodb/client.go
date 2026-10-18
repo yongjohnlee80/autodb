@@ -77,6 +77,14 @@ type Client struct {
 	Hello Hello
 	// Addr is where it was reached, for the card.
 	Addr string
+	// closer ends a connection made elsewhere (Over) whole; nil closes the RPC client
+	closer func()
+}
+
+// Over is a client over a connection made and greeted elsewhere (a remote server's, through its
+// SSH listener): hello is its sys.hello answer, addr where it is, and closer ends it whole.
+func Over(c *golibrpc.Client, hello map[string]any, addr string, closer func()) *Client {
+	return &Client{rpc: c, Hello: helloOf(hello), Addr: addr, closer: closer}
 }
 
 // Dial connects to the server at network/addr and says hello at Protocol. A server of another
@@ -129,7 +137,13 @@ func (e *MismatchError) Error() string {
 }
 
 // Close ends the connection.
-func (c *Client) Close() error { return c.rpc.Close() }
+func (c *Client) Close() error {
+	if c.closer != nil {
+		c.closer()
+		return nil
+	}
+	return c.rpc.Close()
+}
 
 // Done is closed when the connection has ended.
 func (c *Client) Done() <-chan struct{} { return c.rpc.Done() }

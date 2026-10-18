@@ -138,13 +138,14 @@ func (p *Plugin) act(what string, do func(ctx context.Context) error) {
 
 // askName opens the name dialog; then is run with the name accepted.
 func (p *Plugin) askName(title, note, value string, then func(name string)) {
-	p.onName = then
+	p.onName = fencedOf(p, then)
 	p.openDialog(panel.DialogName, map[string]any{"nameTitle": title, "nameNote": note, "nameValue": value})
 }
 
 // askConfirm opens the confirm dialog; then is run on its Yes.
 func (p *Plugin) askConfirm(title, text string, then func()) {
-	p.onConfirm = then
+	fn := fencedOf(p, func(struct{}) { then() })
+	p.onConfirm = func() { fn(struct{}{}) }
 	p.openDialog(panel.DialogConfirm, map[string]any{"confirmTitle": title, "confirmText": text})
 }
 

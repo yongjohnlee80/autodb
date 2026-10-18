@@ -33,7 +33,11 @@ Window {
                         placeholderText: "workspace"; onActivated: App.noteWorkspace(noteWs.currentValue) }
                     ListView { id: notes; model: App.notes; textRole: "label"
                         onActivated: App.noteOpen(index); onCurrentIndexChanged: App.noteCurrent(index) } } }
-            Tab { title: "REMOTE"; Text { text: App.remote } }
+            Tab { title: "REMOTE"
+                Flex { direction: Tui.Vertical
+                    ListView { id: remotes; model: App.remotes; textRole: "label"
+                        onActivated: App.remoteOpen(index); onCurrentIndexChanged: App.remoteCurrent(index) }
+                    Text { text: App.remote } } }
             Tab { title: "SYSTEM"; Text { text: App.system } } }
         Text { text: App.status }
         Text { text: App.problem } }
@@ -79,6 +83,27 @@ Window {
             TextField { id: connCA; placeholderText: "TLS: CA file (optional)" }
             TextField { id: connCert; placeholderText: "TLS: certificate file (optional)" }
             TextField { id: connKey; placeholderText: "TLS: key file (optional)" } } }
+
+    Dialog { id: remoteDialog; title: App.remoteTitle
+        standardButtons: Dialog.Ok | Dialog.Cancel; defaultButton: Dialog.Ok
+        onAccepted: App.remoteSaved(remoteName.text, remoteHost.text, remotePort.text, remoteUser.text, remoteKey.text, remoteAuth.currentValue)
+        Flex { direction: Tui.Vertical
+            Text { text: App.remoteNote }
+            TextField { id: remoteName; placeholderText: "name"; text: App.remoteName }
+            TextField { id: remoteHost; placeholderText: "host"; text: App.remoteHost }
+            TextField { id: remotePort; placeholderText: "port (7422)"; text: App.remotePort }
+            TextField { id: remoteUser; placeholderText: "your AutoDB user there"; text: App.remoteUser }
+            TextField { id: remoteKey; placeholderText: "SSH key (~/.ssh/id_ed25519)"; text: App.remoteKey }
+            ComboBox { id: remoteAuth; model: App.remoteAuths; textRole: "label"; valueRole: "key"; currentIndex: App.remoteAuthIndex } } }
+
+    Dialog { id: secret; title: App.secretTitle
+        standardButtons: Dialog.Ok | Dialog.Cancel; defaultButton: Dialog.Ok
+        onAccepted: App.secret(secretPass.text, secretAgain.text)
+        onRejected: App.secretCancelled()
+        Flex { direction: Tui.Vertical
+            Text { text: App.secretNote }
+            TextField { id: secretPass; placeholderText: "passphrase"; echoMode: TextInput.Password }
+            TextField { id: secretAgain; placeholderText: "the passphrase again"; echoMode: TextInput.Password; visible: App.secretTwice } } }
 
     Dialog { id: install; title: "Install AutoDB"
         standardButtons: Dialog.Ok | Dialog.Cancel; defaultButton: Dialog.Ok
