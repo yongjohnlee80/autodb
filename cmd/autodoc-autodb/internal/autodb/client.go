@@ -30,6 +30,8 @@ const (
 	// CodeTxState is a request wrong for the session's transaction: among others, a cursor that
 	// has ended.
 	CodeTxState int64 = -32043
+	// CodeNoteConflict is a note written expecting a version the server no longer has.
+	CodeNoteConflict int64 = -32068
 )
 
 // Code is err's AutoDB error code, and whether err is an answer from the server at all. An error

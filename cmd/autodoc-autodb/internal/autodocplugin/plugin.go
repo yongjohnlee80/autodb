@@ -148,6 +148,10 @@ type Plugin struct {
 	onSecret func(pass, again string)
 	// profilesPath and keyDir are remotes.toml and the device keys' directory; AutoDB's own when ""
 	profilesPath, keyDir string
+	// cacheDir is the remote notes' working copies' root, the user's cache when ""; pendingSidecars
+	// are sidecars a write failed for, retried at the next save or open of their note
+	cacheDir        string
+	pendingSidecars map[string]sidecar
 	// goTab is the panel to be shown p.tab at the next draw
 	goTab            bool
 	offeredWorkspace bool // the first workspace has been offered, once a run
@@ -662,6 +666,8 @@ func (p *Plugin) command(id string, args []string) {
 	switch id {
 	case "run":
 		p.run()
+	case "save":
+		p.saveNote(p.doc, false)
 	case "query":
 		p.runQuery(strings.TrimSpace(strings.Join(args, " ")))
 	case "script":

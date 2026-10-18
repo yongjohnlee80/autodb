@@ -124,6 +124,7 @@ func TestTheProtocolAndCodesAreAutoDBs(t *testing.T) {
 		{"CodeSessionNotFound", CodeSessionNotFound, rpc.CodeSessionNotFound},
 		{"CodeTxState", CodeTxState, rpc.CodeTxState},
 		{"CodeDenied", CodeDenied, rpc.CodeDenied},
+		{"CodeNoteConflict", CodeNoteConflict, rpc.CodeNoteConflict},
 	} {
 		if c.mine != c.real {
 			t.Errorf("%s is %d here and %d in AutoDB", c.name, c.mine, c.real)

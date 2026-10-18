@@ -82,6 +82,8 @@ func (p *Plugin) noteRows() []panel.MenuRow {
 		{ID: "note.open", Label: "&Open", Enabled: picked},
 		{ID: "note.delete", Label: "&Delete…", Enabled: picked},
 		{ID: "note.refresh", Label: "&Refresh", Enabled: in},
+		{ID: "note.save", Label: "&Save to server", Enabled: in && p.remote.on != nil},
+		{ID: "note.saveover", Label: "Save o&ver the server's…", Enabled: in && p.remote.on != nil},
 	}
 }
 
@@ -100,10 +102,16 @@ func (p *Plugin) noteRow(id string) bool {
 		ws, name := p.notes.ws, p.notes.names[p.notes.sel]
 		p.askConfirm("Delete note", "Delete "+name+"?", func() {
 			p.act("deleting "+name, func(ctx context.Context) error { return p.cli.DeleteNote(ctx, p.token, ws, name) })
+			p.deleteRemoteCopy(ws, name)
 			p.chooseNotes(ws)
 		})
 	case "note.refresh":
 		p.chooseNotes(p.notes.ws)
+	case "note.save":
+		p.saveNote(p.doc, false)
+	case "note.saveover":
+		d := p.doc
+		p.askConfirm("Save over the server's", "Write this buffer over the server's copy you compared?", func() { p.saveNote(d, true) })
 	default:
 		return false
 	}
@@ -136,6 +144,10 @@ func (p *Plugin) openNote(i int) {
 		return
 	}
 	name := p.notes.names[i]
+	if p.remote.on != nil {
+		p.openRemoteNote(p.notes.ws, name)
+		return
+	}
 	path, err := p.localNotePath(p.notes.ws, name)
 	if err != nil {
 		p.problem = err.Error()
