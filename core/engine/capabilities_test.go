@@ -142,6 +142,7 @@ var identityIsTheQuestion = map[string]string{
 	"core/config/config.go":   "validates the DSN transport only where there is a DSN",
 	"app/main.go":             "shows a path or a DSN in the startup banner",
 	"tui/syntax.go":           "names the highlighter for the engine's own SQL dialect — which language the query is written in",
+	"cmd/autodoc-autodb/internal/autodocplugin/tlsdsn.go": "writes TLS file parameters into a DSN in that engine's own DSN syntax, as core/exec/dsn.go parses it",
 }
 
 func TestEngineIdentityIsComparedOnlyWhereItIsTheQuestion(t *testing.T) {
