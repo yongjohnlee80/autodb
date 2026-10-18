@@ -6,8 +6,8 @@ toolchain go1.26.9
 
 require (
 	github.com/yongjohnlee80/autodb v0.0.0
-	github.com/yongjohnlee80/autodoc v0.1.56-0.20261018095238-525a96644dd1
-	github.com/yongjohnlee80/golib v0.7.2
+	github.com/yongjohnlee80/autodoc v0.1.56
+	github.com/yongjohnlee80/golib v0.7.4
 )
 
 require (
