@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
@@ -81,10 +82,11 @@ type Plugin struct {
 	start   func(ctx context.Context, bin autodb.Binary) (*autodb.Client, error)
 	install func(ctx context.Context) error
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	work   chan func() // the steps the plugin's goroutine runs, in order
-	done   chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	work      chan func() // the steps the plugin's goroutine runs, in order
+	done      chan struct{}
+	closeOnce sync.Once
 	// inline runs each step at once, on the caller's goroutine: a test driving the plugin one call
 	// at a time, never concurrently. The real link never sets it.
 	inline bool
@@ -111,11 +113,14 @@ type Plugin struct {
 	logins     string
 	loginsTold bool
 
-	token string // auth.login's, in memory only
-	conn  *autodb.Connection
-	eng   engine.Name
-	sid   string // the session, opened once on the chosen connection
-	tree  *tree  // the connections' tree (tree.go)
+	token string // auth.login's, in memory and in AutoDoc's session slot only (session.go)
+	creds creds  // the slot's records, by target
+	// resumeName is the name a kept sign-in was for, filled in when its store asks the passphrase
+	resumeName string
+	conn       *autodb.Connection
+	eng        engine.Name
+	sid        string // the session, opened once on the chosen connection
+	tree       *tree  // the connections' tree (tree.go)
 	// treeSent is told each part of the tree sent to the panel: a test's recorder
 	treeSent func(parent []string, nodes []panel.Node)
 
@@ -163,7 +168,7 @@ func newPlugin(version, dir string) *Plugin {
 	_, _ = rand.Read(b[:])
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Plugin{version: version, pluginDir: dir, ctx: ctx, cancel: cancel,
-		work: make(chan func(), 64), done: make(chan struct{}), idPrefix: "res-" + hex.EncodeToString(b[:])}
+		work: make(chan func(), 64), done: make(chan struct{}), creds: creds{}, idPrefix: "res-" + hex.EncodeToString(b[:])}
 	p.ui = panel.New(p.events())
 	go p.loop()
 	return p
@@ -221,6 +226,7 @@ func (p *Plugin) events() panel.Events {
 // Open opens the panel, then looks for AutoDB.
 func (p *Plugin) Open(peer *plugin.Peer, o plugin.Open) {
 	p.ui.Card().Open(peer, o)
+	p.post(func() { p.creds = readCreds(o.Session) })
 	p.attach(peer)
 }
 
@@ -246,11 +252,13 @@ func (p *Plugin) Document(d plugin.Document) { p.post(func() { p.doc = d }) }
 
 // Close lets go of what the plugin holds on the server (the cursor, the session and the token)
 // within its budget, then closes the panel and stops the plugin's goroutine.
-func (p *Plugin) Close() {
+func (p *Plugin) Close() { p.closeOnce.Do(p.close) }
+
+func (p *Plugin) close() {
 	ended := make(chan struct{})
 	p.post(func() {
 		defer close(ended)
-		p.letGo()
+		p.letGo(p.logoutOnClose())
 	})
 	select {
 	case <-ended:
@@ -261,8 +269,8 @@ func (p *Plugin) Close() {
 	<-p.done
 }
 
-// letGo closes the cursor, the session and the token on the server.
-func (p *Plugin) letGo() {
+// letGo closes the cursor and the session on the server, and logs the token out when logout says.
+func (p *Plugin) letGo(logout bool) {
 	if p.cli == nil {
 		return
 	}
@@ -274,7 +282,7 @@ func (p *Plugin) letGo() {
 	if p.sid != "" {
 		_ = p.cli.CloseSession(ctx, p.token, p.sid)
 	}
-	if p.token != "" {
+	if p.token != "" && logout {
 		_ = p.cli.Logout(ctx, p.token)
 	}
 	_ = p.cli.Close()
@@ -315,7 +323,12 @@ func (p *Plugin) connect() {
 	ctx, cancel := context.WithTimeout(p.ctx, controlTimeout)
 	defer cancel()
 	p.noUsers, _ = cli.NeedsBootstrap(ctx)
-	p.step, p.problem = stepLogin, ""
+	p.problem = ""
+	if p.resume() { // a sign-in kept from an earlier start of this AutoDoc
+		p.choose()
+		return
+	}
+	p.step = stepLogin
 	p.draw()
 }
 
@@ -375,7 +388,8 @@ func (p *Plugin) login(name, pass string) {
 		p.draw()
 		return
 	}
-	p.token = token
+	p.token, p.resumeName = token, ""
+	p.keep(name)
 	kept := rememberLogin(p.logins, serverKey(p.cli), name)
 	p.choose()
 	if kept != nil && p.problem == "" {
@@ -466,6 +480,7 @@ func (p *Plugin) failed(what string, err error) {
 // card goes back to the sign-in.
 func (p *Plugin) signedOut(why string) {
 	p.forgetTable(errors.New("signed out of AutoDB"))
+	p.forget() // the kept sign-in is no good either
 	p.token, p.sid = "", ""
 	p.step = stepLogin
 	p.problem = "signed out (" + why + "): sign in again"

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"net"
 	"strings"
 	"sync"
@@ -37,6 +38,9 @@ type fakeDB struct {
 	storeID string
 	// pass is the passphrase auth.login takes, "right" when "".
 	pass string
+	// locked is a store restarted with no service keyslot: whoami says store_unlocked false;
+	// revoked refuses every token auth.whoami is asked about
+	locked, revoked bool
 	// more are connections conn.list lists after the first, scratch (id 7), all in the workspace
 	// AutoDoc (id 1); loose ones conn.list lists in no workspace.
 	more, loose []map[string]any
@@ -87,6 +91,14 @@ func newFakeDB(t *testing.T) *fakeDB {
 		return map[string]any{"token": "tok-1", "user": map[string]any{"name": p[0]}}, nil
 	})
 	handle("auth.logout", func([]any) (any, error) { return nil, nil })
+	handle("auth.whoami", func(p []any) (any, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if p[0] != "tok-1" || f.revoked {
+			return nil, &golibrpc.Error{Code: autodb.CodeAuth, Message: "auth: invalid or expired token"}
+		}
+		return map[string]any{"id": int64(1), "name": "admin", "role": "admin", "store_unlocked": !f.locked}, nil
+	})
 	handle("conn.list", func([]any) (any, error) {
 		list := []any{map[string]any{"id": int64(7), "name": "scratch", "engine": f.engineName()}}
 		f.mu.Lock()
@@ -227,6 +239,22 @@ type fakeHost struct {
 	calls  []hostCall
 	// answer is what a host.call is answered: nil runs it
 	answer error
+	// slot is the session slot as last set (host.session); reason the close's (CloseReason)
+	slot   map[string]string
+	reason string
+}
+
+func (h *fakeHost) SetSession(values map[string]string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.slot = maps.Clone(values)
+	return nil
+}
+
+func (h *fakeHost) CloseReason() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.reason
 }
 
 // hostCall is one host.call the plugin sent: the command's id and its args.

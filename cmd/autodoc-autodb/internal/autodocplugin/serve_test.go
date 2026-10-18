@@ -164,8 +164,8 @@ func TestThePanelSignsInConnectsAndRunsOverTheRealLink(t *testing.T) {
 	l.key("j")
 	l.key("Enter")
 	l.shows("Connection: scratch (postgres)")
-	if title, err := plugin.ReadTitle(l.waitFor(plugin.MethodTitle).params); err != nil || !strings.Contains(title, "scratch") {
-		t.Fatalf("the card's title: %q (%v)", title, err)
+	for title := ""; !strings.Contains(title, "scratch"); { // "AutoDB" first, then the connection's
+		title, _ = plugin.ReadTitle(l.waitFor(plugin.MethodTitle).params)
 	}
 
 	l.send(plugin.MethodCommand, plugin.FitCommand("run", docAt("SELECT n FROM t|")))

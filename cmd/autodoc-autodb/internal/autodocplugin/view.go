@@ -137,8 +137,15 @@ func (p *Plugin) draw() {
 		case stepLogin:
 			open = panel.DialogSignIn
 			p.prefill = p.lastName()
+			if p.resumeName != "" { // a kept sign-in whose store is locked: the same user
+				p.prefill = p.resumeName
+			}
 			sources["signInName"] = p.prefill
+			// the dialog is modal and the panel behind it not drawn: why it opens again is said in it
 			sources["signInNote"] = p.stepText()
+			if p.problem != "" {
+				sources["signInNote"] = p.problem
+			}
 		case stepInstall:
 			if autodb.IsRelease(p.version) {
 				open = panel.DialogInstall
