@@ -182,7 +182,11 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 		conn, err = openPostgres(ctx, name, string(dsn),
 			pgPrepareConnVerify(), e.pgAfterReleaseReset(connID), e.pgPoolLimits(row))
 	case engine.MySQL:
-		conn, err = openMySQL(ctx, name, string(dsn), mysql.Option(e.sqlPoolLimits(row)))
+		// its TLS files, if it names any, become a TLS config the driver has by name (mysql_tls.go)
+		var open string
+		if open, err = mysqlTLS(string(dsn)); err == nil {
+			conn, err = openMySQL(ctx, name, open, mysql.Option(e.sqlPoolLimits(row)))
+		}
 	case engine.SQLite:
 		conn, err = openSQLite(ctx, name, string(dsn), sqlite.Option(e.sqlPoolLimits(row)))
 	default:

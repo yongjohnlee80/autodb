@@ -48,6 +48,9 @@ func ValidateDSN(engineName engine.Name, dsn string) error {
 		if cfg.InterpolateParams {
 			return fmt.Errorf("exec: mysql DSN must not enable interpolateParams: client-side interpolation rewrites the statement after classification")
 		}
+		if _, _, _, _, err := mysqlTLSFiles(cfg); err != nil { // tls-ca/cert/key: §4.11, mysql_tls.go
+			return err
+		}
 		for key, val := range cfg.Params {
 			switch strings.ToLower(key) {
 			case "sql_mode":
@@ -79,6 +82,8 @@ func ValidateDSN(engineName engine.Name, dsn string) error {
 		rp := cfg.ConnConfig.RuntimeParams
 		for key, val := range rp {
 			switch strings.ToLower(key) {
+			case mysqlTLSCA, mysqlTLSCert, mysqlTLSKey:
+				return fmt.Errorf("exec: postgres DSN must not set %s: it is MySQL's (postgres takes sslrootcert, sslcert and sslkey)", key)
 			case "standard_conforming_strings":
 				return fmt.Errorf("exec: postgres DSN must not set standard_conforming_strings (%q): the classifier assumes the modern default", val)
 			case "options":
