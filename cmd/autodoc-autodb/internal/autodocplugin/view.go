@@ -88,13 +88,15 @@ func (p *Plugin) menu() []panel.MenuRow {
 	switch p.tab {
 	case panel.TabConnections:
 		return p.connectionRows()
+	case panel.TabNotes:
+		return p.noteRows()
 	}
 	return []panel.MenuRow{{ID: "conn.refresh", Label: "&Refresh", Enabled: signedIn}}
 }
 
 // menuRow is a row of the ☰ menu chosen.
 func (p *Plugin) menuRow(id string) {
-	if p.connectionRow(id) {
+	if p.connectionRow(id) || p.noteRow(id) {
 		return
 	}
 	switch id {

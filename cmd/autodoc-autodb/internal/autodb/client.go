@@ -66,6 +66,9 @@ type Hello struct {
 	Version  string
 	Instance string
 	StoreID  string
+	// NotesDir is where the server keeps notes on this host: <NotesDir>/u-<user>/ws-<id>/<name>.sql;
+	// "" from a server that keeps none, or to a remote client
+	NotesDir string
 }
 
 // Client is one connection to an AutoDB server, past a compatible hello.
@@ -98,6 +101,7 @@ func Dial(ctx context.Context, network, addr, clientVersion string) (*Client, er
 	h.Version, _ = m["version"].(string)
 	h.Instance, _ = m["instance"].(string)
 	h.StoreID, _ = m["store_id"].(string)
+	h.NotesDir, _ = m["notes_dir"].(string)
 	return &Client{rpc: c, Hello: h, Addr: addr}, nil
 }
 

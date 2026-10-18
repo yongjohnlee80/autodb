@@ -40,6 +40,9 @@ type fakeDB struct {
 	pass string
 	// noUsers is a store with no user yet: auth.needs_bootstrap says so until auth.bootstrap
 	noUsers bool
+	// notes answer notes.list; notesDir is the hello's notes_dir
+	notes    []string
+	notesDir string
 	// noWorkspaces answers workspace.list with none
 	noWorkspaces bool
 	// locked is a store restarted with no service keyslot: whoami says store_unlocked false;
@@ -75,6 +78,9 @@ func newFakeDB(t *testing.T) *fakeDB {
 	handle("sys.hello", func([]any) (any, error) {
 		m := map[string]any{"protocol": autodb.Protocol, "server": "autodb", "version": "v-fake", "instance": "i1"}
 		f.mu.Lock()
+		if f.notesDir != "" {
+			m["notes_dir"] = f.notesDir
+		}
 		if f.storeID != "" {
 			m["store_id"] = f.storeID
 		}
@@ -96,6 +102,22 @@ func newFakeDB(t *testing.T) *fakeDB {
 	for _, m := range []string{"workspace.rename", "workspace.delete", "workspace.attach", "conn.rename", "conn.test"} {
 		handle(m, ok)
 	}
+	handle("notes.list", func([]any) (any, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		out := []any{}
+		for _, n := range f.notes {
+			out = append(out, n)
+		}
+		return out, nil
+	})
+	handle("notes.create", func(p []any) (any, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.notes = append(f.notes, p[2].(string))
+		return map[string]any{"version": "v0"}, nil
+	})
+	handle("notes.delete", ok)
 	handle("workspace.create", func([]any) (any, error) { return int64(2), nil })
 	handle("conn.create", func([]any) (any, error) { return int64(8), nil })
 	handle("conn.delete", func([]any) (any, error) { return map[string]any{"archived": false}, nil })

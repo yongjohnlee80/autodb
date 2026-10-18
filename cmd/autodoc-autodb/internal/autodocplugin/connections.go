@@ -221,7 +221,7 @@ func (p *Plugin) bootstrap(name, pass, again string) {
 		return
 	}
 	p.noUsers = false
-	p.token = token
+	p.token, p.who = token, autodb.Who{}
 	p.keep(name)
 	_ = rememberLogin(p.logins, serverKey(p.cli), name)
 	p.choose()

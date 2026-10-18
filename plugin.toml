@@ -7,9 +7,11 @@
 name     = "autodb"
 title    = "AutoDB"
 kind     = "dialog"
-protocol = 6                   # card pointer actions; tables and typed cells remain compatible
+protocol = 7                   # the sign-in kept in AutoDoc's session slot, the close's reason, a command's arguments
 command  = ["./bin/autodoc-autodb"]
-calls    = ["buffer.new"]      # AutoDoc's command it runs: Enter on a table opens a SELECT of it
+# AutoDoc's commands it runs: Enter on a table opens a SELECT of it in a new buffer; a note opens
+# as its file; a plugin behind the server asks AutoDoc to update it (it may name only itself)
+calls    = ["buffer.new", "file.open_path", "plugins.update"]
 
 [dialog]
 modal      = false             # a card: it takes the keys when focused, Esc gives them back

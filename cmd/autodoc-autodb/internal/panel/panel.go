@@ -62,6 +62,10 @@ type Events struct {
 	Confirmed func()
 	// AddConnection is the Add connection dialog accepted.
 	AddConnection func(f ConnForm)
+	// NoteWorkspace is the NOTES tab's workspace chosen, by its key; NoteOpen is Enter on a note,
+	// NoteCurrent the list's selection moved, each by its row.
+	NoteWorkspace         func(key string)
+	NoteOpen, NoteCurrent func(row int)
 }
 
 // ConnForm is the Add connection dialog's fields.
@@ -89,12 +93,15 @@ type Panel struct {
 	menu    *tuidecl.ListModel
 	tree    *tuidecl.TreeListModel
 	engines *tuidecl.ListModel
+	noteWS  *tuidecl.ListModel
+	notes   *tuidecl.ListModel
 }
 
 // New is the panel, its first state the sources' initial values.
 func New(ev Events) *Panel {
 	p := &Panel{ev: ev, menu: tuidecl.NewListModel("key", "label", "id", "enabled"),
-		tree: tuidecl.NewTreeListModel("key", "label"), engines: tuidecl.NewListModel("key", "label")}
+		tree: tuidecl.NewTreeListModel("key", "label"), engines: tuidecl.NewListModel("key", "label"),
+		noteWS: tuidecl.NewListModel("key", "label"), notes: tuidecl.NewListModel("key", "label")}
 	p.engines.Reset([]tuidecl.Row{{"key": "postgres", "label": "PostgreSQL"}, {"key": "mysql", "label": "MySQL"},
 		{"key": "sqlite", "label": "SQLite"}})
 	p.tree.OnFetch = func(ix tuidecl.Index) { call1(ev.Opened, p.keysOf(ix)) }
@@ -105,7 +112,7 @@ func New(ev Events) *Panel {
 		tuidecl.Sources(map[string]any{
 			"App.menu": p.menu, "App.tree": p.tree, "App.tabIndex": 0,
 			"App.where": "AutoDB", "App.status": "", "App.problem": "",
-			"App.notes": "", "App.remote": "", "App.system": "",
+			"App.notes": p.notes, "App.noteWorkspaces": p.noteWS, "App.remote": "", "App.system": "",
 			"App.signInName": "", "App.signInNote": "", "App.installNote": "", "App.engines": p.engines,
 			"App.bootstrapNote": "", "App.nameTitle": "", "App.nameNote": "", "App.nameValue": "",
 			"App.confirmTitle": "", "App.confirmText": "", "App.addConnNote": "",
@@ -170,6 +177,12 @@ func New(ev Events) *Panel {
 				return nil
 			},
 			"App.opened": func([]qml.SpecValue) error { return nil }, // OnFetch reads the first opening
+			"App.noteWorkspace": func(args []qml.SpecValue) error {
+				call1(ev.NoteWorkspace, strArgs(args, 1)[0])
+				return nil
+			},
+			"App.noteOpen":    p.rowHandler(ev.NoteOpen),
+			"App.noteCurrent": p.rowHandler(ev.NoteCurrent),
 		}),
 	}})
 	return p
@@ -201,6 +214,21 @@ func (v View) Menu(rows []MenuRow) {
 		out[i] = tuidecl.Row{"key": strconv.Itoa(i), "label": r.Label, "id": r.ID, "enabled": r.Enabled}
 	}
 	v.p.menu.Reset(out)
+}
+
+// Item is a list's row: its key, and the text shown.
+type Item struct{ Key, Label string }
+
+// NoteWorkspaces replaces the NOTES tab's workspaces; Notes its list.
+func (v View) NoteWorkspaces(items []Item) { v.p.noteWS.Reset(itemRows(items)) }
+func (v View) Notes(items []Item)          { v.p.notes.Reset(itemRows(items)) }
+
+func itemRows(items []Item) []tuidecl.Row {
+	out := make([]tuidecl.Row, len(items))
+	for i, it := range items {
+		out[i] = tuidecl.Row{"key": it.Key, "label": it.Label}
+	}
+	return out
 }
 
 // Tree replaces the children of the node at parent (nil: the top level); false when that node is
@@ -269,6 +297,17 @@ func (p *Panel) indexHandler(fn func([]string)) gdecl.HandlerFunc {
 			return fmt.Errorf("panel: an index wanted, not %q", args[0].Raw)
 		}
 		call1(fn, p.keysOf(ix))
+		return nil
+	}
+}
+
+func (p *Panel) rowHandler(fn func(int)) gdecl.HandlerFunc {
+	return func(args []qml.SpecValue) error {
+		i, err := intArg(args)
+		if err != nil {
+			return err
+		}
+		call1(fn, i)
 		return nil
 	}
 }

@@ -27,7 +27,12 @@ Window {
                 TreeView { id: tree; focus: true; model: App.tree; textRole: "label"
                     onActivated: App.use(index); onExpanded: App.opened(index)
                     onCurrentIndexChanged: App.current(index) } }
-            Tab { title: "NOTES"; Text { text: App.notes } }
+            Tab { title: "NOTES"
+                Flex { direction: Tui.Vertical
+                    ComboBox { id: noteWs; model: App.noteWorkspaces; textRole: "label"; valueRole: "key"
+                        placeholderText: "workspace"; onActivated: App.noteWorkspace(noteWs.currentValue) }
+                    ListView { id: notes; model: App.notes; textRole: "label"
+                        onActivated: App.noteOpen(index); onCurrentIndexChanged: App.noteCurrent(index) } } }
             Tab { title: "REMOTE"; Text { text: App.remote } }
             Tab { title: "SYSTEM"; Text { text: App.system } } }
         Text { text: App.status }

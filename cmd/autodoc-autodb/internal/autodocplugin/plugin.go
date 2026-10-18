@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -119,10 +120,14 @@ type Plugin struct {
 	resumeName string
 	conn       *autodb.Connection
 	eng        engine.Name
-	sid        string   // the session, opened once on the chosen connection
-	tree       *tree    // the connections' tree (tree.go)
-	sel        []string // the tree's selection, by its keys
-	addTo      int64    // the workspace the Add connection dialog was opened for
+	sid        string     // the session, opened once on the chosen connection
+	tree       *tree      // the connections' tree (tree.go)
+	sel        []string   // the tree's selection, by its keys
+	notes      noteState  // the NOTES tab's (notes.go)
+	who        autodb.Who // who the token signs in as: the notes' owner
+	// notesSent is told each list of notes sent to the panel: a test's recorder
+	notesSent func(names []string)
+	addTo     int64 // the workspace the Add connection dialog was opened for
 	// onName and onConfirm are what the name dialog's OK and the confirm dialog's Yes do
 	onName           func(name string)
 	onConfirm        func()
@@ -235,6 +240,15 @@ func (p *Plugin) events() panel.Events {
 		Named:         func(name string) { p.post(func() { p.named(name) }) },
 		Confirmed:     func() { p.post(p.confirmed) },
 		AddConnection: func(f panel.ConnForm) { p.post(func() { p.addConnection(f) }) },
+		NoteWorkspace: func(key string) {
+			p.post(func() {
+				if id, err := strconv.ParseInt(key, 10, 64); err == nil {
+					p.chooseNotes(id)
+				}
+			})
+		},
+		NoteOpen:    func(row int) { p.post(func() { p.openNote(row) }) },
+		NoteCurrent: func(row int) { p.post(func() { p.notes.sel = row; p.draw() }) },
 	}
 }
 
@@ -406,7 +420,7 @@ func (p *Plugin) login(name, pass string) {
 		p.draw()
 		return
 	}
-	p.token, p.resumeName = token, ""
+	p.token, p.resumeName, p.who = token, "", autodb.Who{}
 	p.keep(name)
 	kept := rememberLogin(p.logins, serverKey(p.cli), name)
 	p.choose()
@@ -426,7 +440,11 @@ func (p *Plugin) choose() {
 		p.step = stepPick
 	}
 	p.problem = ""
+	if p.who.Name == "" {
+		p.learnWho()
+	}
 	p.loadTree()
+	p.sendNoteWorkspaces()
 	p.draw()
 	p.firstWorkspace()
 }
@@ -500,7 +518,7 @@ func (p *Plugin) failed(what string, err error) {
 func (p *Plugin) signedOut(why string) {
 	p.forgetTable(errors.New("signed out of AutoDB"))
 	p.forget() // the kept sign-in is no good either
-	p.token, p.sid = "", ""
+	p.token, p.sid, p.who = "", "", autodb.Who{}
 	p.step = stepLogin
 	p.problem = "signed out (" + why + "): sign in again"
 }

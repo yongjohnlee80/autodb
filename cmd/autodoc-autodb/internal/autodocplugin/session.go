@@ -138,7 +138,7 @@ func (p *Plugin) resume() bool {
 		p.problem = "AutoDB restarted and its store is locked: your passphrase unlocks it"
 		return false
 	}
-	p.token = r.Token
+	p.token, p.who = r.Token, who
 	p.status = "signed in as " + who.Name
 	return true
 }
