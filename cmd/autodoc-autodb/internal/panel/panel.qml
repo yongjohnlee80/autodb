@@ -48,8 +48,10 @@ Window {
         onRejected: App.signInCancelled()
         Flex { direction: Tui.Vertical
             Text { text: App.signInNote }
-            TextField { id: signInName; placeholderText: "name"; text: App.signInName }
-            TextField { id: signInPass; placeholderText: "passphrase"; echoMode: TextInput.Password } } }
+            Text { text: "username" }
+            TextField { id: signInName; text: App.signInName }
+            Text { text: "passphrase" }
+            TextField { id: signInPass; echoMode: TextInput.Password } } }
 
     Dialog { id: bootstrap; title: "Make the first AutoDB user"
         standardButtons: Dialog.Ok | Dialog.Cancel; defaultButton: Dialog.Ok
