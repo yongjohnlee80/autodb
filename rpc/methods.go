@@ -777,8 +777,9 @@ func (s *Server) register() {
 		}
 		m := identMap(id)
 		// Whether the store's master key is in memory: a token survives a restart, the key does not
-		// (ADR 0087), so a client resuming a sign-in asks the passphrase when it is false (ADR
-		// 1792301900 §4.3a). Only to a valid token; a refused caller learns as much from a refusal.
+		// (a store with no service keyslot is locked until a passphrase login), so a client resuming
+		// a sign-in asks the passphrase when it is false. Only to a valid token; a refused caller
+		// learns as much from a refusal.
 		// Additive: an older client ignores it.
 		m["store_unlocked"] = s.auth.Unlocked()
 		return m, nil

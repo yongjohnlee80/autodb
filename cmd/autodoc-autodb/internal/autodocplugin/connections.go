@@ -11,6 +11,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/panel"
+	"github.com/yongjohnlee80/autodb/core/engine"
 )
 
 // CONNECTIONS — the first run, and the tab's ☰ menu: add a connection (its TLS files written into
@@ -307,24 +308,24 @@ func (p *Plugin) testConnection(c autodb.Connection) {
 // sslcert and sslkey, verify-full when a CA is given and the DSN names no sslmode; MySQL's tls-ca,
 // tls-cert and tls-key, which the AutoDB server makes a TLS config of. SQLite has none. The paths
 // are the server's: a remote server reads its own files.
-func tlsDSN(engine, dsn, ca, cert, key string) (string, error) {
+func tlsDSN(eng, dsn, ca, cert, key string) (string, error) {
 	if ca == "" && cert == "" && key == "" {
 		return dsn, nil
 	}
 	if (cert == "") != (key == "") {
 		return "", errors.New("a TLS certificate and its key go together")
 	}
-	switch engine {
-	case "postgres":
+	switch engine.Name(eng) {
+	case engine.Postgres:
 		params := [][2]string{{"sslrootcert", ca}, {"sslcert", cert}, {"sslkey", key}}
 		if ca != "" && !strings.Contains(dsn, "sslmode") {
 			params = append(params, [2]string{"sslmode", "verify-full"})
 		}
 		return withParams(dsn, params, pgKeyword), nil
-	case "mysql":
+	case engine.MySQL:
 		return withParams(dsn, [][2]string{{"tls-ca", ca}, {"tls-cert", cert}, {"tls-key", key}}, nil), nil
 	}
-	return "", fmt.Errorf("%s has no TLS files", engine)
+	return "", fmt.Errorf("%s has no TLS files", eng)
 }
 
 // withParams adds the params with a value to dsn: as a URL's query (a postgres:// URL, or MySQL's

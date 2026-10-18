@@ -216,7 +216,7 @@ func mysqlDSN(addr string, params ...string) string {
 	return dsn
 }
 
-// TestMySQLTLSFromFiles (ADR 1792301900 §4.11, result 12): a DSN naming tls-ca, tls-cert and tls-key
+// TestMySQLTLSFromFiles: a DSN naming tls-ca, tls-cert and tls-key
 // connects over TLS to a server whose certificate the CA signed, presenting the client certificate;
 // the three are never sent to MySQL as variables. A CA that did not sign the server's certificate,
 // or a host it was not issued for, is refused; a renewed CA file is read at the next connection.

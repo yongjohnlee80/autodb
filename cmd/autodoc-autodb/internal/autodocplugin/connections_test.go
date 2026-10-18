@@ -41,7 +41,7 @@ func enabled(rows []panel.MenuRow) []string {
 
 // A store with no user yet opens the first user's dialog, not the sign-in: a short or mismatched
 // passphrase says so and asks again; made, the user is signed in, and with no workspace to see, the
-// first one is offered, named AutoDoc (ADR result 2).
+// first one is offered, named AutoDoc.
 func TestTheFirstRunMakesTheUserAndTheWorkspace(t *testing.T) {
 	db := newFakeDB(t)
 	db.noUsers, db.noWorkspaces = true, true
@@ -98,7 +98,7 @@ func TestTheConnectionsMenuFollowsTheSelection(t *testing.T) {
 }
 
 // Add connection writes the TLS files into the DSN as the server reads them, makes the connection
-// in the workspace the dialog was opened for, and tests it (ADR result 3); rename and delete go
+// in the workspace the dialog was opened for, and tests it; rename and delete go
 // through their dialogs; Test says how long the database took.
 func TestAConnectionIsAddedTestedRenamedAndDeleted(t *testing.T) {
 	db := newFakeDB(t)

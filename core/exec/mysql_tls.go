@@ -14,7 +14,7 @@ import (
 	drvmysql "github.com/go-sql-driver/mysql"
 )
 
-// MYSQL TLS FROM FILES (ADR 1792301900 §4.11). A MySQL DSN may name its TLS files by path on the
+// MYSQL TLS FROM FILES. A MySQL DSN may name its TLS files by path on the
 // server's host: tls-ca (the CA that signed the server's certificate; the system's roots without
 // it), tls-cert and tls-key (a client certificate, both or neither). go-sql-driver takes TLS only
 // as a config registered by name, so the server registers one per set of files and host, and opens

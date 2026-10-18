@@ -30,7 +30,7 @@ func restartWith(t *testing.T, db *fakeDB, slot map[string]string) (*Plugin, *fa
 }
 
 // A sign-in kept in the slot is resumed at the next start with no form, checked by auth.whoami;
-// no passphrase is asked again (ADR result 1).
+// no passphrase is asked again.
 func TestAKeptSignInResumes(t *testing.T) {
 	db := newFakeDB(t)
 	_, h := signedInOn(t, db)

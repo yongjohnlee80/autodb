@@ -24,7 +24,7 @@ func TestSystemSaysTheVersions(t *testing.T) {
 
 // Restart, asked first, stops the server only when idle (sys.restart_if_idle), starts it again and
 // resumes the kept sign-in with no form; a store left locked asks the passphrase, the name filled
-// in (ADR result 6).
+// in.
 func TestRestartResumesTheSignIn(t *testing.T) {
 	for _, locked := range []bool{false, true} {
 		db := newFakeDB(t)
@@ -72,7 +72,7 @@ func TestARefusedRestartSaysWhy(t *testing.T) {
 
 // A server one protocol behind is found by a probe, never through the working connection; SYSTEM
 // opens on it, Upgrade installs the plugin's release, signs in on a lifecycle connection, restarts
-// the server once idle and starts the plugin's release (ADR result 11).
+// the server once idle and starts the plugin's release.
 func TestAnOlderServerRestartsOntoThePluginsRelease(t *testing.T) {
 	db := newFakeDB(t)
 	db.protocol, db.nextProtocol = autodb.Protocol-1, autodb.Protocol

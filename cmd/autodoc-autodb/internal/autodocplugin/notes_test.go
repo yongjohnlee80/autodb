@@ -9,7 +9,7 @@ import (
 
 // A workspace's notes are listed in NOTES as the plugin signs in; a note opens in AutoDoc as the
 // server's own file of it, <notes dir>/u-<user>/ws-<id>/<name> (file.open_path); New makes one and
-// opens it; Delete asks first (ADR result 4).
+// opens it; Delete asks first.
 func TestNotesOpenAsTheStoresFiles(t *testing.T) {
 	db := newFakeDB(t)
 	db.notesDir = filepath.Join(t.TempDir(), "notes")

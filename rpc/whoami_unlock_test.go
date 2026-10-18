@@ -45,7 +45,7 @@ func restarted(t *testing.T, f *fixture) *fixture {
 	return &fixture{store: f.store, svc: svc, rootTok: f.rootTok, eng: eng, addr: srv.Addr(), srv: srv}
 }
 
-// TestWhoamiSaysWhetherTheStoreIsUnlocked (ADR 1792301900 §4.3a, its spike): auth.whoami answers
+// TestWhoamiSaysWhetherTheStoreIsUnlocked: auth.whoami answers
 // store_unlocked; after a restart with no service keyslot a token still valid answers false, and a
 // passphrase login unlocks it.
 func TestWhoamiSaysWhetherTheStoreIsUnlocked(t *testing.T) {

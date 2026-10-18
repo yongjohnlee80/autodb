@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-// THE PANEL'S VERBS (ADR 1792301900): who is signed in, the first run, workspaces and connections,
+// THE PANEL'S VERBS: who is signed in, the first run, workspaces and connections,
 // and notes. Each takes the session's token first, as the server's handlers do.
 
 // Who is auth.whoami's answer.

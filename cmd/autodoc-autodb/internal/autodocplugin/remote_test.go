@@ -39,8 +39,7 @@ func remoteSetup(t *testing.T) (*Plugin, *fakeHost, *fakeDB, *remotetest.Server)
 
 // A remote server is added, connected (the passphrase twice on this machine's first connect, the
 // host key trusted and pinned), and its connections are the tabs'; Restart is not offered for it;
-// Disconnect returns to the local server, signed in, its record never overwritten (ADR results 5,
-// 9).
+// Disconnect returns to the local server, signed in, its record never overwritten.
 func TestARemoteServerIsConnectedAndLeft(t *testing.T) {
 	p, h, _, s := remoteSetup(t)
 	opened := dialogs(p)
@@ -117,7 +116,7 @@ func TestARemoteServerIsEditedAndDeleted(t *testing.T) {
 }
 
 // An answer asked of one server never acts on another: a Delete confirmed after the target
-// changed does nothing (ADR result 9).
+// changed does nothing.
 func TestAnAnswerForTheOldServerIsDropped(t *testing.T) {
 	db := newFakeDB(t)
 	p, _ := connected(t, db)

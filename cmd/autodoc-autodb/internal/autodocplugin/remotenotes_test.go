@@ -59,7 +59,7 @@ func save(p *Plugin, path, text string, version int) {
 
 // A remote note opens as its working copy and saves to its note: AutoDoc saves the buffer first;
 // another client's write in between makes the save a conflict, the server's text written beside
-// it and the copy kept; Save over the server's then settles it (ADR results 10, 10b).
+// it and the copy kept; Save over the server's then settles it.
 func TestARemoteNoteSavesToItsNote(t *testing.T) {
 	p, h, s := remoteNotes(t)
 	path := newRemoteNote(t, p, h)
@@ -99,7 +99,7 @@ func TestARemoteNoteSavesToItsNote(t *testing.T) {
 }
 
 // Save refuses, writing nothing: an ordinary draft, a working copy whose sidecar names another
-// place, and another user's note (ADR results 10, 10a).
+// place, and another user's note.
 func TestASaveOfAnythingButItsNoteIsRefused(t *testing.T) {
 	p, h, s := remoteNotes(t)
 	path := newRemoteNote(t, p, h)
@@ -131,8 +131,7 @@ func TestASaveOfAnythingButItsNoteIsRefused(t *testing.T) {
 }
 
 // Reopening follows the working copy: a clean copy of an older version asks, and Yes keeps the old
-// copy aside; an edited one is opened untouched, the server's text written beside it (ADR result
-// 10b).
+// copy aside; an edited one is opened untouched, the server's text written beside it.
 func TestReopeningNeverLosesAnEdit(t *testing.T) {
 	p, h, s := remoteNotes(t)
 	path := newRemoteNote(t, p, h)
@@ -172,8 +171,7 @@ func TestReopeningNeverLosesAnEdit(t *testing.T) {
 
 // A sidecar that cannot be written after a save is kept in memory and used: the next save in the
 // run expects the version the server gave, with no conflict, and writes it once it can. After a
-// restart (the sidecar stale), the server holding the same text says the copies are equal (ADR
-// result 10b).
+// restart (the sidecar stale), the server holding the same text says the copies are equal.
 func TestAnUnwrittenSidecarIsRetriedAndAStaleOneSaysTheCopiesAreEqual(t *testing.T) {
 	p, h, s := remoteNotes(t)
 	path := newRemoteNote(t, p, h)

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodoc/plugin/decl"
 	gdecl "github.com/yongjohnlee80/golib/decl"
 	"github.com/yongjohnlee80/golib/parse/qml"
@@ -124,8 +125,8 @@ func New(ev Events) *Panel {
 		remotes: tuidecl.NewListModel("key", "label"), auths: tuidecl.NewListModel("key", "label")}
 	p.auths.Reset([]tuidecl.Row{{"key": "file", "label": "SSH key: its file"},
 		{"key": "agent", "label": "SSH key: the ssh agent signs"}})
-	p.engines.Reset([]tuidecl.Row{{"key": "postgres", "label": "PostgreSQL"}, {"key": "mysql", "label": "MySQL"},
-		{"key": "sqlite", "label": "SQLite"}})
+	p.engines.Reset([]tuidecl.Row{{"key": string(engine.Postgres), "label": "PostgreSQL"},
+		{"key": string(engine.MySQL), "label": "MySQL"}, {"key": string(engine.SQLite), "label": "SQLite"}})
 	p.tree.OnFetch = func(ix tuidecl.Index) { call1(ev.Opened, p.keysOf(ix)) }
 	p.card = decl.New(decl.Options{Program: []tuidecl.ProgramOption{
 		tuidecl.LayoutSource("panel.qml", layout),

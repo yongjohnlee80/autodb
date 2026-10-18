@@ -48,7 +48,7 @@ func ValidateDSN(engineName engine.Name, dsn string) error {
 		if cfg.InterpolateParams {
 			return fmt.Errorf("exec: mysql DSN must not enable interpolateParams: client-side interpolation rewrites the statement after classification")
 		}
-		if _, _, _, _, err := mysqlTLSFiles(cfg); err != nil { // tls-ca/cert/key: §4.11, mysql_tls.go
+		if _, _, _, _, err := mysqlTLSFiles(cfg); err != nil { // tls-ca/cert/key: mysql_tls.go
 			return err
 		}
 		for key, val := range cfg.Params {

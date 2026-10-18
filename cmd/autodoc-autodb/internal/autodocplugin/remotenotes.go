@@ -163,9 +163,9 @@ func (p *Plugin) sidecarOf(path string) (sidecar, error) {
 	return sc, err
 }
 
-// openRemoteNote opens a remote server's note as its working copy (the table of ADR 1792301900
-// §4.6): fetched if there is none; a clean copy of an older version asks whether to take the
-// server's; an edited copy is opened untouched, the server's newer text written beside it.
+// openRemoteNote opens a remote server's note as its working copy: fetched if there is none; a
+// clean copy of an older version asks whether to take the server's; an edited copy is opened
+// untouched, the server's newer text written beside it.
 func (p *Plugin) openRemoteNote(ws int64, name string) {
 	root, err := p.cacheRoot()
 	if err != nil || p.who.Name == "" {
