@@ -365,13 +365,15 @@ func (p *Plugin) Document(d plugin.Document) { p.post(func() { p.doc = d }) }
 func (p *Plugin) Close() { p.closeOnce.Do(p.close) }
 
 func (p *Plugin) close() {
+	// One budget, end to end: queueing the step, running it, and its calls to AutoDB, which end by
+	// the same deadline. A busy goroutine behind a full queue must not hold Close past it, since only
+	// the cancel below can end what it waits on.
+	deadline := time.Now().Add(closeBudget)
 	ended := make(chan struct{})
 	step := func() {
 		defer close(ended)
-		p.letGo(p.logoutOnClose())
+		p.letGo(deadline, p.logoutOnClose())
 	}
-	// One budget for queueing the step and running it: a busy goroutine behind a full queue must
-	// not hold Close past it, since only the cancel below can end what it waits on.
 	budget := time.NewTimer(closeBudget)
 	defer budget.Stop()
 	if p.inline {
@@ -387,17 +389,20 @@ func (p *Plugin) close() {
 		case <-p.ctx.Done():
 		}
 	}
-	p.ui.Card().Close()
+	// cancel before closing the panel: its loop may be in a handler posting to a full queue, which
+	// returns only once the context is done, and Card.Close waits for that loop
 	p.cancel()
+	p.ui.Card().Close()
 	<-p.done
 }
 
-// letGo closes the cursor and the session on the server, and logs the token out when logout says.
-func (p *Plugin) letGo(logout bool) {
+// letGo closes the cursor and the session on the server, and logs the token out when logout says,
+// each call ending by deadline.
+func (p *Plugin) letGo(deadline time.Time, logout bool) {
 	if p.cli == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), closeBudget)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	if t := p.table; t != nil && t.cursor != "" {
 		_ = p.cli.CloseCursor(ctx, p.token, p.sid, t.cursor)

@@ -219,3 +219,87 @@ func TestARefusedSignInReopensTheDialogOverTheRealLink(t *testing.T) {
 	l.key("Enter")
 	l.shows("AutoDoc")
 }
+
+// Close keeps within the host's grace (it stops the process 2 s after plugin.close) with the panel
+// running and blocked: the plugin's goroutine busy on a call, its queue full, and the panel's loop
+// inside a handler posting to it. The cancel comes before the panel's close, so that post returns
+// and the loop can end. The panel-free case is the control.
+func TestCloseKeepsTheHostsGraceWithThePanelBlocked(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		name := "panel-free"
+		if blocked {
+			name = "panel-blocked"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := newPlugin("test", t.TempDir())
+			p.find = func(context.Context) (autodb.Binary, []autodb.Tried, error) {
+				return autodb.Binary{}, nil, autodb.ErrNotFound
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			hostEnd, pluginEnd := net.Pipe()
+			served := make(chan error, 1)
+			go func() { served <- plugin.ServeConn(ctx, pluginEnd, p) }()
+			link, err := plugin.NewLink(ctx, hostEnd, func(string, []any) {})
+			if err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				p.cancel()
+				link.Close()
+				cancel()
+				select {
+				case <-served:
+				case <-time.After(5 * time.Second):
+					t.Error("ServeConn did not end")
+				}
+			})
+			if err := link.Notify(ctx, plugin.MethodOpen, plugin.OpenParams(plugin.Open{Protocol: 7, Width: 60, Height: 24})); err != nil {
+				t.Fatal(err)
+			}
+			// the panel's program running, and the host attached on the plugin's goroutine
+			deadline := time.Now().Add(5 * time.Second)
+			running := make(chan struct{})
+			for !p.ui.Card().Post(func() { close(running) }) {
+				if time.Now().After(deadline) {
+					t.Fatalf("the panel never ran: %v", p.ui.Card().Err())
+				}
+				time.Sleep(time.Millisecond)
+			}
+			<-running
+			for attached := false; !attached; {
+				ch := make(chan bool, 1)
+				p.post(func() { ch <- p.host != nil })
+				if attached = <-ch; !attached && time.Now().After(deadline) {
+					t.Fatal("the host never attached")
+				}
+			}
+			busy := make(chan struct{})
+			p.post(func() { close(busy); <-p.ctx.Done() }) // a call that ends only when cancelled
+			<-busy
+			for range cap(p.work) {
+				p.post(func() {})
+			}
+			if blocked {
+				inHandler := make(chan struct{})
+				if !p.ui.Card().Post(func() { close(inHandler); p.events().Tab(1) }) { // blocks posting
+					t.Fatalf("the panel was not running: %v", p.ui.Card().Err())
+				}
+				<-inHandler
+			}
+			began := time.Now()
+			done := make(chan struct{})
+			go func() { p.Close(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				p.cancel()
+				<-done
+				t.Fatal("Close never finished")
+			}
+			if took := time.Since(began); took >= 2*time.Second {
+				t.Fatalf("Close took %s: past the host's 2 s grace", took)
+			}
+		})
+	}
+}
