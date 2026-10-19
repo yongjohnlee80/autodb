@@ -16,7 +16,7 @@ set -eu
 
 REPO="yongjohnlee80/autodb"
 MIN_GO_MAJOR=1
-MIN_GO_MINOR=25
+MIN_GO_MINOR=26
 
 VERSION="latest"
 PREFIX="${AUTODB_PREFIX:-$HOME/.local/bin}"
@@ -49,7 +49,7 @@ ENVIRONMENT:
 By default the script downloads the release tarball for your platform,
 verifies its published SHA-256 checksum, and installs the binary as
 `autodb` in the prefix. If no prebuilt binary matches your OS/arch it
-falls back to building from source, which needs git and Go 1.25+.
+falls back to building from source, which needs git and Go 1.26+.
 USAGE
 }
 
@@ -123,7 +123,7 @@ verify_sha256() {
 }
 
 go_version_ok() {
-  raw="$(go env GOVERSION 2>/dev/null || true)"   # e.g. go1.25.3
+  raw="$(go env GOVERSION 2>/dev/null || true)"   # e.g. go1.26.9
   raw="${raw#go}"
   major="${raw%%.*}"
   rest="${raw#*.}"

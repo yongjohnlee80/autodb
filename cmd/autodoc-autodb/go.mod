@@ -1,8 +1,6 @@
 module github.com/yongjohnlee80/autodb/cmd/autodoc-autodb
 
-go 1.25.3
-
-toolchain go1.26.9
+go 1.26.9
 
 require (
 	github.com/yongjohnlee80/autodb v0.0.0
