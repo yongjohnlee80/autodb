@@ -10,7 +10,7 @@
   <a href="https://github.com/yongjohnlee80/autodb/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yongjohnlee80/autodb/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/yongjohnlee80/autodb/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/yongjohnlee80/autodb"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
-  <img alt="Go" src="https://img.shields.io/badge/go-1.25%2B-00ADD8">
+  <img alt="Go" src="https://img.shields.io/badge/go-1.26%2B-00ADD8">
 </p>
 
 <p align="center">
@@ -98,7 +98,7 @@ window itself and needs only macOS.
 | Linux, macOS | The install script, below |
 | Linux, macOS | A [release archive](https://github.com/yongjohnlee80/autodb/releases/latest) (`amd64` and `arm64`, with SHA-256 checksums; on Linux, the `-gui` archive adds `--gui`) |
 | Windows | Use [WSL2](https://learn.microsoft.com/windows/wsl/install) and any Linux method. A native Windows build is not published yet. |
-| Any, with Go 1.25+ | Build from source, below |
+| Any, with Go 1.26+ | Build from source, below |
 
 **Install script.** It downloads the release for your platform, checks its
 SHA-256, and falls back to building from source when there is no prebuilt

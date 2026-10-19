@@ -188,7 +188,7 @@ OPTIONS:
   --port <n>           SSH port. Default: 22. Also --ssh-port.
   --key <path>         SSH identity file.
   --go-version <ver>   Go toolchain for mise to install. Default: read from
-                       the adjacent autodb checkout's go.mod, else 1.25.3.
+                       the adjacent autodb checkout's go.mod, else 1.26.
   --ref <git-ref>      autodb ref to build. Default: "latest", which resolves
                        to the highest vX.Y.Z release tag on the remote. Pass
                        "main" to build the tip, or any tag/branch/SHA.
@@ -470,8 +470,8 @@ case "$META" in sqlite|pg-local|pg-remote) ;; *) die "--meta must be sqlite, pg-
 # Default the toolchain from the checkout beside us -- but take the MINOR
 # LINE, not the exact figure.
 #
-# go.mod's `go 1.25.3` is a MINIMUM LANGUAGE VERSION, not a toolchain pin
-# (there is no `toolchain` directive), so installing exactly 1.25.3 builds
+# go.mod's `go 1.26.9` is a MINIMUM LANGUAGE VERSION, not a toolchain pin
+# (there is no `toolchain` directive), so installing exactly that patch builds
 # with the OLDEST ACCEPTABLE compiler rather than a current one. That is not
 # a cosmetic difference: as of 2026-09-08 the Go 1.25.3 standard library
 # carried 30 advisories affecting packages autodb links, including five in
@@ -480,17 +480,17 @@ case "$META" in sqlite|pg-local|pg-remote) ;; *) die "--meta must be sqlite, pg-
 # every one of them, and they are all patch releases within the same minor
 # line, so nothing about the language version changes.
 #
-# Asking for "1.25" gets the newest patch in that line. Override with
+# Asking for "1.26" gets the newest patch in that line. Override with
 # --go-version when you need an exact build.
 if [ -z "$GO_VERSION" ]; then
   for _m in "$HERE/main/go.mod" "$HERE/go.mod"; do
     if [ -r "$_m" ]; then
-      # 1.25.3 -> 1.25 ; a bare "1.25" stays "1.25"
+      # 1.26.9 -> 1.26 ; a bare "1.26" stays "1.26"
       GO_VERSION="$(awk '/^go [0-9]/{split($2,v,"."); print v[1]"."v[2]; exit}' "$_m")"
       break
     fi
   done
-  [ -n "$GO_VERSION" ] || GO_VERSION="1.25"
+  [ -n "$GO_VERSION" ] || GO_VERSION="1.26"
 fi
 
 # RESOLVE "latest" TO A REAL TAG, so what gets built is nameable.
