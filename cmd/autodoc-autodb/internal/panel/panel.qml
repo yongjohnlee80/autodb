@@ -38,9 +38,7 @@ Window {
                     ListView { id: remotes; model: App.remotes; textRole: "label"
                         onActivated: App.remoteOpen(index); onCurrentIndexChanged: App.remoteCurrent(index) }
                     Text { text: App.remote } } }
-            Tab { title: "SYSTEM"; Text { text: App.system } } }
-        Text { text: App.status }
-        Text { text: App.problem } }
+            Tab { title: "SYSTEM"; Text { text: App.system } } } }
 
     Dialog { id: signIn; title: "Sign in to AutoDB"
         standardButtons: Dialog.Ok | Dialog.Cancel; defaultButton: Dialog.Ok

@@ -89,7 +89,7 @@ func TestARefusedRemoteSignInKeepsTheLocalServer(t *testing.T) {
 	p.loadRemotes()
 	p.events().Menu("remote.connect")
 	p.events().Secret("not alice's passphrase", "not alice's passphrase")
-	if p.remote.on != nil || p.token != "tok-1" || !strings.Contains(p.problem, "refused") {
+	if p.remote.on != nil || p.token != "tok-1" || !strings.Contains(news(p), "refused") {
 		t.Fatalf("a wrong passphrase: connected %v, local token %v (%s)", p.remote.on != nil, p.token == "tok-1", said(p))
 	}
 }
@@ -128,7 +128,7 @@ func TestAnAnswerForTheOldServerIsDropped(t *testing.T) {
 	p.events().Menu("conn.delete")
 	p.switchTarget()
 	p.events().Confirmed()
-	if len(db.took("conn.delete")) != 0 || !strings.Contains(p.problem, "changed since") {
+	if len(db.took("conn.delete")) != 0 || !strings.Contains(news(p), "changed since") {
 		t.Fatalf("conn.delete took %+v (%s)", db.took("conn.delete"), said(p))
 	}
 }

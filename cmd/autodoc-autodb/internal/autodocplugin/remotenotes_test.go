@@ -81,7 +81,7 @@ func TestARemoteNoteSavesToItsNote(t *testing.T) {
 		t.Fatal(err) // another client's write
 	}
 	save(p, path, "select 3", 3)
-	if body, _ := serverNote(t, p, s.Workspace); body != "select 2" || !strings.Contains(p.problem, "compare q.sql.server") {
+	if body, _ := serverNote(t, p, s.Workspace); body != "select 2" || !strings.Contains(news(p), "compare q.sql.server") {
 		t.Fatalf("a conflict: the server has %q (%s)", body, said(p))
 	}
 	if b, err := os.ReadFile(serverPath(path)); err != nil || string(b) != "select 2" {
@@ -107,8 +107,8 @@ func TestASaveOfAnythingButItsNoteIsRefused(t *testing.T) {
 	check := func(what, docPath, want string) {
 		t.Helper()
 		save(p, docPath, "select 9", 5)
-		if _, ver := serverNote(t, p, s.Workspace); ver != before || !strings.Contains(p.problem, want) {
-			t.Errorf("%s: the note moved (%v), or the problem %q lacks %q", what, ver != before, p.problem, want)
+		if _, ver := serverNote(t, p, s.Workspace); ver != before || !strings.Contains(news(p), want) {
+			t.Errorf("%s: the note moved (%v), or the plugin's words lack %q: %s", what, ver != before, want, said(p))
 		}
 	}
 	check("a draft", "draft.sql", "not a remote note's working copy")
@@ -178,7 +178,7 @@ func TestAnUnwrittenSidecarIsRetriedAndAStaleOneSaysTheCopiesAreEqual(t *testing
 	stale, _ := p.sidecarOf(path)
 	p.sidecarWrite = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
 	save(p, path, "select 1", 2)
-	if _, ok := p.pendingSidecars[path]; !ok || !strings.Contains(p.problem, "retried") {
+	if _, ok := p.pendingSidecars[path]; !ok || !strings.Contains(news(p), "retried") {
 		t.Fatalf("a sidecar that could not be written: pending %v (%s)", p.pendingSidecars, said(p))
 	}
 	p.sidecarWrite = nil
@@ -192,7 +192,7 @@ func TestAnUnwrittenSidecarIsRetriedAndAStaleOneSaysTheCopiesAreEqual(t *testing
 		t.Fatal(err)
 	}
 	save(p, path, "select 2", 4)
-	if !strings.Contains(p.problem, "equals yours") {
+	if !strings.Contains(news(p), "equals yours") {
 		t.Fatalf("the server holding the same text: %s", said(p))
 	}
 }
@@ -215,11 +215,11 @@ func TestAWorkingCopyLinkedOutOfTheCacheIsRefused(t *testing.T) {
 	}
 	calls := len(h.calls)
 	save(p, path, "select 9", 2)
-	if body, after := serverNote(t, p, s.Workspace); after != ver || body != before || !strings.Contains(p.problem, "not a plain file") {
+	if body, after := serverNote(t, p, s.Workspace); after != ver || body != before || !strings.Contains(news(p), "not a plain file") {
 		t.Fatalf("a linked copy was saved: the version moved %v, the note %q (%s)", after != ver, body, said(p))
 	}
 	p.openRemoteNote(s.Workspace, "q.sql")
-	if len(h.calls) != calls || !strings.Contains(p.problem, "not a plain file") {
+	if len(h.calls) != calls || !strings.Contains(news(p), "not a plain file") {
 		t.Fatalf("a linked copy was opened: %+v (%s)", h.calls[calls:], said(p))
 	}
 	if b, _ := os.ReadFile(outside); string(b) != "outside" {

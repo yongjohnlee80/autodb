@@ -53,7 +53,7 @@ func TestQueryRunsItsArguments(t *testing.T) {
 		t.Fatalf("query sent %q", got)
 	}
 	p.CommandArgs("query", nil)
-	if len(db.queries()) != 1 || !strings.Contains(p.problem, "no SQL") {
+	if len(db.queries()) != 1 || !strings.Contains(news(p), "no SQL") {
 		t.Fatalf("an empty query: sent %q, said %s", db.queries(), said(p))
 	}
 }

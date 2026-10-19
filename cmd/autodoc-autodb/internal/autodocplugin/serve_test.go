@@ -286,6 +286,16 @@ func TestCloseKeepsTheHostsGraceWithThePanelBlocked(t *testing.T) {
 					t.Fatal("the host never attached")
 				}
 			}
+			// both loops idle before the plugin's is blocked: AutoDB not found takes the card to SYSTEM,
+			// and the panel answers that with App.tab, a post to the plugin, taken here first
+			idle := make(chan struct{})
+			if !p.ui.Card().Post(func() { close(idle) }) {
+				t.Fatalf("the panel stopped: %v", p.ui.Card().Err())
+			}
+			<-idle
+			taken := make(chan struct{})
+			p.post(func() { close(taken) })
+			<-taken
 			busy := make(chan struct{})
 			p.post(func() { close(busy); <-p.ctx.Done() }) // a call that ends only when cancelled
 			<-busy
