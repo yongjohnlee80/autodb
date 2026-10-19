@@ -82,8 +82,8 @@ func TestAFirstSignInStartsEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", loginsFile)
 	p, h := openAt(t, serverAt(t, "store-a", freshPass(t)), path)
 	wantPrefilled(t, p, h, "")
-	if p.problem != "" {
-		t.Fatalf("a first sign-in says %q", p.problem)
+	if s := news(p); s != "" {
+		t.Fatalf("a first sign-in says %q", s)
 	}
 }
 

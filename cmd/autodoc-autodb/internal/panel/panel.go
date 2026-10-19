@@ -134,7 +134,7 @@ func New(ev Events) *Panel {
 		tuidecl.Types(controls.Types()...),
 		tuidecl.Sources(map[string]any{
 			"App.menu": p.menu, "App.tree": p.tree, "App.tabIndex": 0,
-			"App.where": "AutoDB", "App.status": "", "App.problem": "",
+			"App.where": "AutoDB",
 			"App.notes": p.notes, "App.noteWorkspaces": p.noteWS, "App.remote": "", "App.system": "",
 			"App.signInName": "", "App.signInNote": "", "App.installNote": "", "App.engines": p.engines,
 			"App.bootstrapNote": "", "App.nameTitle": "", "App.nameNote": "", "App.nameValue": "",

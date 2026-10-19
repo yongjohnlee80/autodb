@@ -38,6 +38,8 @@ type host interface {
 	TableEnd(id string, err error) error
 	// Close asks AutoDoc to close the card (host.close).
 	Close() error
+	// Notify shows a notification in AutoDoc's corner, kept in its history (host.notify, protocol 8).
+	Notify(n plugin.Notice) error
 	// Title sets the card's title (host.title).
 	Title(title string) error
 	// Call runs one of AutoDoc's commands the manifest's calls declare (host.call), and waits for
@@ -166,8 +168,15 @@ type Plugin struct {
 	idPrefix string
 	seq      int
 
-	status  string // what was done last
-	problem string // what went wrong last
+	// what the step being handled has to say, sent as AutoDoc notifications when it returns (say)
+	status  string // what was done
+	problem string // what went wrong
+	going   string // the ongoing notification of the step under way (progress), its id
+	goingAs string // and what it said
+	notices int    // the ongoing ids used: run-1, run-2, …
+	// the tab the card was on before a step sent it to SYSTEM (view.go), while sentToSystem
+	backTab      int
+	sentToSystem bool
 }
 
 // results is the table the plugin serves: its id, the cursor behind it, and rows read from AutoDB
@@ -222,6 +231,7 @@ func (p *Plugin) loop() {
 		select {
 		case fn := <-p.work:
 			fn()
+			p.say()
 		case <-p.ctx.Done():
 			return
 		}
@@ -232,6 +242,7 @@ func (p *Plugin) loop() {
 func (p *Plugin) post(fn func()) {
 	if p.inline {
 		fn()
+		p.say()
 		return
 	}
 	select {
@@ -508,7 +519,8 @@ func (p *Plugin) login(name, pass string) {
 		p.draw()
 		return
 	}
-	p.status, p.problem = "signing in…", ""
+	p.status, p.problem = "", ""
+	p.progress("signing in…")
 	p.draw()
 	ctx, cancel := context.WithTimeout(p.ctx, loginTimeout)
 	defer cancel()
@@ -753,8 +765,8 @@ func (p *Plugin) runSQL(sql string) {
 	if p.lostItsWay() {
 		return
 	}
-	p.problem, p.status = "", "running…"
-	p.draw()
+	p.problem, p.status = "", ""
+	p.progress("running the statement…")
 	res, err := p.query(sql)
 	if err != nil {
 		p.status = ""
@@ -796,8 +808,8 @@ func (p *Plugin) script() {
 	if p.lostItsWay() {
 		return
 	}
-	p.problem, p.status = "", "running the script…"
-	p.draw()
+	p.problem, p.status = "", ""
+	p.progress("running the script…")
 	res, err := p.cli.RunScript(p.ctx, p.token, p.conn.ID, p.doc.Text)
 	if err != nil {
 		p.status = ""

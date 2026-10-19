@@ -195,18 +195,18 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 		_, _ = admin.Call(dctx, "exec.run", adminTok, created, "DROP TABLE IF EXISTS public."+tbl)
 	})
 	run(p, docAt(`CREATE TABLE public.`+tbl+` ("Id" integer PRIMARY KEY, "Order Total" text)|;`))
-	if p.problem != "" {
-		t.Fatalf("creating %s: %s", tbl, p.problem)
+	if s := news(p); !strings.Contains(s, "CREATE") {
+		t.Fatalf("creating %s: %s", tbl, s)
 	}
 	if p.tree == nil {
-		t.Fatalf("the panel has no tree: %s", p.problem)
+		t.Fatalf("the panel has no tree: %s", said(p))
 	}
 	conn := []string{"w0", scratch}
 	p.opened(conn)
 	p.opened(append(conn, "s:public"))
 	p.useNode(append(conn, "s:public", "t:"+tbl))
 	if len(h.calls) != 1 || h.calls[0].id != "buffer.new" || h.calls[0].args[0] != "public."+tbl+".sql" {
-		t.Fatalf("Enter on %s sent %q (%s)", tbl, h.calls, p.problem)
+		t.Fatalf("Enter on %s sent %q (%s)", tbl, h.calls, said(p))
 	}
 	text := h.calls[0].args[1]
 	if want := "SELECT\n  \"Id\",\n  \"Order Total\"\nFROM "; !strings.HasPrefix(text, want) || !strings.Contains(text, tbl) {
@@ -214,7 +214,7 @@ func TestLiveAQueryPagedToItsEnd(t *testing.T) {
 	}
 	run(p, docAt("|"+text))
 	if len(h.tables) != 3 || !slices.Equal(h.tables[2].Fields, []string{"Id", "Order Total"}) {
-		t.Fatalf("the scaffold did not run as a SELECT of the two columns: %+v (%s)", h.tables[2:], p.problem)
+		t.Fatalf("the scaffold did not run as a SELECT of the two columns: %+v (%s)", h.tables[2:], said(p))
 	}
 	p.Close()
 }

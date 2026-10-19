@@ -5,8 +5,8 @@ panel beside the page. The panel finds AutoDB (or installs the release that matc
 server, signs you in, and runs the statement under the cursor, the selection or the whole note.
 The rows go to AutoDoc's own results table, a page at a time.
 
-It needs AutoDoc with **plugin protocol 7**: the first AutoDoc release after v0.1.54. An older
-AutoDoc refuses the manifest, so update AutoDoc first.
+It needs AutoDoc with **plugin protocol 8**: AutoDoc v0.1.59 or later. An older AutoDoc refuses
+the manifest, so update AutoDoc first.
 
 ## Installing
 
@@ -24,9 +24,23 @@ that does not apply to the selection is greyed out, never hidden.
 | CONNECTIONS | the workspaces, their connections, and each connection's schemas, tables and columns | Add connection…, Test, Rename…, Delete…, New workspace…, Rename workspace…, Delete workspace…, Refresh |
 | NOTES | a workspace's `.sql` notes | New note…, Open, Delete…, Refresh, Save to server, Save over the server's… |
 | REMOTE | the remote AutoDB servers you have added | Add server…, Edit…, Connect, Disconnect, Delete… |
-| SYSTEM | the plugin's and the server's versions, and who is signed in | Restart server…, Upgrade AutoDB…, Update the plugin…, Sign out, Retry |
+| SYSTEM | the plugin's and the server's versions, and who is signed in; while AutoDB is looked for or started, what is happening, and why it could not be found or reached | Restart server…, Upgrade AutoDB…, Update the plugin…, Sign out, Retry |
 
 **Enter** on a connection connects to it. Enter on a table opens a `SELECT` of it in a new buffer.
+
+When AutoDB cannot be found or reached, the panel opens SYSTEM and says why. Once AutoDB is
+reached, it returns to the tab you were on.
+
+## Notifications
+
+What the panel did, and what went wrong, shows as an AutoDoc notification in the corner, wherever
+you are, even with the panel hidden. **SPC h** lists the notifications shown.
+
+- A run (`r`, `s`, `:autodb query`) shows **AutoDB: running the statement…** while AutoDB works,
+  then the same notification ends with the rows and the time, or with AutoDB's error.
+- Signing in and connecting to a remote server show the same way.
+- Anything else, such as **sign in first**, **opened public.users.sql** or a save, is a notification
+  of its own.
 
 ## Signing in once
 

@@ -56,7 +56,7 @@ func TestTheFirstRunMakesTheUserAndTheWorkspace(t *testing.T) {
 		{"long enough", "different", "differ"},
 	} {
 		p.events().Bootstrap("root", c.pass, c.again)
-		if !strings.Contains(p.problem, c.want) || p.token != "" || len(db.took("auth.bootstrap")) != 0 {
+		if !strings.Contains(news(p), c.want) || p.token != "" || len(db.took("auth.bootstrap")) != 0 {
 			t.Fatalf("%q/%q: %s (signed in %v)", c.pass, c.again, said(p), p.token != "")
 		}
 	}
@@ -118,7 +118,7 @@ func TestAConnectionIsAddedTestedRenamedAndDeleted(t *testing.T) {
 	if a := db.took("workspace.attach"); len(a) != 1 || a[0].params[1] != int64(1) || a[0].params[2] != int64(8) {
 		t.Fatalf("workspace.attach took %+v", a)
 	}
-	if len(db.took("conn.test")) != 1 || !strings.Contains(p.status, "prod answered") {
+	if len(db.took("conn.test")) != 1 || !strings.Contains(news(p), "prod answered") {
 		t.Fatalf("the new connection was not tested: %s", said(p))
 	}
 

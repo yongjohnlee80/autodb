@@ -394,7 +394,10 @@ type fakeHost struct {
 	frames int      // host.frame sent
 	closes int      // host.close sent
 	titles []string // host.title sent, in order
-	calls  []hostCall
+	// notices are the notifications sent (host.notify), in order; read up to where news last read
+	notices []plugin.Notice
+	read    int
+	calls   []hostCall
 	// answer is what a host.call is answered: nil runs it
 	answer error
 	// slot is the session slot as last set (host.session); reason the close's (CloseReason)
@@ -477,6 +480,23 @@ func (h *fakeHost) Close() error {
 	h.closes++
 	h.mu.Unlock()
 	return nil
+}
+
+func (h *fakeHost) Notify(n plugin.Notice) error {
+	if err := plugin.CheckNotice(n); err != nil {
+		return err // AutoDoc refuses it, as the host does
+	}
+	h.mu.Lock()
+	h.notices = append(h.notices, n)
+	h.mu.Unlock()
+	return nil
+}
+
+// noticesSent is a copy of the notifications sent.
+func (h *fakeHost) noticesSent() []plugin.Notice {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]plugin.Notice(nil), h.notices...)
 }
 
 func (h *fakeHost) Title(t string) error {
@@ -595,9 +615,36 @@ func connected(t *testing.T, db *fakeDB) (*Plugin, *fakeHost) {
 // signIn is the Sign in dialog accepted with the name "admin" and pass.
 func signIn(p *Plugin, pass string) { p.events().SignIn("admin", pass) }
 
-// said is what the panel says: the status, the problem and the step's own text.
+// said is what the plugin says: the card's where and step, every notification sent, and what the
+// step being handled has yet to send.
 func said(p *Plugin) string {
-	return strings.Join([]string{p.where(), p.status, p.problem, p.stepText()}, " · ")
+	parts := []string{p.where(), p.stepText()}
+	if h, ok := p.host.(*fakeHost); ok {
+		for _, n := range h.noticesSent() {
+			parts = append(parts, n.Message)
+		}
+	}
+	return strings.Join(append(parts, p.status, p.problem), " · ")
+}
+
+// news is what the plugin has said since news was last read: the notifications sent since, and what
+// the step being handled has yet to send (a step called directly, not posted, sends at none).
+func news(p *Plugin) string {
+	var parts []string
+	if h, ok := p.host.(*fakeHost); ok {
+		h.mu.Lock()
+		for _, n := range h.notices[h.read:] {
+			parts = append(parts, n.Message)
+		}
+		h.read = len(h.notices)
+		h.mu.Unlock()
+	}
+	for _, s := range []string{p.status, p.problem} {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 // docAt is a note of text with the cursor at the byte where mark (removed) was.

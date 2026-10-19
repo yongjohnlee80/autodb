@@ -399,7 +399,8 @@ func (p *Plugin) dialRemote(pr remoteclient.Profile, u remotedial.Unlock, pass s
 		}
 		return keyPass, nil
 	}
-	p.status, p.problem = "connecting to "+pr.Address()+"…", ""
+	p.status, p.problem = "", ""
+	p.progress("connecting to " + pr.Address() + "…")
 	p.draw()
 	ctx, cancel := context.WithTimeout(p.ctx, loginTimeout)
 	defer cancel()

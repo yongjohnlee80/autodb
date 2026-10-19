@@ -53,6 +53,26 @@ func (p *Plugin) cardTitle() string {
 	}
 }
 
+// stepOnSystem reports whether the step is SYSTEM's to show: AutoDB looked for, offered for
+// install, started, or not reached. SYSTEM shows its text (systemPage); the two the user must act
+// on take the card there (draw).
+func (p *Plugin) stepOnSystem() bool {
+	switch p.step {
+	case stepFinding, stepInstall, stepStarting, stepFailed:
+		return true
+	}
+	return false
+}
+
+// systemPage is SYSTEM's text: such a step's own (stepText) above what the plugin and its server
+// are. A mismatch says its own in systemText; the sign-in, in its dialog.
+func (p *Plugin) systemPage() string {
+	if s := p.stepText(); s != "" && p.stepOnSystem() {
+		return s + "\n\n" + p.systemText()
+	}
+	return p.systemText()
+}
+
 // stepText is what the step says where nothing else does.
 func (p *Plugin) stepText() string {
 	switch p.step {
@@ -127,15 +147,11 @@ func (p *Plugin) draw() {
 		p.title = t
 		_ = p.host.Title(t)
 	}
+	// what the plugin did or what went wrong is a notification (notices.go), not the card's
 	sources := map[string]any{
-		"where":   p.where(),
-		"status":  p.status,
-		"problem": p.problem,
-		"system":  p.systemText(),
-		"remote":  p.remoteText(),
-	}
-	if p.status == "" && p.problem == "" {
-		sources["status"] = p.stepText()
+		"where":  p.where(),
+		"system": p.systemPage(),
+		"remote": p.remoteText(),
 	}
 	if p.goTab {
 		p.goTab = false
@@ -144,6 +160,17 @@ func (p *Plugin) draw() {
 	var open string
 	if p.step != p.shown {
 		p.shown = p.step
+		// a step the user must act on (an install, AutoDB not reached) goes to SYSTEM, and the card
+		// returns to the tab it was on once AutoDB is reached
+		switch {
+		case (p.step == stepInstall || p.step == stepFailed) && p.tab != panel.TabSystem:
+			p.backTab, p.sentToSystem = p.tab, true
+			p.tab = panel.TabSystem
+			sources["tabIndex"] = p.tab
+		case p.sentToSystem && !p.stepOnSystem() && p.step != stepMismatch:
+			p.tab, p.sentToSystem = p.backTab, false
+			sources["tabIndex"] = p.tab
+		}
 		switch p.step {
 		case stepLogin:
 			open = panel.DialogSignIn

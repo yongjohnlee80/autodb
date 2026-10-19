@@ -45,7 +45,7 @@ func TestRestartResumesTheSignIn(t *testing.T) {
 		switch {
 		case !locked && (p.step != stepPick || p.token != "tok-1"):
 			t.Fatalf("after the restart: step %d (%s), want the sign-in resumed", p.step, said(p))
-		case locked && (p.step != stepLogin || p.prefill != "admin" || !strings.Contains(p.problem, "locked")):
+		case locked && (p.step != stepLogin || p.prefill != "admin" || !strings.Contains(news(p), "locked")):
 			t.Fatalf("a locked store: step %d, the name %q (%s)", p.step, p.prefill, said(p))
 		}
 	}
@@ -64,8 +64,8 @@ func TestARefusedRestartSaysWhy(t *testing.T) {
 		p, _ := connected(t, db)
 		p.events().Menu("sys.restart")
 		p.events().Confirmed()
-		if db.restarts != 0 || !strings.Contains(p.problem, c.want) || p.step != stepReady {
-			t.Errorf("%s: %d restarts, step %d, said %q", c.answer, db.restarts, p.step, p.problem)
+		if db.restarts != 0 || !strings.Contains(news(p), c.want) || p.step != stepReady {
+			t.Errorf("%s: %d restarts, step %d, said %q", c.answer, db.restarts, p.step, said(p))
 		}
 	}
 }
@@ -110,8 +110,8 @@ func TestAnUpgradeThatCannotFinishSaysSo(t *testing.T) {
 	p.events().Menu("sys.upgrade")
 	p.events().Confirmed()
 	p.events().SignIn("admin", "right")
-	if db.restarts != 0 || !strings.Contains(p.problem, "keeps running") || p.step != stepMismatch {
-		t.Fatalf("busy: %d restarts, step %d, said %q", db.restarts, p.step, p.problem)
+	if db.restarts != 0 || !strings.Contains(news(p), "keeps running") || p.step != stepMismatch {
+		t.Fatalf("busy: %d restarts, step %d, said %q", db.restarts, p.step, said(p))
 	}
 
 	db = newFakeDB(t)
@@ -129,8 +129,8 @@ func TestAnUpgradeThatCannotFinishSaysSo(t *testing.T) {
 	p.events().Confirmed()
 	p.events().SignIn("admin", "right")
 	<-db.listening()
-	if p.bin.Path != "autodb" || !strings.Contains(p.problem, "did not start (exec format error)") {
-		t.Fatalf("a release that does not start: the binary %+v, said %q", p.bin, p.problem)
+	if p.bin.Path != "autodb" || !strings.Contains(news(p), "did not start (exec format error)") {
+		t.Fatalf("a release that does not start: the binary %+v, said %q", p.bin, said(p))
 	}
 }
 

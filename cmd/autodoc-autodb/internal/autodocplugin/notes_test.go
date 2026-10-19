@@ -61,7 +61,7 @@ func TestANoteWithNoNotesDirectoryIsSaid(t *testing.T) {
 	p, h := connected(t, db)
 	p.chooseNotes(1)
 	p.events().NoteOpen(0)
-	if len(h.calls) != 0 || !strings.Contains(p.problem, "names no notes directory") {
-		t.Fatalf("calls %q, the problem %q", h.calls, p.problem)
+	if len(h.calls) != 0 || !strings.Contains(news(p), "names no notes directory") {
+		t.Fatalf("calls %q, the problem %q", h.calls, said(p))
 	}
 }

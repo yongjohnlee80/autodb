@@ -58,8 +58,8 @@ name on it.
 
 ### AutoDoc plugin
 
-The AutoDB panel in AutoDoc requires **AutoDoc with plugin protocol 7**, the
-first AutoDoc release after v0.1.54. Older AutoDoc versions refuse the manifest,
+The AutoDB panel in AutoDoc requires **AutoDoc with plugin protocol 8**, the
+first being AutoDoc v0.1.59. Older AutoDoc versions refuse the manifest,
 so update AutoDoc before updating this plugin. The panel has four tabs:
 CONNECTIONS, NOTES, REMOTE and SYSTEM. It keeps your sign-in until AutoDoc
 quits, and brings the command `:autodb`. When the panel is hidden, open **SPC p**,
