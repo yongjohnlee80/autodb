@@ -44,7 +44,8 @@ type accountPref struct {
 	active  uint64 // the writer's ticket in flight, 0 for none
 	pending *prefIntent
 	// write and read reach the account's options: the backend's, unless a
-	// test holds them.
+	// test holds them. A sign-in reads them once, with the editor
+	// preference's read, for every preference (applyStoredPrefs).
 	write func(ctx context.Context, b *Bound, pref string) error
 	read  func(ctx context.Context, b *Bound) (map[string]string, error)
 	// settled counts the reads and writes that came back, applied or not.
@@ -160,19 +161,17 @@ func (h *Host) submitPref(p *accountPref, in prefIntent) {
 	})
 }
 
-// applyStoredPrefs reads each preference the account stored, after a sign-in,
-// and wears it.
+// applyStoredPrefs reads the account's options once, after a sign-in, and wears each preference's
+// stored value: one read for every preference, so a sign-in costs one call however many there are
+// (the panels' geometry is six). The editor preference's reader is the account's reader, which a
+// test may hold.
 func (h *Host) applyStoredPrefs() {
-	for _, p := range h.accountPrefs() {
-		h.applyStored(p)
+	prefs := h.accountPrefs()
+	gens := make([]uint64, len(prefs))
+	for i, p := range prefs {
+		gens[i] = p.gen
 	}
-}
-
-// applyStored reads the account's choice for p and wears it, unless the user
-// has chosen since.
-func (h *Host) applyStored(p *accountPref) {
-	gen, epoch := p.gen, h.idEpoch
-	bound, read := h.session.Bind(), p.read
+	epoch, bound, read := h.idEpoch, h.session.Bind(), h.prefs.read
 	type stored struct {
 		opts map[string]string
 		err  error
@@ -181,23 +180,24 @@ func (h *Host) applyStored(p *accountPref) {
 		opts, err := read(ctx, bound)
 		return stored{opts: opts, err: err}
 	}, func(s stored) {
-		p.settled++
-		if epoch != h.idEpoch || gen != p.gen {
-			return // another identity, or a choice from the menu since
-		}
-		if s.err != nil {
+		if s.err != nil && epoch == h.idEpoch {
 			h.setStatus("could not read your preferences: " + WireErrorMessage(s.err))
-			return
 		}
-		value := p.def
-		if v, ok := s.opts[p.key]; ok {
-			value = v
+		for i, p := range prefs {
+			p.settled++
+			if s.err != nil || epoch != h.idEpoch || gens[i] != p.gen {
+				continue // unreadable, another identity, or a choice from the menu since
+			}
+			value := p.def
+			if v, ok := s.opts[p.key]; ok {
+				value = v
+			}
+			// Always shown, never compared with p.pref: the screen may wear
+			// something the preference never chose (a theme picked before the
+			// sign-in), and the account's answer is what it must wear now. Each
+			// show is cheap when nothing changes.
+			h.showPref(p, value)
 		}
-		// Always shown, never compared with p.pref: the screen may wear
-		// something the preference never chose (a theme picked before the
-		// sign-in), and the account's answer is what it must wear now. Each
-		// show is cheap when nothing changes.
-		h.showPref(p, value)
 	})
 }
 
