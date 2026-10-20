@@ -954,3 +954,8 @@ func (h *Host) PanelPrefsSettled() int {
 	})
 	return <-got
 }
+
+// ToggleMaximize is a Panel's own maximize control (its Drawer's toggleMaximize), by spec id.
+func (h *Host) ToggleMaximize(id string) {
+	h.p.Post(func() { h.keep(h.p.Call(PanelQMLID(id), "toggleMaximize")) })
+}

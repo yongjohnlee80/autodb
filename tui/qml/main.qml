@@ -199,13 +199,14 @@ Window {
         edge: App.explorerEdge
         size: App.explorerSize
         length: App.explorerLength
-        minimumSize: 20
+        minimumSize: App.explorerMinSize; minimumLength: App.explorerMinLength   // auth.PanelSpecs' bounds
         floating: App.explorerFloating
         floatX: App.explorerX; floatY: App.explorerY; floatWidth: App.explorerW; floatHeight: App.explorerH
         onPlaced: App.panelPlaced("explorer", x, y, width, height)
         onResized: App.panelResized("explorer", size, length)
         onOpened: App.panelOpened("explorer")
         onClosed: App.panelClosed("explorer")
+        onChanged: App.panelChanged("explorer", operation, maximized)
         Flex {
             direction: Tui.Vertical
             palette.window: Theme.document.window
@@ -248,13 +249,14 @@ Window {
         edge: App.resultsEdge
         size: App.resultsSize
         length: App.resultsLength
-        minimumSize: 10
+        minimumSize: App.resultsMinSize; minimumLength: App.resultsMinLength   // auth.PanelSpecs' bounds
         floating: App.resultsFloating
         floatX: App.resultsX; floatY: App.resultsY; floatWidth: App.resultsW; floatHeight: App.resultsH
         onPlaced: App.panelPlaced("results", x, y, width, height)
         onResized: App.panelResized("results", size, length)
         onOpened: App.panelOpened("results")
         onClosed: App.panelClosed("results")
+        onChanged: App.panelChanged("results", operation, maximized)
         Flex {
             id: results
             direction: Tui.Vertical

@@ -1,9 +1,13 @@
 package tui_test
 
 import (
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/yongjohnlee80/golib/parse/qml"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
@@ -114,5 +118,120 @@ func TestADialogOverAFloatingPanelHasTheKeyboard(t *testing.T) {
 	s.WaitFor(t, "about still open", func(sc string) bool { return strings.Contains(sc, "┌ About autodb") })
 	if got := h.PaneWithFocus(); got == "explorerTree" {
 		t.Fatal("Ctrl+h reached the floating explorer under an open dialog")
+	}
+}
+
+// Closing the zoomed panel ends its zoom: the next SPC z zooms the query (both panels hidden),
+// rather than undoing the closed panel's zoom; and the explorer reopens docked, not maximized.
+func TestClosingAZoomedPanelEndsItsZoom(t *testing.T) {
+	h, s := signedIn(t)
+	h.RunCommand("view.zoom_explorer")
+	s.WaitFor(t, "the explorer zoomed", func(sc string) bool {
+		_, _, q := frameAt(sc, "query")
+		_, _, e := frameAt(sc, "explorer")
+		return e && !q
+	})
+	s.Keys(t, esc2())
+	s.WaitFor(t, "the explorer closed, the query in use", func(sc string) bool {
+		_, _, r := frameAt(sc, "results")
+		return !h.PanelShown("explorer") && h.PaneWithFocus() == "editor" && r
+	})
+	s.Keys(t, key(' '), key('z'))
+	s.WaitFor(t, "the query zoomed: the results hidden", func(sc string) bool {
+		_, _, q := frameAt(sc, "query")
+		_, _, r := frameAt(sc, "results")
+		return q && !r
+	})
+	s.Keys(t, key(' '), key('z')) // out
+	h.RunCommand("focus.explorer")
+	s.WaitFor(t, "the explorer reopened docked", func(sc string) bool {
+		ex, ey, e := frameAt(sc, "explorer")
+		qx, _, q := frameAt(sc, "query")
+		return e && ex == 0 && ey == 1 && q && qx == 30
+	})
+}
+
+// A panel the query's zoom hid, shown again from the dock, ends that zoom: SPC z from the shown
+// explorer then zooms the explorer, where a zoom still held would have been undone instead.
+func TestThePanelTheDockShowsEndsTheQuerysZoom(t *testing.T) {
+	h, s := signedIn(t)
+	h.RunCommand("view.zoom_editor")
+	s.WaitFor(t, "the query zoomed", func(string) bool { return !h.PanelShown("explorer") && !h.PanelShown("results") })
+	h.GoDock("explorer")
+	s.WaitFor(t, "the explorer shown, in use", func(string) bool {
+		return h.PanelShown("explorer") && h.PaneWithFocus() == "explorerTree"
+	})
+	s.Keys(t, key(' '), key('z'))
+	s.WaitFor(t, "the explorer zoomed", func(sc string) bool {
+		_, _, q := frameAt(sc, "query")
+		_, _, e := frameAt(sc, "explorer")
+		return e && !q
+	})
+}
+
+// A zoomed panel restored by its own maximize control ends its zoom: SPC z from it then zooms it
+// again, where a zoom still held would have been undone instead.
+func TestAZoomedPanelRestoredByItsOwnControlEndsTheZoom(t *testing.T) {
+	h, s := signedIn(t)
+	h.RunCommand("view.zoom_results")
+	s.WaitFor(t, "the results zoomed", func(sc string) bool {
+		_, _, q := frameAt(sc, "query")
+		return !q && h.PaneWithFocus() == "results"
+	})
+	h.ToggleMaximize("results")
+	s.WaitFor(t, "restored", func(sc string) bool { _, _, q := frameAt(sc, "query"); return q })
+	s.Keys(t, key(' '), key('z'))
+	s.WaitFor(t, "the results zoomed again", func(sc string) bool { _, _, q := frameAt(sc, "query"); return !q })
+}
+
+// Every Panel in main.qml takes its geometry from its spec in auth.PanelSpecs: its edge, size,
+// length and smallest size and length are bound to the panel's sources, and those sources hold the
+// spec's edge and bounds. A Panel writing a number of its own would be a second policy.
+func TestEveryPanelBindsItsSpec(t *testing.T) {
+	src, err := os.ReadFile("qml/main.qml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := (qml.QML{File: "main.qml"}).Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	panels := map[string]*qml.SpecNode{}
+	var walk func(n *qml.SpecNode)
+	walk = func(n *qml.SpecNode) {
+		if n.Type == "Panel" {
+			panels[n.ID] = n
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(tree.Root)
+	h, _ := signedIn(t)
+	for _, spec := range auth.PanelSpecs {
+		node := panels[tuiapp.PanelQMLID(spec.ID)]
+		if node == nil {
+			t.Errorf("main.qml declares no Panel %s for the spec %q", tuiapp.PanelQMLID(spec.ID), spec.ID)
+			continue
+		}
+		bound := map[string]string{}
+		for _, p := range node.Props {
+			bound[p.Name] = p.Value.Raw
+		}
+		for prop, source := range map[string]string{"edge": "Edge", "size": "Size", "length": "Length",
+			"minimumSize": "MinSize", "minimumLength": "MinLength"} {
+			if want := "App." + spec.ID + source; bound[prop] != want {
+				t.Errorf("%s's %s is %q; want it bound to %s", node.ID, prop, bound[prop], want)
+			}
+		}
+		if got := h.SourceText("App." + spec.ID + "Edge"); !slices.Contains(spec.Edges, got) {
+			t.Errorf("%s's edge is %q; the spec allows %v", spec.ID, got, spec.Edges)
+		}
+		if got := h.SourceText("App." + spec.ID + "MinSize"); got != strconv.Itoa(spec.Size[0]) {
+			t.Errorf("%s's smallest size is %s; the spec's is %d", spec.ID, got, spec.Size[0])
+		}
+		if got := h.SourceText("App." + spec.ID + "MinLength"); got != strconv.Itoa(spec.Length[0]) {
+			t.Errorf("%s's smallest length is %s; the spec's is %d", spec.ID, got, spec.Length[0])
+		}
 	}
 }

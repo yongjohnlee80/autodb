@@ -41,8 +41,8 @@ func (p *panel) edge() string { return p.spec.Edges[0] }
 
 // panelDefaults are what the screen gives each panel of auth.PanelSpecs, by id.
 var panelDefaults = map[string]panel{
-	"explorer": {qml: "explorerPanel", view: paneExplorer, icon: "☰", size: 25, title: "explorer"},
-	"results":  {qml: "resultsPanel", view: paneResults, icon: "⌗", size: 40, title: "results"},
+	"explorer": {view: paneExplorer, icon: "☰", size: 25, title: "explorer"},
+	"results":  {view: paneResults, icon: "⌗", size: 40, title: "results"},
 }
 
 // editorIcon is the query editor's dock icon: the page, first in the dock.
@@ -58,7 +58,7 @@ func newPanels() []*panel {
 			continue
 		}
 		p := d
-		p.spec = spec
+		p.spec, p.qml = spec, PanelQMLID(spec.ID)
 		edge := p.edge()
 		p.sizePref = newAccountPref(panelgeometry.SizeKey(spec.ID, edge), "", spec.ID+" size", func(h *Host, v string) { h.showPanelSize(&p, v) })
 		p.lengthPref = newAccountPref(panelgeometry.LengthKey(spec.ID, edge), "", spec.ID+" length", func(h *Host, v string) { h.showPanelLength(&p, v) })
@@ -67,6 +67,9 @@ func newPanels() []*panel {
 	}
 	return out
 }
+
+// PanelQMLID is the id of a spec's Panel in main.qml: explorerPanel for the explorer.
+func PanelQMLID(specID string) string { return specID + "Panel" }
 
 // panelPrefs are every panel's geometry preferences, read after a sign-in as the others are.
 func (h *Host) panelPrefs() []*accountPref {
@@ -87,13 +90,17 @@ func (h *Host) panelNamed(id string) *panel {
 	return nil
 }
 
-// panelsState is what the document reads of the panels: each one's edge, size, length, and where
-// it floats (a docked one's rectangle is where it would float: the middle), and the dock's rows.
+// panelsState is what the document reads of the panels: each one's edge, its smallest size and
+// length (auth.PanelSpecs' bounds: the Panel's own constraints come from the one table), its size,
+// length, and where it floats (a docked one's rectangle is where it would float: the middle), and
+// the dock's rows.
 func (h *Host) panelsState() map[string]any {
 	st := map[string]any{"App.dock": h.dock.model}
 	for _, p := range h.panels {
 		id := p.spec.ID
 		st["App."+id+"Edge"] = p.edge()
+		st["App."+id+"MinSize"] = p.spec.Size[0]
+		st["App."+id+"MinLength"] = p.spec.Length[0]
 		st["App."+id+"Size"] = p.size
 		st["App."+id+"Length"] = 100
 		st["App."+id+"Floating"] = false
@@ -202,9 +209,40 @@ func (h *Host) panelOpened(id string) error {
 func (h *Host) panelClosed(id string) error {
 	h.panelOpen[id] = false
 	h.dock.hid = nil
+	if p := h.panelNamed(id); p != nil {
+		h.panelLeftZoom(p)
+	}
 	h.refreshDock()
 	h.focusPane(paneEditor)
 	return nil
+}
+
+// panelChanged is a Panel's window changed: its maximize undone by its own control ends a zoom
+// that had maximized it.
+func (h *Host) panelChanged(id, operation string, maximized bool) error {
+	if p := h.panelNamed(id); p != nil && operation == "maximize" && !maximized && h.zoomed == p.view {
+		h.zoomed = ""
+		h.reproject()
+	}
+	return nil
+}
+
+// panelLeftZoom reconciles the zoom with a panel closed some other way than Zoom out: a zoom that
+// maximized it is undone, so it reopens docked, and a zoom of the query that hid it no longer
+// counts it, ending once it hides none. Zoom out is offered again as it then stands.
+func (h *Host) panelLeftZoom(p *panel) {
+	switch {
+	case h.zoomed == p.view:
+		h.unzoom()
+	case h.zoomed == paneEditor && slices.Contains(h.zoomHid, p.spec.ID):
+		h.zoomHid = slices.DeleteFunc(h.zoomHid, func(id string) bool { return id == p.spec.ID })
+		if len(h.zoomHid) == 0 {
+			h.zoomed = ""
+		}
+	default:
+		return
+	}
+	h.reproject()
 }
 
 // panelHidden reports whether a panel is hidden by the dock: open and minimized.
@@ -289,6 +327,14 @@ func (h *Host) panelsHiddenChanged() {
 	shown := slices.ContainsFunc(h.panels, func(p *panel) bool { return h.panelOpen[p.spec.ID] && !h.panelHidden(p) })
 	if shown || slices.ContainsFunc(h.dock.hid, func(id string) bool { return !h.panelOpen[id] }) {
 		h.dock.hid = nil
+	}
+	// a panel the query's zoom hid, shown again some other way (the dock): the zoom is over
+	if h.zoomed == paneEditor && slices.ContainsFunc(h.zoomHid, func(id string) bool {
+		p := h.panelNamed(id)
+		return p != nil && h.panelOpen[id] && !h.panelHidden(p)
+	}) {
+		h.zoomed, h.zoomHid = "", nil
+		h.reproject()
 	}
 	h.refreshDock()
 }

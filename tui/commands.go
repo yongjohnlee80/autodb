@@ -125,6 +125,7 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.goDock":                  oneString("App.goDock", "a dock icon's key", h.goDock),
 		"App.panelResized":            panelAndNumbers("App.panelResized", 2, func(id string, n []float64) error { return h.panelResized(id, int(n[0]), int(n[1])) }),
 		"App.panelPlaced":             panelAndNumbers("App.panelPlaced", 4, func(id string, n []float64) error { return h.panelPlaced(id, [4]float64(n)) }),
+		"App.panelChanged":            panelChange(h.panelChanged),
 		"App.chooseConnection":        oneNumber("App.chooseConnection", "a row's index", h.chooseConnection),
 		"App.confirmed":               oneString("App.confirmed", "yes or no", h.confirmed),
 		"App.connectionAdd":           none(h.connectionAdd),
@@ -260,6 +261,17 @@ func panelAndNumbers(name string, n int, fn func(id string, nums []float64) erro
 			nums[i] = v
 		}
 		return fn(args[0].Raw, nums)
+	}
+}
+
+// panelChange is App.panelChanged(panel, operation, maximized): a Panel's changed signal, as far as
+// the host follows it.
+func panelChange(fn func(id, operation string, maximized bool) error) decl.HandlerFunc {
+	return func(args []qml.SpecValue) error {
+		if len(args) != 3 || args[0].Kind != qml.SpecValueString || args[1].Kind != qml.SpecValueString || args[2].Kind != qml.SpecValueBool {
+			return fmt.Errorf("App.panelChanged takes a panel, an operation and whether it is maximized")
+		}
+		return fn(args[0].Raw, args[1].Raw, args[2].Raw == "true")
 	}
 }
 
