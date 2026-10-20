@@ -34,7 +34,7 @@ func TestWorkspaceManagerListsAndCreates(t *testing.T) {
 
 func TestWorkspaceManagerFocusedButtonsTakeEnter(t *testing.T) {
 	h, s := signedIn(t)
-	h.RunCommand("options.theme.retro") // focus-color assertion below is Retro-specific
+	h.RunCommand("options.theme.retro") // the focus colours below are Retro's app.highlight roles
 	s.WaitFor(t, "retro palette", func(string) bool { return h.Theme() == "retro" })
 	openWorkspaces(t, s)
 	normal := paintedLabel(t, s, "[ New ]")
@@ -44,7 +44,7 @@ func TestWorkspaceManagerFocusedButtonsTakeEnter(t *testing.T) {
 	s.WaitFor(t, "New button visibly focused", func(string) bool {
 		return paintedLabel(t, s, "[ New ]") != normal
 	})
-	if focused := paintedLabel(t, s, "[ New ]"); focused.BG != color(0xff, 0xff, 0xff) {
+	if focused := paintedLabel(t, s, "[ New ]"); focused.BG != themeColor(t, "retro", "app.highlight") || focused.FG != themeColor(t, "retro", "app.highlightedText") {
 		t.Fatalf("focused New button is not visually distinct: normal %+v, focused %+v", normal, focused)
 	}
 	s.Keys(t, enter())
@@ -63,7 +63,7 @@ func TestWorkspaceManagerFocusedButtonsTakeEnter(t *testing.T) {
 
 func TestWorkspaceManagerLeavesBackdropAndPaintsWholeTables(t *testing.T) {
 	h, s := signedIn(t)
-	h.RunCommand("options.theme.retro") // blue table-background assertions are Retro-specific
+	h.RunCommand("options.theme.retro") // the table background below is Retro's document.base
 	s.WaitFor(t, "retro palette", func(string) bool { return h.Theme() == "retro" })
 	openWorkspaces(t, s)
 	lines := strings.Split(s.String(), "\n")
@@ -91,7 +91,7 @@ func TestWorkspaceManagerLeavesBackdropAndPaintsWholeTables(t *testing.T) {
 	if headerY < 0 || headerY+8 >= len(grid) || nameX < 1 {
 		t.Fatalf("workspace table header was not found:\n%s", s.String())
 	}
-	blue := color(0, 0, 0xaa)
+	blue := themeColor(t, "retro", "document.base")
 	if got := grid[headerY][nameX-1].Attrs.BG; got != blue {
 		t.Errorf("gap between table column titles has background %+v, want table blue %+v", got, blue)
 	}

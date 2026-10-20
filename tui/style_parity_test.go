@@ -41,6 +41,20 @@ func cellColorOf(t *testing.T, v string) tuicore.CellColor {
 	return color(r, g, b)
 }
 
+// themeColor is one of a theme's colours, by its dotted name ("document.base"), as a cell wears it.
+func themeColor(t *testing.T, theme, key string) tuicore.CellColor {
+	t.Helper()
+	vals, err := themes.Values(theme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, ok := vals[key]
+	if !ok {
+		t.Fatalf("%s has no %s", theme, key)
+	}
+	return cellColorOf(t, v)
+}
+
 // paintedLabel reads a real terminal cell rather than only the theme source.
 // Box borders occupy one column even though their UTF-8 is three bytes.
 func paintedLabel(t *testing.T, s *decltest.Screen, label string) tuicore.CellAttrs {
@@ -60,12 +74,13 @@ func paintedLabel(t *testing.T, s *decltest.Screen, label string) tuicore.CellAt
 
 func TestTheExplorerSelectionChangesLookOnFocusAndReturnsToItsBlurredLook(t *testing.T) {
 	h, s := signedIn(t)
-	h.RunCommand("options.theme.retro") // these assertions pin the Retro palette
+	h.RunCommand("options.theme.retro") // these assertions read the Retro palette's roles
 	s.WaitFor(t, "retro palette", func(string) bool { return h.Theme() == "retro" })
 	s.WaitForText(t, "▸ main (1)")
+	retro := func(key string) tuicore.CellColor { return themeColor(t, "retro", key) }
 	blurred := paintedLabel(t, s, "main (1)")
 	blurredCorner := s.Backend.Snapshot()[1][0].Attrs
-	if blurred.FG != color(0x55, 0xff, 0xff) || blurred.BG != color(0x55, 0x55, 0x55) || blurred.Mask&tuicore.AttrReverse != 0 {
+	if blurred.FG != retro("app.inactive.highlightedText") || blurred.BG != retro("app.inactive.highlight") || blurred.Mask&tuicore.AttrReverse != 0 {
 		t.Fatalf("blurred explorer cursor did not use the inactive palette: %+v", blurred)
 	}
 	s.Keys(t, ctrl('h'))
@@ -74,7 +89,7 @@ func TestTheExplorerSelectionChangesLookOnFocusAndReturnsToItsBlurredLook(t *tes
 		return paintedLabel(t, s, "main (1)") != blurred
 	})
 	focused := paintedLabel(t, s, "main (1)")
-	if focused.FG != color(0, 0, 0) || focused.BG != color(0xff, 0xff, 0xff) || focused.Mask&tuicore.AttrReverse != 0 {
+	if focused.FG != retro("document.highlightedText") || focused.BG != retro("document.highlight") || focused.Mask&tuicore.AttrReverse != 0 {
 		t.Fatalf("focused explorer cursor has the wrong color/Reverse mask: %+v", focused)
 	}
 	if corner := s.Backend.Snapshot()[1][0].Attrs; corner.FG != color(0xff, 0xff, 0xff) || corner.BG != blurredCorner.BG || corner.Mask&tuicore.AttrReverse != 0 {
@@ -82,7 +97,7 @@ func TestTheExplorerSelectionChangesLookOnFocusAndReturnsToItsBlurredLook(t *tes
 	}
 	s.Keys(t, enter())
 	s.WaitForText(t, "connections")
-	if normal := paintedLabel(t, s, "connections"); normal.FG != color(0xff, 0xff, 0x55) || normal.BG != color(0, 0, 0xaa) || normal.Mask&tuicore.AttrReverse != 0 {
+	if normal := paintedLabel(t, s, "connections"); normal.FG != retro("document.text") || normal.BG != retro("document.base") || normal.Mask&tuicore.AttrReverse != 0 {
 		t.Fatalf("unselected row ignored the document base/text palette: %+v", normal)
 	}
 	s.Keys(t, ctrl('l'))
@@ -110,7 +125,7 @@ func TestTheDisabledZoomOutRowIsDimmedAndCannotRun(t *testing.T) {
 	})
 }
 
-func TestAllShippedThemesKeepTheFocusedExplorerSelectionLegible(t *testing.T) {
+func TestEveryThemesFocusedExplorerCursorIsItsDocumentCursor(t *testing.T) {
 	h, s := signedIn(t)
 	s.Keys(t, ctrl('h'))
 	s.WaitFor(t, "explorer focus", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
