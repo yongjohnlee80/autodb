@@ -903,7 +903,9 @@ func (h *Host) PanelResized(id string, size, length int) {
 	h.p.Post(func() { h.keep(h.panelResized(id, size, length)) })
 }
 
-func (h *Host) PanelPlaced(id string, r [4]float64) { h.p.Post(func() { h.keep(h.panelPlaced(id, r)) }) }
+func (h *Host) PanelPlaced(id string, r [4]float64) {
+	h.p.Post(func() { h.keep(h.panelPlaced(id, r)) })
+}
 
 // GoDock is a click on the dock icon key.
 func (h *Host) GoDock(key string) { h.p.Post(func() { h.keep(h.goDock(key)) }) }
