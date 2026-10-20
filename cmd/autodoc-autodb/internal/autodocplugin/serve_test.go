@@ -237,12 +237,12 @@ func TestARefusedSignInReopensTheDialogOverTheRealLink(t *testing.T) {
 // inside a handler posting to it. The cancel comes before the panel's close, so that post returns
 // and the loop can end. The panel-free case is the control.
 func TestCloseKeepsTheHostsGraceWithThePanelBlocked(t *testing.T) {
-	for _, blocked := range []bool{false, true} {
-		name := "panel-free"
-		if blocked {
-			name = "panel-blocked"
-		}
-		t.Run(name, func(t *testing.T) {
+	// panel-blocked-first: a post of the panel's own (App.tab, as a binding re-evaluated after the
+	// plugin's last set makes one) blocks its loop before the cell's handler runs: the state
+	// the cell is about, reached another way, which waiting for the handler never saw
+	for _, mode := range []string{"panel-free", "panel-blocked", "panel-blocked-first"} {
+		blocked := mode != "panel-free"
+		t.Run(mode, func(t *testing.T) {
 			p := newPlugin("test", t.TempDir())
 			p.find = func(context.Context) (autodb.Binary, []autodb.Tried, error) {
 				return autodb.Binary{}, nil, autodb.ErrNotFound
@@ -302,12 +302,22 @@ func TestCloseKeepsTheHostsGraceWithThePanelBlocked(t *testing.T) {
 			for range cap(p.work) {
 				p.post(func() {})
 			}
-			if blocked {
-				inHandler := make(chan struct{})
-				if !p.ui.Card().Post(func() { close(inHandler); p.events().Tab(1) }) { // blocks posting
+			if mode == "panel-blocked-first" {
+				if !p.ui.Card().Post(func() { p.events().Tab(2) }) { // the panel's own post, first
 					t.Fatalf("the panel was not running: %v", p.ui.Card().Err())
 				}
-				<-inHandler
+			}
+			if blocked {
+				if !p.ui.Card().Post(func() { p.events().Tab(1) }) { // blocks posting
+					t.Fatalf("the panel was not running: %v", p.ui.Card().Err())
+				}
+				// the panel's loop held in a post, by whichever post reached the full queue first
+				for p.waiting.Load() == 0 {
+					if time.Now().After(deadline) {
+						t.Fatal("the panel never blocked posting")
+					}
+					time.Sleep(time.Millisecond)
+				}
 			}
 			began := time.Now()
 			done := make(chan struct{})

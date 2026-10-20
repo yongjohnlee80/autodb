@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yongjohnlee80/autodb/cmd/autodoc-autodb/internal/autodb"
@@ -88,9 +89,12 @@ type Plugin struct {
 	// lifecycle dials a mismatched server at its own protocol; autodb.DialLifecycle when nil
 	lifecycle func(ctx context.Context, network, addr string, protocol int) (*autodb.Lifecycle, error)
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	work      chan func() // the steps the plugin's goroutine runs, in order
+	ctx    context.Context
+	cancel context.CancelFunc
+	work   chan func() // the steps the plugin's goroutine runs, in order
+	// waiting counts the posts blocked on a full work queue now: the panel's loop is held while
+	// one of its posts waits (a test that needs it held reads this)
+	waiting   atomic.Int64
 	done      chan struct{}
 	closeOnce sync.Once
 	// inline runs each step at once, on the caller's goroutine: a test driving the plugin one call
@@ -245,6 +249,8 @@ func (p *Plugin) post(fn func()) {
 		p.say()
 		return
 	}
+	p.waiting.Add(1)
+	defer p.waiting.Add(-1)
 	select {
 	case p.work <- fn:
 	case <-p.ctx.Done():
