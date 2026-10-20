@@ -131,10 +131,14 @@ func (s *Service) SetUserOption(ctx context.Context, token, key, value, ip strin
 }
 
 // checkOption refuses a key this build does not know, or a value its key does not accept: one of
-// knownOptions, or a panel's geometry (tui.<panel>.<edge>.size and .length, tui.<panel>.float),
-// checked against PanelSpecs by golib's panelgeometry.
+// knownOptions, or a panel's geometry (tui.<panel>.edge, tui.<panel>.<edge>.size), checked against
+// PanelSpecs by golib's panelgeometry. A floating panel's .length and .float are no AutoDB keys:
+// values stored by an earlier build stay in the account, unread.
 func checkOption(key, value string) error {
 	if strings.HasPrefix(key, "tui.") {
+		if !panelKey(key) {
+			return fmt.Errorf("auth: unknown preference %q", key)
+		}
 		err := panelgeometry.Validate(PanelSpecs, key, value)
 		switch {
 		case err == nil:
