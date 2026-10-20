@@ -12,6 +12,8 @@ import (
 	"context"
 
 	guilib "github.com/yongjohnlee80/golib/gui"
+
+	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
 // guiDispatch is --gui's arm of the dispatch switch. gui.Main keeps the
@@ -49,7 +51,7 @@ func runGUI(ctx context.Context, configPath, remoteProfile string, b build) erro
 	if err != nil {
 		return err
 	}
-	return runUIOn(ctx, guiBackend(), ep.Network, cfg, start, configPath, addr, notesRoot, b)
+	return runUIOn(ctx, guiBackend(), tuiapp.GUIStyle(), ep.Network, cfg, start, configPath, addr, notesRoot, b)
 }
 
 // guiBackend is --gui's window. Its style is golib/gui's default, NativeStyle: buttons,

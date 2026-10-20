@@ -286,6 +286,9 @@ type Options struct {
 	// id (tui/keys.go), and is followed while the program runs. A missing
 	// file is no scheme; "" is none.
 	KeymapFile string
+	// Style dresses the screen's widgets for the backend: --gui's lays the results' table out in
+	// pixels (GUIStyle). nil is tui's own, every widget in cells.
+	Style *tuidecl.Style
 }
 
 // New mounts qml/main.qml over session. Nothing runs until Run.
@@ -434,6 +437,9 @@ func (h *Host) options(opt Options) []tuidecl.ProgramOption {
 	)
 	if opt.Sink != nil {
 		opts = append(opts, tuidecl.ErrorSink(opt.Sink))
+	}
+	if opt.Style != nil {
+		opts = append(opts, tuidecl.WithStyle(*opt.Style))
 	}
 	return opts
 }
