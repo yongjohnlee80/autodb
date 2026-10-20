@@ -203,7 +203,7 @@ func catalogCommands() []CommandOf[*Host] {
 			Leader: leader('e', "show or hide the explorer", 50),
 		},
 		{
-			ID: cmdFocusEditor, Run: func(h *Host) { h.focusPane("editor") },
+			ID: cmdFocusEditor, Run: func(h *Host) { h.showPane(paneEditor) },
 			Leader: leader('q', "focus query editor", 60),
 		},
 		{

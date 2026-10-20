@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/yongjohnlee80/golib/parse/qml"
+	tuicore "github.com/yongjohnlee80/golib/tui"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
@@ -304,3 +305,44 @@ func TestEveryPanelBindsItsSpec(t *testing.T) {
 }
 
 func defaultSize(id string) float64 { return map[string]float64{"explorer": 25, "results": 40}[id] }
+
+// drag is an Alt drag on the screen: press, one motion, release.
+func drag(t *testing.T, s interface {
+	Keys(testing.TB, ...tuicore.Event)
+}, button tuicore.MouseButton, x0, y0, x1, y1 int) {
+	t.Helper()
+	s.Keys(t,
+		tuicore.MouseEvent{Kind: tuicore.MousePress, Button: button, Mods: tuicore.ModAlt, X: x0, Y: y0},
+		tuicore.MouseEvent{Kind: tuicore.MouseMotion, Button: button, X: x1, Y: y1},
+		tuicore.MouseEvent{Kind: tuicore.MouseRelease, Button: button, X: x1, Y: y1})
+}
+
+// The pointer's own gestures reach the account through the tiles' signals: Alt-left dragging the
+// explorer to the right re-docks it (onDocked), and Alt-right dragging the query's left border, a
+// border the explorer owns, resizes the explorer (its onResized, though the drag began in the
+// query). Both are stored, and a fresh program signed in as the same account wears them.
+func TestThePointersGesturesAreTheAccounts(t *testing.T) {
+	addr := seeded(t)
+	h, s := runHostSized(t, addr, 120, 32)
+	loginAs(t, s, "root", rootPass)
+	s.WaitFor(t, "signed in, geometry read", func(string) bool { return h.Auth() == "signed-in" && h.PanelPrefsSettled() >= 6 })
+	s.WaitFor(t, "the tiles", func(sc string) bool { qx, _, ok := frameAt(sc, "query"); return ok && qx == 30 })
+
+	drag(t, s, tuicore.MouseRight, 31, 10, 41, 10) // the query's left border: the explorer's
+	s.WaitFor(t, "the explorer 40 wide, stored", func(sc string) bool {
+		qx, _, ok := frameAt(sc, "query")
+		return ok && qx == 40 && h.SourceText("App.explorerSize") == "33.33" && h.PanelPrefsIdle()
+	})
+	drag(t, s, tuicore.MouseLeft, 5, 10, 115, 10) // the explorer to the right edge
+	s.WaitFor(t, "the explorer at the right, stored", func(sc string) bool {
+		ex, _, ok := frameAt(sc, "explorer")
+		return ok && ex > 60 && h.SourceText("App.explorerEdge") == "right" && h.PanelPrefsIdle()
+	})
+
+	h2, s2 := runHostSized(t, addr, 120, 32)
+	loginAs(t, s2, "root", rootPass)
+	s2.WaitFor(t, "the account's explorer: right", func(sc string) bool {
+		ex, _, ok := frameAt(sc, "explorer")
+		return h2.Auth() == "signed-in" && ok && ex > 60 && h2.SourceText("App.explorerEdge") == "right"
+	})
+}
