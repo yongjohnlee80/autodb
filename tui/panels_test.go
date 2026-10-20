@@ -169,19 +169,18 @@ func TestThePanelTheDockShowsEndsTheQuerysZoom(t *testing.T) {
 	})
 }
 
-// A zoomed panel restored by its own maximize control ends its zoom: SPC z from it then zooms it
-// again, where a zoom still held would have been undone instead.
+// A zoomed panel restored by its own maximize control ends its zoom: SPC z from the query then
+// zooms the query (both panels hidden), where a zoom still held would only have been undone.
 func TestAZoomedPanelRestoredByItsOwnControlEndsTheZoom(t *testing.T) {
 	h, s := signedIn(t)
 	h.RunCommand("view.zoom_results")
-	s.WaitFor(t, "the results zoomed", func(sc string) bool {
-		_, _, q := frameAt(sc, "query")
-		return !q && h.PaneWithFocus() == "results"
-	})
+	s.WaitFor(t, "the results zoomed", func(sc string) bool { _, _, q := frameAt(sc, "query"); return !q })
 	h.ToggleMaximize("results")
-	s.WaitFor(t, "restored", func(sc string) bool { _, _, q := frameAt(sc, "query"); return q })
+	s.WaitFor(t, "restored by its own control", func(sc string) bool { _, _, q := frameAt(sc, "query"); return q })
+	h.RunCommand("focus.editor")
+	s.WaitFor(t, "the query in use", func(string) bool { return h.PaneWithFocus() == "editor" })
 	s.Keys(t, key(' '), key('z'))
-	s.WaitFor(t, "the results zoomed again", func(sc string) bool { _, _, q := frameAt(sc, "query"); return !q })
+	s.WaitFor(t, "the query zoomed", func(string) bool { return !h.PanelShown("explorer") && !h.PanelShown("results") })
 }
 
 // Every Panel in main.qml takes its geometry from its spec in auth.PanelSpecs: its edge, size,
