@@ -188,9 +188,14 @@ func (h *Host) resetPanels() {
 	}
 }
 
-// showPane makes sure the panel holding pane is shown, then gives pane the keyboard: a pane in a
-// hidden panel takes no focus.
+// showPane makes sure pane is on screen, then gives it the keyboard: another pane's zoom ends (a
+// maximized tile leaves the others no room), and the panel holding pane is shown if hidden. A pane
+// off screen takes no focus. Every show-and-focus entry comes here: SPC e, t and q, the dock,
+// search.
 func (h *Host) showPane(pane string) {
+	if h.zoomed != "" && h.zoomed != pane {
+		h.zoom("")
+	}
 	for _, p := range h.panels {
 		if p.view == pane && h.panelHidden(p) {
 			h.keep(h.p.Call(p.qml, "show"))
@@ -199,14 +204,14 @@ func (h *Host) showPane(pane string) {
 	h.focusPane(pane)
 }
 
-// toggleExplorer is SPC e: a shown explorer is hidden and the query gets the keyboard; a hidden one
-// is shown and gets it.
+// toggleExplorer is SPC e: a shown explorer is hidden and the query gets the keyboard; a hidden one,
+// or one another pane's zoom keeps off screen, is shown and gets it.
 func (h *Host) toggleExplorer() {
 	p := h.panelNamed("explorer")
 	if p == nil {
 		return
 	}
-	if h.panelHidden(p) {
+	if h.panelHidden(p) || (h.zoomed != "" && h.zoomed != p.view) {
 		h.showPane(paneExplorer)
 		return
 	}
@@ -271,7 +276,6 @@ func (h *Host) goDock(key string) error {
 		return fmt.Errorf("App.goDock: no panel %q", key)
 	}
 	if h.zoomed != "" && h.zoomed != p.view { // another pane has the screen: this one comes back
-		h.zoom("")
 		h.showPane(p.view)
 		return nil
 	}

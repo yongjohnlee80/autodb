@@ -98,3 +98,42 @@ func TestSpaceZZoomsThePaneInUse(t *testing.T) {
 		return h.PaneWithFocus() == "editor" && strings.Contains(sc, "┌ explorer") && strings.Contains(sc, "┌ results")
 	})
 }
+
+// A focus key for a pane another pane's zoom keeps off screen ends that zoom and gives it the
+// keyboard: SPC t to the empty results and SPC q to the query from a zoom of another, and SPC e to
+// a hidden explorer from the query's zoom.
+func TestAFocusKeyLeavesAnotherPanesZoom(t *testing.T) {
+	h, s := signedIn(t)
+	s.WaitForText(t, "main")
+	alone := func(sc, title string) bool {
+		n := 0
+		for _, p := range []string{"┌ explorer", "┌ query", "┌ results"} {
+			if strings.Contains(sc, p) {
+				n++
+			}
+		}
+		return n == 1 && strings.Contains(sc, "┌ "+title)
+	}
+	s.Keys(t, esc(), key(' '), key('z'))
+	s.WaitFor(t, "the query zoomed", func(sc string) bool { return alone(sc, "query") })
+	s.Keys(t, key(' '), key('t'))
+	s.WaitFor(t, "the results back, in use", func(sc string) bool {
+		return strings.Contains(sc, "┌ results") && strings.Contains(sc, "┌ query") && h.PaneWithFocus() == "results"
+	})
+
+	s.Keys(t, key(' '), key('z'))
+	s.WaitFor(t, "the results zoomed", func(sc string) bool { return alone(sc, "results") })
+	s.Keys(t, key(' '), key('q'))
+	s.WaitFor(t, "the query back, in use", func(sc string) bool {
+		return strings.Contains(sc, "┌ query") && strings.Contains(sc, "┌ results") && h.PaneWithFocus() == "editor"
+	})
+
+	h.GoDock("explorer") // hidden
+	s.WaitFor(t, "the explorer hidden", func(sc string) bool { return !strings.Contains(sc, "┌ explorer") && !h.PanelShown("explorer") })
+	s.Keys(t, esc(), key(' '), key('z'))
+	s.WaitFor(t, "the query zoomed", func(sc string) bool { return alone(sc, "query") })
+	s.Keys(t, key(' '), key('e'))
+	s.WaitFor(t, "the explorer back, in use", func(sc string) bool {
+		return strings.Contains(sc, "┌ explorer") && strings.Contains(sc, "┌ results") && h.PaneWithFocus() == "explorerTree"
+	})
+}
