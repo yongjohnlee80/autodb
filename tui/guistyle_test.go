@@ -25,14 +25,28 @@ func TestTheGUIDrawsTheResultsTableInPixelsAndKeepsTheEditor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, ok := p.Find("resultsTable")
+	body, ok := p.Find("resultsBody")
 	if !ok {
-		t.Fatal("no resultsTable")
+		t.Fatal("no resultsBody")
 	}
-	d := tuidecl.TableOf(c)
-	if d == nil {
-		t.Fatal("the results' TableView has no DataTable: not a cell cursor")
+	// the TableView inside the Results component, which keeps its own ids to itself
+	var tables []*widget.DataTable
+	var walk func(c tuicore.Component)
+	walk = func(c tuicore.Component) {
+		if d := tuidecl.TableOf(c); d != nil {
+			tables = append(tables, d)
+		}
+		if ct, ok := c.(tuicore.Container); ok {
+			for ch := range ct.Children() {
+				walk(ch)
+			}
+		}
 	}
+	walk(body)
+	if len(tables) != 1 {
+		t.Fatalf("%d cell-cursor tables under the results, want one", len(tables))
+	}
+	d := tables[0]
 	if _, _, native := b.NativeFor(d); !native {
 		t.Fatalf("the results' DataTable is drawn as cells (its layout %T)", d.BoundLayout())
 	}
