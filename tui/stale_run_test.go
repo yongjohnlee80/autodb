@@ -15,7 +15,7 @@ func TestARunAnsweredAfterTheIdentityChangedIsDropped(t *testing.T) {
 	h.HoldRuns(started)
 
 	s.WaitForText(t, "main")
-	s.Keys(t, key(' '), key('e'), enter())
+	s.Keys(t, ctrl('h'), enter())
 	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")
@@ -43,7 +43,7 @@ func TestARunAnsweredAfterTheIdentityChangedIsDropped(t *testing.T) {
 		cur := h.ExplorerCursor() // the empty tree's placeholder row is "empty"
 		return strings.Contains(sc, "▸ main (1)") && len(cur) > 0 && strings.HasPrefix(cur[0], "ws:")
 	})
-	s.Keys(t, key(' '), key('e'), enter())
+	s.Keys(t, ctrl('h'), enter())
 	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")
@@ -64,7 +64,7 @@ func TestANarrowerResultRetiresAnOpenOldValue(t *testing.T) {
 	started := make(chan chan *tuiapp.ExecResult, 2)
 	h.HoldRuns(started)
 	s.WaitForText(t, "main")
-	s.Keys(t, key(' '), key('e'), enter())
+	s.Keys(t, ctrl('h'), enter())
 	s.WaitForText(t, "▸ connections")
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")

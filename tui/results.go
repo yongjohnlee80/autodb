@@ -53,6 +53,7 @@ func resultsState(r *results) map[string]any {
 		"App.resultsJSON":      "",
 		"App.resultsEmpty":     true,
 		"App.resultsBodyShown": true,
+		"App.resultsTable":     true,
 		"App.resultsIndex":     0,
 	}
 }
@@ -189,6 +190,9 @@ func (h *Host) showResults() {
 			}
 		}
 	}
+	// the table is there, if empty, whenever the JSON isn't: the pane always holds something to
+	// take the keyboard
+	state["App.resultsTable"] = !state["App.resultsAsJSON"].(bool)
 	h.setTable(res)
 	if err := h.p.SetMany(state); err != nil {
 		h.keep(err)

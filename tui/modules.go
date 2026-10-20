@@ -6,8 +6,8 @@ import (
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui/decl/controls"
-	"github.com/yongjohnlee80/golib/tui/decl/panels"
 	"github.com/yongjohnlee80/golib/tui/decl/themes"
+	"github.com/yongjohnlee80/golib/tui/decl/tiles"
 )
 
 // THE QML THIS PROGRAM SHIPS, and the modules a document imports it through.
@@ -62,8 +62,8 @@ func (h *Host) modulesFrom(files fs.FS) []tuidecl.ProgramOption {
 		tuidecl.Translations(files, "i18n", "autodb"),
 		// Qt Quick Controls' TextField and Popup, from golib.
 		tuidecl.Types(controls.Types()...),
-		// golib's Panel: the explorer and the results (panels.go)
-		panels.Offer(),
+		// golib's TilePanel: the explorer, the query and the results (panels.go)
+		tiles.Offer(),
 	}, screenModules(files)...)
 }
 

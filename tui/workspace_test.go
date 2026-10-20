@@ -127,7 +127,7 @@ func TestAWrongPassphraseIsRefused(t *testing.T) {
 func TestEnterOnAConnectionOpensItAndMakesItTheQuerys(t *testing.T) {
 	_, s := signedIn(t)
 	s.WaitForText(t, "main")
-	s.Keys(t, key(' '), key('e'))     // SPC e: the explorer
+	s.Keys(t, ctrl('h'))              // Ctrl+h: the explorer
 	s.Keys(t, enter())                // main opens
 	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
 	s.Keys(t, key('j'), enter())      // connections opens
@@ -144,7 +144,7 @@ func TestEnterOnAConnectionOpensItAndMakesItTheQuerys(t *testing.T) {
 func TestATableScaffoldsItsQueryWhichRunsIntoTheResults(t *testing.T) {
 	h, s := signedIn(t)
 	s.WaitForText(t, "main")
-	s.Keys(t, key(' '), key('e'), enter())
+	s.Keys(t, ctrl('h'), enter())
 	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")
@@ -173,7 +173,7 @@ func TestATableScaffoldsItsQueryWhichRunsIntoTheResults(t *testing.T) {
 func TestAResultRowOpensItsFullValue(t *testing.T) {
 	h, s := signedIn(t)
 	s.WaitForText(t, "main")
-	s.Keys(t, key(' '), key('e'), enter())
+	s.Keys(t, ctrl('h'), enter())
 	s.WaitForText(t, "▸ connections")
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")

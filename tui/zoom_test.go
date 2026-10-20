@@ -26,10 +26,25 @@ func TestCtrlHJKLMovesBetweenThePanes(t *testing.T) {
 		s.Keys(t, ctrl(step.key))
 		s.WaitFor(t, "focus on "+step.want, func(string) bool { return h.PaneWithFocus() == step.want })
 	}
-	// Down, with nothing run yet: the results hold nothing to take the
-	// keyboard, so it stays on the query. (With rows, see the run test.)
-	s.Keys(t, ctrl('j'), ctrl('h'))
-	s.WaitFor(t, "still moving from the query", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
+	// Down, with nothing run yet: the results take the keyboard all the same (their table is there,
+	// empty, under the hint), and from them the explorer is to the left.
+	s.Keys(t, ctrl('j'))
+	s.WaitFor(t, "focus on the empty results", func(string) bool { return h.PaneWithFocus() == "results" })
+	s.Keys(t, ctrl('h'))
+	s.WaitFor(t, "left of the results: the explorer", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
+}
+
+// Ctrl+h/j/k/l follow the tiles as they are placed: the explorer re-docked at the right is to the
+// right of the query.
+func TestCtrlHJKLFollowsARedockedExplorer(t *testing.T) {
+	h, s := signedIn(t)
+	s.WaitForText(t, "main")
+	h.PanelDocked("explorer", "right")
+	s.WaitFor(t, "the explorer at the right", func(sc string) bool { x, _, ok := frameAt(sc, "explorer"); return ok && x > 60 })
+	s.Keys(t, ctrl('l'))
+	s.WaitFor(t, "right of the query: the explorer", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
+	s.Keys(t, ctrl('h'))
+	s.WaitFor(t, "left of the explorer: the query", func(string) bool { return h.PaneWithFocus() == "editor" })
 }
 
 // Alt+h/j/k/l are not pane moves: Alt+letter opens the menu bar's menus, and a

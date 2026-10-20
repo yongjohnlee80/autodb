@@ -1,17 +1,19 @@
 package tui
 
-import "github.com/yongjohnlee80/golib/tui/widget"
+import (
+	"github.com/yongjohnlee80/golib/tui"
+	"github.com/yongjohnlee80/golib/tui/widget"
+)
 
 // ZOOM AND PANE MOTION — the query editor and its two panels, one at a time or all.
 //
-// Zooming the query hides both panels (the dock's minimize: open still, their state kept); zooming
-// a panel shows it and maximizes it over the Window; Zoom out undoes whatever the zoom did. SPC z
-// zooms the pane that holds the keyboard, or zooms out; View › Zoom names one; Zoom out is offered
-// only while something is zoomed.
+// Zooming a pane maximizes its tile: it has the TileManager's whole rect, and the others keep their
+// place for when it is undone (golib's maximize is layout only; nothing is hidden). Zoom out
+// restores it. SPC z zooms the pane that holds the keyboard, or zooms out; View › Zoom names one;
+// Zoom out is offered only while something is zoomed.
 //
-// Ctrl+h/j/k/l move the keyboard between the panes the host knows — the
-// explorer on the left, the query above its results on the right. There is no
-// geometry to it: the layout is the host's, so the moves are.
+// Ctrl+h/j/k/l move the keyboard to the pane on that side of the one holding it, as the tiles are
+// placed now: a re-docked explorer is to the right.
 
 // Panes the host knows, by the document's ids.
 const (
@@ -19,6 +21,15 @@ const (
 	paneEditor   = "editor"
 	paneResults  = "results"
 )
+
+// paneTiles are the panes' tiles, by the document's ids.
+func (h *Host) paneTiles() map[string]string {
+	out := map[string]string{paneEditor: queryTile}
+	for _, p := range h.panels {
+		out[p.view] = p.qml
+	}
+	return out
+}
 
 // paneWithFocus is the pane holding the keyboard, "" for none.
 func (h *Host) paneWithFocus() string {
@@ -31,52 +42,34 @@ func (h *Host) paneWithFocus() string {
 	return ""
 }
 
-// panelState is a panel's window state: maximized, minimized; zero for one not built.
-func (h *Host) panelState(p *panel) widget.WindowState {
-	c, ok := h.p.Find(p.qml)
+// tileWindow is a tile's window, nil for one not built.
+func (h *Host) tileWindow(qml string) *widget.WindowCore {
+	c, ok := h.p.Find(qml)
 	w, isWindow := c.(interface{ WindowBehavior() *widget.WindowCore })
-	if !ok || !isWindow || w.WindowBehavior() == nil {
-		return widget.WindowState{}
+	if !ok || !isWindow {
+		return nil
 	}
-	return w.WindowBehavior().State()
+	return w.WindowBehavior()
 }
 
 // zoom gives pane the screen, or gives every pane back for "": the last zoom is undone first.
 func (h *Host) zoom(pane string) {
 	h.unzoom()
-	h.zoomed = pane
-	switch pane {
-	case "":
-	case paneEditor:
-		for _, p := range h.panels {
-			if h.panelOpen[p.spec.ID] && !h.panelHidden(p) {
-				h.keep(h.p.Call(p.qml, "minimize"))
-				h.zoomHid = append(h.zoomHid, p.spec.ID)
-			}
-		}
-		h.focusPane(paneEditor)
-	default:
+	if tile, ok := h.paneTiles()[pane]; ok {
 		h.showPane(pane)
-		for _, p := range h.panels {
-			if p.view == pane && !h.panelState(p).Maximized {
-				h.keep(h.p.Call(p.qml, "toggleMaximize"))
-			}
+		if w := h.tileWindow(tile); w != nil && !w.State().Maximized {
+			h.keep(h.p.Call(tile, "toggleMaximize"))
 		}
+		h.zoomed = pane
 	}
 	h.reproject() // Zoom out is offered only while zoomed
 }
 
-// unzoom undoes the last zoom: the panels it hid shown again, the panel it maximized restored.
+// unzoom undoes the last zoom: the tile it maximized restored.
 func (h *Host) unzoom() {
-	for _, id := range h.zoomHid {
-		if p := h.panelNamed(id); p != nil && h.panelOpen[id] && h.panelHidden(p) {
-			h.keep(h.p.Call(p.qml, "open"))
-		}
-	}
-	h.zoomHid = nil
-	for _, p := range h.panels {
-		if p.view == h.zoomed && h.panelState(p).Maximized {
-			h.keep(h.p.Call(p.qml, "toggleMaximize"))
+	if tile, ok := h.paneTiles()[h.zoomed]; ok {
+		if w := h.tileWindow(tile); w != nil && w.State().Maximized {
+			h.keep(h.p.Call(tile, "toggleMaximize"))
 		}
 	}
 	h.zoomed = ""
@@ -103,36 +96,52 @@ func zoomedNow(h *Host) (bool, string) {
 	return true, ""
 }
 
-// movePane is App.movePane(dir): h, j, k or l, from the pane with the
-// keyboard to its neighbour — out of a zoom first, since the neighbour is
-// hidden.
+// movePane is App.movePane(dir): h, j, k or l, from the pane with the keyboard to the nearest shown
+// pane on that side of it — out of a zoom first, since the others are not on screen.
 func (h *Host) movePane(dir string) error {
 	from := h.paneWithFocus()
-	var to string
-	switch dir {
-	case "h": // left: anything on the right → the explorer
-		if from != paneExplorer {
-			to = paneExplorer
-		}
-	case "l": // right: the explorer → the query
-		if from == paneExplorer {
-			to = paneEditor
-		}
-	case "k": // up: the results → the query
-		if from == paneResults {
-			to = paneEditor
-		}
-	case "j": // down: the query → the results
-		if from == paneEditor {
-			to = paneResults
-		}
-	}
-	if to == "" {
-		return nil // no pane that way
+	if from == "" {
+		from = paneEditor
 	}
 	if h.zoomed != "" {
 		h.zoom("")
 	}
-	h.showPane(to)
+	tiles := h.paneTiles()
+	fw := h.tileWindow(tiles[from])
+	if fw == nil {
+		return nil
+	}
+	at := fw.RequestedBounds() // as the tiles are laid out next: a zoom just ended has not been drawn yet
+	best, bestGap := "", 0
+	for _, pane := range []string{paneExplorer, paneEditor, paneResults} {
+		w := h.tileWindow(tiles[pane])
+		if pane == from || w == nil || w.State().Minimized {
+			continue
+		}
+		if gap, ok := sideGap(at, w.RequestedBounds(), dir); ok && (best == "" || gap < bestGap) {
+			best, bestGap = pane, gap
+		}
+	}
+	if best != "" {
+		h.focusPane(best)
+	}
 	return nil
+}
+
+// sideGap is how far r lies on dir's side of from (h left, l right, k up, j down), and whether it
+// lies there at all: wholly past from's side, and alongside it on the other axis.
+func sideGap(from, r tui.Rect, dir string) (int, bool) {
+	alongX := max(from.X, r.X) < min(from.X+from.W, r.X+r.W)
+	alongY := max(from.Y, r.Y) < min(from.Y+from.H, r.Y+r.H)
+	switch dir {
+	case "h":
+		return from.X - (r.X + r.W), r.X+r.W <= from.X && alongY
+	case "l":
+		return r.X - (from.X + from.W), r.X >= from.X+from.W && alongY
+	case "k":
+		return from.Y - (r.Y + r.H), r.Y+r.H <= from.Y && alongX
+	case "j":
+		return r.Y - (from.Y + from.H), r.Y >= from.Y+from.H && alongX
+	}
+	return 0, false
 }

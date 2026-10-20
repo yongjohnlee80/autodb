@@ -192,15 +192,15 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 		},
 		{
-			// every floating panel docked at its edge again (panels.go)
-			ID: cmdResetPanels, Run: func(h *Host) { h.dockPanels() },
+			// every panel back at its first edge and default size, and shown (panels.go)
+			ID: cmdResetPanels, Run: func(h *Host) { h.resetPanels() },
 			Menu: []MenuProjection{
 				{Parent: nodeView, Label: "Reset panel layout", Hotkey: 'P', Order: 50},
 			},
 		},
 		{
-			ID: cmdFocusExplorer, Run: func(h *Host) { h.showPane(paneExplorer) },
-			Leader: leader('e', "focus explorer", 50),
+			ID: cmdFocusExplorer, Run: func(h *Host) { h.toggleExplorer() },
+			Leader: leader('e', "show or hide the explorer", 50),
 		},
 		{
 			ID: cmdFocusEditor, Run: func(h *Host) { h.focusPane("editor") },
