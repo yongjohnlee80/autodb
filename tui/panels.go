@@ -34,6 +34,9 @@ type panel struct {
 	title string             // the dock's tooltip: English, as golib's tooltips are (string-only)
 	// its geometry preferences, at the edge it docks to: size and length, and where it floats
 	sizePref, lengthPref, floatPref *accountPref
+	// unmaximize: a zoom maximized it and it closed before Zoom out; its next opening undoes the
+	// maximize, which a closed Drawer cannot take
+	unmaximize bool
 }
 
 // edge is the edge a panel docks to: its spec's first.
@@ -201,6 +204,12 @@ func (h *Host) showPane(pane string) {
 // panelOpened and panelClosed follow the Panels, however they were opened or closed.
 func (h *Host) panelOpened(id string) error {
 	h.panelOpen[id] = true
+	if p := h.panelNamed(id); p != nil && p.unmaximize {
+		p.unmaximize = false
+		if h.panelState(p).Maximized {
+			h.keep(h.p.Call(p.qml, "toggleMaximize"))
+		}
+	}
 	h.dock.hid = nil // a panel opened since the editor's icon hid them: its next click hides
 	h.refreshDock()
 	return nil
@@ -233,7 +242,8 @@ func (h *Host) panelChanged(id, operation string, maximized bool) error {
 func (h *Host) panelLeftZoom(p *panel) {
 	switch {
 	case h.zoomed == p.view:
-		h.unzoom()
+		p.unmaximize = true // closed: its maximize is undone when it opens again
+		h.zoomed = ""
 	case h.zoomed == paneEditor && slices.Contains(h.zoomHid, p.spec.ID):
 		h.zoomHid = slices.DeleteFunc(h.zoomHid, func(id string) bool { return id == p.spec.ID })
 		if len(h.zoomHid) == 0 {
