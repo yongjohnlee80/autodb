@@ -13,9 +13,9 @@ import (
 )
 
 // THE PANELS — the explorer and the results, golib's Panels (tui.panels) over the query editor,
-// which is the page (ADR 1792459145). Each opens docked at its edge and takes its strip from the
-// page (reserve: the editor makes room, §4.3a), so the screen reads as a split until a panel is
-// moved: Alt/Option-left drag floats it, Alt/Option-right drag resizes it, and the dock in the menu
+// which is the page. Each opens docked at its edge and takes its strip from the page (reserve: the
+// editor makes room for a docked panel rather than lying under it), so the screen reads as a split
+// until a panel is moved: Alt/Option-left drag floats it, Alt/Option-right drag resizes it, and the dock in the menu
 // bar's corner hides and shows it. A dialog over a floating panel still has the keyboard and the
 // pointer: the panels are non-modal, and a Dialog's trap is above them.
 //
