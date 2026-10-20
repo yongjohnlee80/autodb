@@ -6,12 +6,13 @@ import (
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui/decl/controls"
+	"github.com/yongjohnlee80/golib/tui/decl/themes"
 )
 
 // THE QML THIS PROGRAM SHIPS, and the modules a document imports it through.
 //
 //	import autodb 1.0               the App singleton          (declared)
-//	import autodb.theme.dark 1.0    a Theme singleton          (offered)
+//	import autodb.theme.dark 1.0    a Theme singleton          (offered: golib's themes)
 //
 // App is DECLARED: it is this program, and every document needs it. Themes are
 // OFFERED: importable, and read only when an import line names them — so only
@@ -24,7 +25,7 @@ import (
 var qmlEmbed embed.FS
 
 // qmlFiles is the qml directory as the root, so paths read as they do under
-// -dev: main.qml, themes/{retro,mono,dark,light}.qml.
+// -dev: main.qml, views/…, dialogs/….
 var qmlFiles = func() fs.FS {
 	sub, err := fs.Sub(qmlEmbed, "qml")
 	if err != nil {
@@ -52,7 +53,9 @@ func (h *Host) modulesFrom(files fs.FS) []tuidecl.ProgramOption {
 		// The `autodb` module exports ONE singleton, App. Everything the
 		// document can reach of this program is under that name.
 		tuidecl.Singleton("autodb", moduleVersion, "App"),
-		tuidecl.Themes(files, "themes", "autodb.theme", moduleVersion),
+		// golib's themes, as autodb.theme.<name>: the program keeps no colours of
+		// its own, so a theme golib adds is offered with no change here
+		tuidecl.Themes(themes.FS(), ".", "autodb.theme", moduleVersion),
 		// The program's own catalogs, layered over golib's: i18n/autodb_en.xml,
 		// autodb_ko_KR.xml, ….
 		tuidecl.Translations(files, "i18n", "autodb"),

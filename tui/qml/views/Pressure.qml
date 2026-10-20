@@ -17,7 +17,7 @@ Dialog {
         TableViewColumn { role: "value"; title: "VALUE"; width: 0 }
         delegate: Text {
             text: model.display
-            color: model.state === "raised" ? Theme.pressureRaisedText : palette.text
+            color: model.state === "raised" ? Theme.syntax.alert : palette.text
         }
     }
 }
