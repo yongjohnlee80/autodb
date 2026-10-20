@@ -897,3 +897,58 @@ func (h *Host) SettleBackgroundTask() {
 	})
 	<-done
 }
+
+// PanelResized and PanelPlaced are a Panel's grip released and its move ended, as its signals are.
+func (h *Host) PanelResized(id string, size, length int) {
+	h.p.Post(func() { h.keep(h.panelResized(id, size, length)) })
+}
+
+func (h *Host) PanelPlaced(id string, r [4]float64) { h.p.Post(func() { h.keep(h.panelPlaced(id, r)) }) }
+
+// GoDock is a click on the dock icon key.
+func (h *Host) GoDock(key string) { h.p.Post(func() { h.keep(h.goDock(key)) }) }
+
+// PanelShown reports, on the loop, whether the panel id is open and not hidden by the dock.
+func (h *Host) PanelShown(id string) bool {
+	got := make(chan bool, 1)
+	h.p.Post(func() {
+		p := h.panelNamed(id)
+		got <- p != nil && h.panelOpen[id] && !h.panelHidden(p)
+	})
+	return <-got
+}
+
+// DockKeys are the dock's icons' keys, in order, read on the loop.
+func (h *Host) DockKeys() []string {
+	got := make(chan []string, 1)
+	h.p.Post(func() {
+		var keys []string
+		for i := range h.dock.model.Len() {
+			keys = append(keys, h.dock.model.At(i)["key"].(string))
+		}
+		got <- keys
+	})
+	return <-got
+}
+
+// PanelIDs are the screen's panels' ids, in auth.PanelSpecs' order.
+func PanelIDs() []string {
+	var out []string
+	for _, p := range newPanels() {
+		out = append(out, p.spec.ID)
+	}
+	return out
+}
+
+// PanelPrefsSettled counts the panels' geometry writes and reads that came back, read on the loop.
+func (h *Host) PanelPrefsSettled() int {
+	got := make(chan int, 1)
+	h.p.Post(func() {
+		n := 0
+		for _, p := range h.panelPrefs() {
+			n += p.settled
+		}
+		got <- n
+	})
+	return <-got
+}

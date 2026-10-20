@@ -120,6 +120,11 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.saveWorkspace":           oneString("App.saveWorkspace", "a workspace name", h.saveWorkspace),
 		"App.attachToWorkspace":       workspaceAndName(h.attachToWorkspace),
 		"App.movePane":                oneString("App.movePane", "h, j, k or l", h.movePane),
+		"App.panelOpened":             oneString("App.panelOpened", "a panel", h.panelOpened),
+		"App.panelClosed":             oneString("App.panelClosed", "a panel", h.panelClosed),
+		"App.goDock":                  oneString("App.goDock", "a dock icon's key", h.goDock),
+		"App.panelResized":            panelAndNumbers("App.panelResized", 2, func(id string, n []float64) error { return h.panelResized(id, int(n[0]), int(n[1])) }),
+		"App.panelPlaced":             panelAndNumbers("App.panelPlaced", 4, func(id string, n []float64) error { return h.panelPlaced(id, [4]float64(n)) }),
 		"App.chooseConnection":        oneNumber("App.chooseConnection", "a row's index", h.chooseConnection),
 		"App.confirmed":               oneString("App.confirmed", "yes or no", h.confirmed),
 		"App.connectionAdd":           none(h.connectionAdd),
@@ -237,6 +242,24 @@ func none(fn func() error) decl.HandlerFunc {
 			return fmt.Errorf("takes no arguments, and was given %d", len(args))
 		}
 		return fn()
+	}
+}
+
+// panelAndNumbers is a command that takes a panel's id and n numbers: a Panel's resized or placed.
+func panelAndNumbers(name string, n int, fn func(id string, nums []float64) error) decl.HandlerFunc {
+	return func(args []qml.SpecValue) error {
+		if len(args) != n+1 || args[0].Kind != qml.SpecValueString {
+			return fmt.Errorf("%s takes a panel and %d numbers", name, n)
+		}
+		nums := make([]float64, n)
+		for i, a := range args[1:] {
+			v, err := strconv.ParseFloat(a.Raw, 64)
+			if a.Kind != qml.SpecValueNumber || err != nil {
+				return fmt.Errorf("%s: argument %d is not a number", name, i+2)
+			}
+			nums[i] = v
+		}
+		return fn(args[0].Raw, nums)
 	}
 }
 

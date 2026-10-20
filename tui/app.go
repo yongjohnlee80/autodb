@@ -91,6 +91,13 @@ type Host struct {
 	prefs, themePref, languagePref *accountPref
 	// zoomed is the pane that has the screen, "" for none (zoom.go).
 	zoomed string
+	// panels are the explorer's and the results' Panels, panelOpen which are open, dock the menu
+	// bar's corner, and minimized the windows the dock hides (panels.go)
+	panels    []*panel
+	panelOpen map[string]bool
+	zoomHid   []string // the panels a zoom of the query hid (zoom.go)
+	dock      dockState
+	minimized *widget.MinimizedWindows
 	// pickable is the connection picker's rows (picker.go).
 	pickable *tuidecl.ListModel
 	// conns is the connections manager, connForm what its form is for, and
@@ -336,6 +343,9 @@ func newHost(session *Session, notesFor notes.NotesFactory, quit func(), opt Opt
 	h.prefs = newKeysetPref()
 	h.themePref = newThemePref(themeOf(layout))
 	h.languagePref = newLanguagePref()
+	h.panels, h.panelOpen, h.dock = newPanels(), map[string]bool{}, newDock()
+	h.minimized = widget.NewMinimizedWindows()
+	h.minimized.Observe(h.panelsHiddenChanged) // the dock dims a hidden panel
 	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")
 	h.conns = newConnectionsManager()
 	h.spaces = newWorkspaceManager(h)
@@ -370,6 +380,8 @@ func (h *Host) attach(p *tuidecl.Program) error {
 	}
 	h.explorer.model.OnFetch = h.fetchExplorer
 	h.reproject()
+	// the panels open on the first loop turn: a Panel shows once the tree it is in is mounted
+	p.Post(h.openPanels)
 	p.Post(h.start)
 	return nil
 }
@@ -420,6 +432,7 @@ func (h *Host) options(opt Options) []tuidecl.ProgramOption {
 		tuidecl.Sources(h.state(h.pickTheme(src))),
 		tuidecl.Handlers(h.commands()),
 		tuidecl.AppOptions(opt.App...),
+		tuidecl.AdapterOptions(tuidecl.WithWindowCollector(h.minimized)), // the panels the dock hides
 	)
 	if opt.Sink != nil {
 		opts = append(opts, tuidecl.ErrorSink(opt.Sink))

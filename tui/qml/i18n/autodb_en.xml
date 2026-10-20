@@ -99,6 +99,10 @@
             <source>Z&amp;oom out</source>
             <translation>Z&amp;oom out</translation>
         </message>
+        <message id="autodb.menu.view.reset_panels">
+            <source>Reset &amp;panel layout</source>
+            <translation>Reset &amp;panel layout</translation>
+        </message>
         <message id="autodb.leader.focus.explorer">
             <source>focus explorer</source>
             <translation>focus explorer</translation>

@@ -1,11 +1,13 @@
 package tui
 
-// ZOOM AND PANE MOTION — the three panes, one at a time or all.
+import "github.com/yongjohnlee80/golib/tui/widget"
+
+// ZOOM AND PANE MOTION — the query editor and its two panels, one at a time or all.
 //
-// A zoomed pane has the screen: the others are hidden (the document binds each
-// pane's `visible`), and a hidden pane gives its space to the rest, as golib's
-// Split does. SPC z zooms the pane that holds the keyboard, or zooms out;
-// View › Zoom names one; Zoom out is offered only while something is zoomed.
+// Zooming the query hides both panels (the dock's minimize: open still, their state kept); zooming
+// a panel shows it and maximizes it over the Window; Zoom out undoes whatever the zoom did. SPC z
+// zooms the pane that holds the keyboard, or zooms out; View › Zoom names one; Zoom out is offered
+// only while something is zoomed.
 //
 // Ctrl+h/j/k/l move the keyboard between the panes the host knows — the
 // explorer on the left, the query above its results on the right. There is no
@@ -18,16 +20,6 @@ const (
 	paneResults  = "results"
 )
 
-// zoomState are the panes' visibility sources, nothing zoomed.
-func zoomState() map[string]any {
-	return map[string]any{
-		"App.explorerShown": true,
-		"App.editorShown":   true,
-		"App.resultsShown":  true,
-		"App.rightShown":    true,
-	}
-}
-
 // paneWithFocus is the pane holding the keyboard, "" for none.
 func (h *Host) paneWithFocus() string {
 	app := h.p.App()
@@ -39,23 +31,55 @@ func (h *Host) paneWithFocus() string {
 	return ""
 }
 
-// zoom shows only pane, or every pane for "".
+// panelState is a panel's window state: maximized, minimized; zero for one not built.
+func (h *Host) panelState(p *panel) widget.WindowState {
+	c, ok := h.p.Find(p.qml)
+	w, isWindow := c.(interface{ WindowBehavior() *widget.WindowCore })
+	if !ok || !isWindow || w.WindowBehavior() == nil {
+		return widget.WindowState{}
+	}
+	return w.WindowBehavior().State()
+}
+
+// zoom gives pane the screen, or gives every pane back for "": the last zoom is undone first.
 func (h *Host) zoom(pane string) {
+	h.unzoom()
 	h.zoomed = pane
-	all := pane == ""
-	state := map[string]any{
-		"App.explorerShown": all || pane == paneExplorer,
-		"App.editorShown":   all || pane == paneEditor,
-		"App.resultsShown":  all || pane == paneResults,
-		"App.rightShown":    all || pane != paneExplorer,
-	}
-	if err := h.p.SetMany(state); err != nil {
-		h.keep(err)
-	}
-	if pane != "" {
-		h.focusPane(pane)
+	switch pane {
+	case "":
+	case paneEditor:
+		for _, p := range h.panels {
+			if h.panelOpen[p.spec.ID] && !h.panelHidden(p) {
+				h.keep(h.p.Call(p.qml, "minimize"))
+				h.zoomHid = append(h.zoomHid, p.spec.ID)
+			}
+		}
+		h.focusPane(paneEditor)
+	default:
+		h.showPane(pane)
+		for _, p := range h.panels {
+			if p.view == pane && !h.panelState(p).Maximized {
+				h.keep(h.p.Call(p.qml, "toggleMaximize"))
+			}
+		}
 	}
 	h.reproject() // Zoom out is offered only while zoomed
+}
+
+// unzoom undoes the last zoom: the panels it hid shown again, the panel it maximized restored.
+func (h *Host) unzoom() {
+	for _, id := range h.zoomHid {
+		if p := h.panelNamed(id); p != nil && h.panelOpen[id] && h.panelHidden(p) {
+			h.keep(h.p.Call(p.qml, "open"))
+		}
+	}
+	h.zoomHid = nil
+	for _, p := range h.panels {
+		if p.view == h.zoomed && h.panelState(p).Maximized {
+			h.keep(h.p.Call(p.qml, "toggleMaximize"))
+		}
+	}
+	h.zoomed = ""
 }
 
 // zoomToggle is view.zoom_toggle (SPC z): the pane with the keyboard, or out.
@@ -109,6 +133,6 @@ func (h *Host) movePane(dir string) error {
 	if h.zoomed != "" {
 		h.zoom("")
 	}
-	h.focusPane(to)
+	h.showPane(to)
 	return nil
 }
