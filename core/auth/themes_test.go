@@ -31,12 +31,16 @@ func TestTheFrontdoorLinksNoUI(t *testing.T) {
 	if !slices.Contains(deps, "github.com/yongjohnlee80/autodb/core/auth") {
 		t.Fatal("the frontdoor no longer links core/auth; this cell checks nothing")
 	}
-	// all of golib's UI, by prefix; the theme names' leaf package is the one named exemption
-	const leaf = "github.com/yongjohnlee80/golib/tui/decl/themes/qmlfiles"
+	// all of golib's UI, by prefix; the two leaf packages core/auth reads are the named exemptions,
+	// the theme names and the panel geometry check, which import nothing of golib
+	leaves := []string{
+		"github.com/yongjohnlee80/golib/tui/decl/themes/qmlfiles",
+		"github.com/yongjohnlee80/golib/tui/panelgeometry",
+	}
 	for _, dep := range deps {
 		ui := dep == "github.com/yongjohnlee80/golib/tui" || strings.HasPrefix(dep, "github.com/yongjohnlee80/golib/tui/") ||
 			dep == "github.com/yongjohnlee80/golib/gui" || strings.HasPrefix(dep, "github.com/yongjohnlee80/golib/gui/")
-		if ui && dep != leaf {
+		if ui && !slices.Contains(leaves, dep) {
 			t.Errorf("the frontdoor links %s", dep)
 		}
 	}
