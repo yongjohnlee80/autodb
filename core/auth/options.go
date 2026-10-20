@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/yongjohnlee80/golib/dao"
+	"github.com/yongjohnlee80/golib/tui/decl/themes/qmlfiles"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -37,9 +38,11 @@ const (
 // last chose. The values are the themes the product ships.
 const OptionTheme = "theme"
 
-// Themes are the themes a client may store as OptionTheme. The TUI ships one
-// file per theme (tui/qml/themes); a test holds the two lists equal.
-var Themes = []string{"dark", "light", "mono", "retro", "sepia"}
+// Themes are the themes a client may store as OptionTheme: golib's, which the
+// TUI offers (tui/modules.go), so a theme golib adds is accepted with no change
+// here. qmlfiles imports nothing of golib's UI, which this package, linked into
+// the frontdoor, must not carry.
+var Themes = qmlfiles.Names()
 
 // OptionLanguage is the language the TUI shows its UI text in: the one the
 // account last chose. The values are the languages the product ships catalogs
