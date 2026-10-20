@@ -92,7 +92,8 @@ func TestTheExplorerSelectionChangesLookOnFocusAndReturnsToItsBlurredLook(t *tes
 	if focused.FG != retro("document.highlightedText") || focused.BG != retro("document.highlight") || focused.Mask&tuicore.AttrReverse != 0 {
 		t.Fatalf("focused explorer cursor has the wrong color/Reverse mask: %+v", focused)
 	}
-	if corner := s.Backend.Snapshot()[1][0].Attrs; corner.FG != color(0xff, 0xff, 0xff) || corner.BG != blurredCorner.BG || corner.Mask&tuicore.AttrReverse != 0 {
+	// the panel's frame is golib's Panel's: focused, its border wears the Window's highlight
+	if corner := s.Backend.Snapshot()[1][0].Attrs; corner.FG != retro("app.highlight") || corner.BG != blurredCorner.BG || corner.Mask&tuicore.AttrReverse != 0 {
 		t.Fatalf("focused frame did not brighten independently of the row: %+v", corner)
 	}
 	s.Keys(t, enter())

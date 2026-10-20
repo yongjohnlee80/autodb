@@ -70,7 +70,7 @@ func (h *Host) state(theme string) map[string]any {
 	}
 	st["App.noteOpenRows"] = h.noteOpen.model
 	st["App.noteOpenStatus"] = ""
-	for k, v := range zoomState() {
+	for k, v := range h.panelsState() {
 		st[k] = v
 	}
 	for k, v := range pickerState(h) {

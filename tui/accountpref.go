@@ -216,5 +216,5 @@ func (h *Host) forgetPrefs() {
 
 // accountPrefs are the account's preferences, in the order they are read.
 func (h *Host) accountPrefs() []*accountPref {
-	return []*accountPref{h.prefs, h.themePref, h.languagePref}
+	return append([]*accountPref{h.prefs, h.themePref, h.languagePref}, h.panelPrefs()...)
 }

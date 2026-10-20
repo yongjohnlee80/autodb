@@ -99,6 +99,10 @@
             <source>Z&amp;oom out</source>
             <translation>확대 해제(&amp;o)</translation>
         </message>
+        <message id="autodb.menu.view.reset_panels">
+            <source>Reset &amp;panel layout</source>
+            <translation>패널 배치 초기화(&amp;p)</translation>
+        </message>
         <message id="autodb.leader.focus.explorer">
             <source>focus explorer</source>
             <translation>탐색기로 이동</translation>

@@ -196,17 +196,17 @@ func (h *Host) searchJump(dir int, includeCurrent bool) {
 			return
 		}
 		h.explorerAt = h.explorerKeys(at[row])
-		h.focusPane(paneExplorer)
+		h.showPane(paneExplorer)
 	case "query":
 		h.editor.SetLine(row, cols[row])
 		h.focusEditor()
 	case "json":
 		h.jsonEditor.SetLine(row, cols[row])
-		h.focusPane(paneResults)
+		h.showPane(paneResults)
 	case "table":
 		h.results.cursor = row
 		h.set("App.resultsIndex", row)
-		h.focusPane(paneResults)
+		h.showPane(paneResults)
 	}
 	h.setStatus(fmt.Sprintf("%s: match %d/%d in the %s", s.query, selected+1, len(hits), s.target))
 }

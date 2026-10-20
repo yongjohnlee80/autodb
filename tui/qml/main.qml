@@ -17,6 +17,7 @@ import autodb.views 1.0           // Leader, Hints, Help, About
 import autodb.dialogs 1.0         // ConfirmQuit, Login, Bootstrap, the note dialogs, ConnPicker
 import autodb.panels 1.0          // Results
 import autodb.managers 1.0        // Connections, ConnectionForm, Attach
+import tui.panels 1.0             // Panel: the explorer and the results (golib)
 
 Window {
     palette.window: Theme.app.window
@@ -128,32 +129,96 @@ Window {
                 }
             }
         }
+        // the dock, the bar's corner: the query, then each open panel; a click hides a shown panel
+        // or shows a hidden one, and the query's hides or shows them all (tui/panels.go)
+        Flex {
+            direction: Tui.Horizontal
+            Repeater {
+                model: App.dock
+                // a hidden panel's icon is dimmed
+                Button { text: model.icon; flat: true; toolTipText: model.title; onClicked: App.goDock(model.key)
+                         palette.buttonText: model.hidden ? Theme.document.lineNumber : Theme.menu.windowText }
+            }
+        }
     }
 
-    // ---- the workspace -----------------------------------------------------
+    // ---- the page: the query ------------------------------------------------
     //
-    // The schema on the left, the query above its results on the right. The
-    // explorer's tree and the query editor are declared HERE, by id, because
-    // the host works them: it opens a folder the explorer's Enter names
-    // (explorerTree.toggleExpanded), and it reads the query and scaffolds one
+    // The query editor is the page. The explorer and the results are golib's Panels over it
+    // (below): each docked at its edge and taking its strip from the page (reserve), so the screen
+    // reads as a split; Alt/Option-left drag floats one, Alt/Option-right drag resizes it, and the
+    // dock in the menu bar's corner hides and shows them (tui/panels.go). The explorer's tree and
+    // the query editor are declared by id, because the host works them: it opens a folder the
+    // explorer's Enter names (explorerTree.toggleExpanded), and it reads the query and scaffolds one
     // into it (editor). The results are a view of host sources, a component.
-    Split {
-        orientation: Tui.Horizontal
-        ratio: 0.25
+    Frame {
+        title: App.queryTitle
         palette.window: Theme.document.window
         palette.windowText: Theme.document.windowText
         palette.highlight: Theme.document.highlight
         palette.highlightedText: Theme.document.highlightedText
         palette.base: Theme.document.base
         palette.text: Theme.document.text
+        // The keyboard starts here, and every card gives it back here.
+        Editor {
+            id: editor
+            focus: true
+            keyset: App.keyset
+            // Undo, Redo, Copy, Cut and Paste at a right click, in the
+            // App's language (golib's stock rows).
+            contextMenu: true
+            onTextChanged: App.queryEdited()   // an open note is now unsaved
+            // The SQL of the connection the query runs on; the host
+            // follows the connection (syntax.go).
+            SyntaxHighlighter { definition: App.querySyntax }
+        }
+    }
 
-        Frame {
-            title: qsTrId("autodb.main.title")
-            visible: App.explorerShown
+    // ---- the status line ---------------------------------------------------
+    //
+    // left: the backend; centre: who is signed in; right: the last message.
+    StatusBar {
+        Dock.edge: Tui.Bottom
+        palette.window: Theme.status.window
+        palette.windowText: Theme.status.windowText
+        left: App.statusLeft
+        center: App.statusCenter
+        right: App.status
+    }
+
+    // ---- the panels: the explorer and the results (tui/panels.go) -----------
+    //
+    // Each is the account's geometry: its size and length at its edge, and where it floats, kept as
+    // it is dragged (onResized, onPlaced). Escape inside one closes it, as a Drawer does; the
+    // leader's focus keys, View › Zoom and the dock bring it back.
+    Panel {
+        id: explorerPanel
+        heading: qsTrId("autodb.main.title")
+        reserve: true
+        maximizable: true   // View › Zoom › Explorer
+        edge: App.explorerEdge
+        size: App.explorerSize
+        length: App.explorerLength
+        minimumSize: 20
+        floating: App.explorerFloating
+        floatX: App.explorerX; floatY: App.explorerY; floatWidth: App.explorerW; floatHeight: App.explorerH
+        onPlaced: App.panelPlaced("explorer", x, y, width, height)
+        onResized: App.panelResized("explorer", size, length)
+        onOpened: App.panelOpened("explorer")
+        onClosed: App.panelClosed("explorer")
+        Flex {
+            direction: Tui.Vertical
+            palette.window: Theme.document.window
+            palette.windowText: Theme.document.windowText
+            palette.highlight: Theme.document.highlight
+            palette.highlightedText: Theme.document.highlightedText
+            palette.base: Theme.document.base
+            palette.text: Theme.document.text
             // Enter on a row: a folder opens, a table scaffolds its query, and
             // a connection — or anything under one — becomes the query's.
             TreeView {
                 id: explorerTree
+                Layout.fillHeight: true
                 model: App.explorer
                 textRole: "label"
                 badgeRole: "badge"
@@ -174,53 +239,36 @@ Window {
                 onCurrentIndexChanged: App.explorerMoved(index)
             }
         }
-
-        Split {
-            orientation: Tui.Vertical
-            ratio: 0.55
-            visible: App.rightShown
-            Frame {
-                title: App.queryTitle
-                visible: App.editorShown
-                // The keyboard starts here, and every card gives it back here.
-                Editor {
-                    id: editor
-                    focus: true
-                    keyset: App.keyset
-                    // Undo, Redo, Copy, Cut and Paste at a right click, in the
-                    // App's language (golib's stock rows).
-                    contextMenu: true
-                    onTextChanged: App.queryEdited()   // an open note is now unsaved
-                    // The SQL of the connection the query runs on; the host
-                    // follows the connection (syntax.go).
-                    SyntaxHighlighter { definition: App.querySyntax }
-                }
-            }
-            Frame {
-                id: results
-                title: qsTrId("autodb.main.title2")
-                visible: App.resultsShown
-                Flex {
-                    direction: Tui.Vertical
-                    Text { text: App.resultsSummary }
-                    Results { id: resultsBody; visible: App.resultsBodyShown; Layout.fillHeight: true }
-                    Editor { id: resultsJSON; readOnly: true; visible: App.resultsAsJSON
-                             text: App.resultsJSON; Layout.fillHeight: true }
-                }
-            }
-        }
     }
-
-    // ---- the status line ---------------------------------------------------
-    //
-    // left: the backend; centre: who is signed in; right: the last message.
-    StatusBar {
-        Dock.edge: Tui.Bottom
-        palette.window: Theme.status.window
-        palette.windowText: Theme.status.windowText
-        left: App.statusLeft
-        center: App.statusCenter
-        right: App.status
+    Panel {
+        id: resultsPanel
+        heading: qsTrId("autodb.main.title2")
+        reserve: true
+        maximizable: true
+        edge: App.resultsEdge
+        size: App.resultsSize
+        length: App.resultsLength
+        minimumSize: 10
+        floating: App.resultsFloating
+        floatX: App.resultsX; floatY: App.resultsY; floatWidth: App.resultsW; floatHeight: App.resultsH
+        onPlaced: App.panelPlaced("results", x, y, width, height)
+        onResized: App.panelResized("results", size, length)
+        onOpened: App.panelOpened("results")
+        onClosed: App.panelClosed("results")
+        Flex {
+            id: results
+            direction: Tui.Vertical
+            palette.window: Theme.document.window
+            palette.windowText: Theme.document.windowText
+            palette.highlight: Theme.document.highlight
+            palette.highlightedText: Theme.document.highlightedText
+            palette.base: Theme.document.base
+            palette.text: Theme.document.text
+            Text { text: App.resultsSummary }
+            Results { id: resultsBody; visible: App.resultsBodyShown; Layout.fillHeight: true }
+            Editor { id: resultsJSON; readOnly: true; visible: App.resultsAsJSON
+                     text: App.resultsJSON; Layout.fillHeight: true }
+        }
     }
 
     // ---- overlays: opened by id from a handler or by the host ----------------

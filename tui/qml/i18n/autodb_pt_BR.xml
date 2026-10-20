@@ -99,6 +99,10 @@
             <source>Z&amp;oom out</source>
             <translation>Restaurar z&amp;oom</translation>
         </message>
+        <message id="autodb.menu.view.reset_panels">
+            <source>Reset &amp;panel layout</source>
+            <translation>Redefinir painéis(&amp;p)</translation>
+        </message>
         <message id="autodb.leader.focus.explorer">
             <source>focus explorer</source>
             <translation>ir para o explorador</translation>

@@ -99,6 +99,10 @@
             <source>Z&amp;oom out</source>
             <translation>取消缩放(&amp;o)</translation>
         </message>
+        <message id="autodb.menu.view.reset_panels">
+            <source>Reset &amp;panel layout</source>
+            <translation>重置面板布局(&amp;p)</translation>
+        </message>
         <message id="autodb.leader.focus.explorer">
             <source>focus explorer</source>
             <translation>转到资源管理器</translation>

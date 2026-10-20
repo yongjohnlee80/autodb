@@ -60,8 +60,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/yongjohnlee80/gio v0.1.4 h1:PJqRf8g5PqJ64sqspL+N3Nysy9CqbV0J6QE/j3wyJ6g=
 github.com/yongjohnlee80/gio v0.1.4/go.mod h1:xdK1KMXzzmXQ6tTVMgCe0o5BVm003fo/u9yJ7OK6iko=
-github.com/yongjohnlee80/golib v0.7.20 h1:zRvKB+re72S9/uw+l1NramO6U9+pISYN603YTLx+dkc=
-github.com/yongjohnlee80/golib v0.7.20/go.mod h1:MxdtUttYXjsAnET0k31FgJAM7JU6LR1RHg2f/vJ+HTU=
+github.com/yongjohnlee80/golib v0.7.21 h1:pIIM5xRBB1uGwKtIOkH9Ksgo7bZT2sbNx8d8oJWuZh8=
+github.com/yongjohnlee80/golib v0.7.21/go.mod h1:MxdtUttYXjsAnET0k31FgJAM7JU6LR1RHg2f/vJ+HTU=
 github.com/yongjohnlee80/golib/gui v0.2.7 h1:hnIIVPAmwQXNUjYUbdJvHzjE6PxgvN7m6bpXKMpnwn4=
 github.com/yongjohnlee80/golib/gui v0.2.7/go.mod h1:mZ+zGuObYCks4D5QGY49FoSjk5cIycvMbITCbH4NKGA=
 golang.org/x/crypto v0.55.0 h1:+KWHjbgOaAQ66dh/YlkZKHlz9ZUlq61AFirAR9ntP8M=

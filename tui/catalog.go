@@ -48,6 +48,7 @@ const (
 	cmdZoomResults      CommandID = "view.zoom_results"
 	cmdZoomExplorer     CommandID = "view.zoom_explorer"
 	cmdZoomOut          CommandID = "view.zoom_out"
+	cmdResetPanels      CommandID = "view.reset_panels"
 	cmdFocusExplorer    CommandID = "focus.explorer"
 	cmdFocusEditor      CommandID = "focus.editor"
 	cmdFocusResults     CommandID = "focus.results"
@@ -191,7 +192,14 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 		},
 		{
-			ID: cmdFocusExplorer, Run: func(h *Host) { h.focusPane("explorerTree") },
+			// every floating panel docked at its edge again (panels.go)
+			ID: cmdResetPanels, Run: func(h *Host) { h.dockPanels() },
+			Menu: []MenuProjection{
+				{Parent: nodeView, Label: "Reset panel layout", Hotkey: 'P', Order: 50},
+			},
+		},
+		{
+			ID: cmdFocusExplorer, Run: func(h *Host) { h.showPane(paneExplorer) },
 			Leader: leader('e', "focus explorer", 50),
 		},
 		{
@@ -199,7 +207,7 @@ func catalogCommands() []CommandOf[*Host] {
 			Leader: leader('q', "focus query editor", 60),
 		},
 		{
-			ID: cmdFocusResults, Run: func(h *Host) { h.focusPane("results") },
+			ID: cmdFocusResults, Run: func(h *Host) { h.showPane(paneResults) },
 			Leader: leader('t', "focus results", 70),
 		},
 		{
