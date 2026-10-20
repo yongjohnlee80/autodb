@@ -355,6 +355,26 @@
             <source>&amp;Sepia</source>
             <translation>セピア(&amp;s)</translation>
         </message>
+        <message id="autodb.menu.options.theme.catppuccin_frappe">
+            <source>&amp;Catppuccin Frappé</source>
+            <translation>Catppuccin Frappé(&amp;c)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.kanagawa">
+            <source>&amp;Kanagawa</source>
+            <translation>Kanagawa(&amp;k)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.nord">
+            <source>&amp;Nord</source>
+            <translation>Nord(&amp;n)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.shades_of_purple">
+            <source>Shades of &amp;Purple</source>
+            <translation>Shades of Purple(&amp;p)</translation>
+        </message>
+        <message id="autodb.menu.options.theme.tokyo_night">
+            <source>&amp;Tokyo Night</source>
+            <translation>Tokyo Night(&amp;t)</translation>
+        </message>
         <message id="autodb.menu.options.language.en">
             <source>English (&amp;1)</source>
             <translation>English (&amp;1)</translation>

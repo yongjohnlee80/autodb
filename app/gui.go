@@ -49,9 +49,15 @@ func runGUI(ctx context.Context, configPath, remoteProfile string, b build) erro
 	if err != nil {
 		return err
 	}
-	backend := guilib.NewBackend(
+	return runUIOn(ctx, guiBackend(), ep.Network, cfg, start, configPath, addr, notesRoot, b)
+}
+
+// guiBackend is --gui's window. Its style is golib/gui's default, NativeStyle: buttons,
+// dropdowns, text fields and checkboxes are drawn as bordered controls, the TUI's cells
+// everywhere else.
+func guiBackend() *guilib.Backend {
+	return guilib.NewBackend(
 		guilib.WithTitle("autodb"),
 		guilib.WithSize(1020, 640),
 	)
-	return runUIOn(ctx, backend, ep.Network, cfg, start, configPath, addr, notesRoot, b)
 }

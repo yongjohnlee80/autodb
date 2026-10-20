@@ -1,9 +1,10 @@
 package tui
 
 import (
-	"io/fs"
-	"path"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/yongjohnlee80/golib/tui/decl/themes"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 )
@@ -516,9 +517,11 @@ func catalogCommands() []CommandOf[*Host] {
 			Menu:   []MenuProjection{{Parent: nodeFile, Label: "Open note…", Hotkey: 'O', Order: 20}},
 		},
 	}
-	// One command per theme the program ships: a new theme is a file.
-	for i, name := range themeNames() {
-		theme := name
+	// One command per theme golib ships, labelled and keyed as golib's menu
+	// labels say: a theme golib adds is a row here with no change.
+	for i, l := range themes.MenuLabels() {
+		theme := l.Name
+		label, key := menuLabelKey(l.Text)
 		cmds = append(cmds, CommandOf[*Host]{
 			ID: CommandID(cmdThemePrefix + theme),
 			// Stored on the account when there is one; before a sign-in the
@@ -530,8 +533,7 @@ func catalogCommands() []CommandOf[*Host] {
 					h.useTheme(theme)
 				}
 			},
-			Menu: []MenuProjection{{Parent: nodeTheme, Label: themeLabel(theme),
-				Hotkey: rune(theme[0]), Order: 10 + i}},
+			Menu: []MenuProjection{{Parent: nodeTheme, Label: label, Hotkey: key, Order: 10 + i}},
 		})
 	}
 	// One command per language the program ships catalogs for. Each row says
@@ -560,24 +562,18 @@ func catalogCommands() []CommandOf[*Host] {
 	return cmds
 }
 
-// themeNames are the themes the program ships, from its embedded files.
-func themeNames() []string {
-	entries, err := fs.ReadDir(qmlFiles, "themes")
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, e := range entries {
-		if !e.IsDir() && path.Ext(e.Name()) == ".qml" {
-			out = append(out, strings.TrimSuffix(e.Name(), ".qml"))
-		}
-	}
-	return out
-}
+// themeNames are the themes the program ships: golib's.
+func themeNames() []string { return themes.Names() }
 
-// themeLabel is a theme's menu label: "retro" → "Retro".
-func themeLabel(name string) string {
-	return strings.ToUpper(name[:1]) + name[1:]
+// menuLabelKey splits a menu label with its access key marked ("Shades of &Purple") into the
+// label and the key, as a MenuProjection holds them: "Shades of Purple", 'P'.
+func menuLabelKey(text string) (string, rune) {
+	before, after, ok := strings.Cut(text, "&")
+	if !ok || after == "" {
+		return text, 0
+	}
+	key, _ := utf8.DecodeRuneInString(after)
+	return before + after, key
 }
 
 // quitProgram ends the program.

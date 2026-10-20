@@ -230,7 +230,7 @@ func TestAThemeCommandSwitchesTheTheme(t *testing.T) {
 	if got := h.Theme(); got != "dark" {
 		t.Fatalf("the screen starts in %q, want dark", got)
 	}
-	for _, theme := range []string{"mono", "dark", "light", "retro"} {
+	for _, theme := range tuiapp.ThemeNames() {
 		h.RunCommand("options.theme." + theme)
 		s.WaitFor(t, "the "+theme+" theme", func(sc string) bool {
 			return h.Theme() == theme && strings.Contains(sc, "theme: "+theme)

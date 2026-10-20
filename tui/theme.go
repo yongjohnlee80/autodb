@@ -2,10 +2,10 @@ package tui
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"regexp"
+	"slices"
 )
 
 // SWITCHING THEME — Options › Theme.
@@ -22,7 +22,7 @@ import (
 // layout in memory, and the next save of main.qml brings back its own import.
 
 // themeImport is a theme import line; its group is the theme's name.
-var themeImport = regexp.MustCompile(`(?m)^import autodb\.theme\.([a-z][a-z0-9]*) ` +
+var themeImport = regexp.MustCompile(`(?m)^import autodb\.theme\.([a-z][a-z0-9_]*) ` +
 	regexp.QuoteMeta(moduleVersion))
 
 // themeOf is the theme a layout imports, "" for none.
@@ -51,11 +51,7 @@ func themeState(theme string) map[string]any {
 // useTheme switches to the named theme; one the program does not ship is
 // refused, and the screen stays as it was.
 func (h *Host) useTheme(name string) {
-	themes := qmlFiles
-	if h.dev != "" {
-		themes = os.DirFS(h.dev)
-	}
-	if _, err := fs.Stat(themes, path.Join("themes", name+".qml")); err != nil {
+	if !slices.Contains(themeNames(), name) {
 		h.setStatus(fmt.Sprintf("no theme %q", name))
 		return
 	}
