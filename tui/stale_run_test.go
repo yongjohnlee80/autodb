@@ -37,7 +37,12 @@ func TestARunAnsweredAfterTheIdentityChangedIsDropped(t *testing.T) {
 		t.Fatalf("a run answered after the identity changed filled the pane:\n%s", sc)
 	}
 
-	// A new run is admitted at once — the old one's guard did not survive.
+	// A new run is admitted at once — the old one's guard did not survive. The new identity's
+	// explorer lists its workspaces on its own call: its row, and a current row, before the keys.
+	s.WaitFor(t, "the new identity's explorer listed", func(sc string) bool {
+		cur := h.ExplorerCursor() // the empty tree's placeholder row is "empty"
+		return strings.Contains(sc, "▸ main (1)") && len(cur) > 0 && strings.HasPrefix(cur[0], "ws:")
+	})
 	s.Keys(t, key(' '), key('e'), enter())
 	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
 	s.Keys(t, key('j'), enter())
