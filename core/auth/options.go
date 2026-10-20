@@ -3,11 +3,13 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/yongjohnlee80/golib/dao"
 	"github.com/yongjohnlee80/golib/tui/decl/themes/qmlfiles"
+	"github.com/yongjohnlee80/golib/tui/panelgeometry"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -99,13 +101,8 @@ func (s *Service) SetUserOption(ctx context.Context, token, key, value, ip strin
 	if err != nil {
 		return err
 	}
-	allowed, known := knownOptions[key]
-	if !known {
-		return fmt.Errorf("auth: unknown preference %q", key)
-	}
-	if !contains(allowed, value) {
-		return fmt.Errorf("auth: preference %q does not accept %q (accepted: %s)",
-			key, value, strings.Join(allowed, ", "))
+	if err := checkOption(key, value); err != nil {
+		return err
 	}
 	return s.inTx(ctx, func(tx *dao.Transaction) error {
 		if err := s.lockGuardRow(tx); err != nil {
@@ -131,6 +128,32 @@ func (s *Service) SetUserOption(ctx context.Context, token, key, value, ip strin
 		}
 		return s.AuditTx(tx, id.UserID(), ip, "option_set", key+"="+value)
 	})
+}
+
+// checkOption refuses a key this build does not know, or a value its key does not accept: one of
+// knownOptions, or a panel's geometry (tui.<panel>.<edge>.size and .length, tui.<panel>.float),
+// checked against PanelSpecs by golib's panelgeometry.
+func checkOption(key, value string) error {
+	if strings.HasPrefix(key, "tui.") {
+		err := panelgeometry.Validate(PanelSpecs, key, value)
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, panelgeometry.ErrBadValue):
+			return fmt.Errorf("auth: preference %q does not accept %q: %w", key, value, err)
+		default:
+			return fmt.Errorf("auth: unknown preference %q", key)
+		}
+	}
+	allowed, known := knownOptions[key]
+	if !known {
+		return fmt.Errorf("auth: unknown preference %q", key)
+	}
+	if !contains(allowed, value) {
+		return fmt.Errorf("auth: preference %q does not accept %q (accepted: %s)",
+			key, value, strings.Join(allowed, ", "))
+	}
+	return nil
 }
 
 // decodeOptions reads the stored document. An empty or absent column is an
