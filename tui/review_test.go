@@ -69,7 +69,10 @@ func TestADevEditToTheThemeImportIsFollowed(t *testing.T) {
 	s.WaitFor(t, "the program to follow the edit", func(string) bool { return h.Theme() == "mono" })
 }
 
-func TestADevThemeFileEditRepaintsAndABadSaveKeepsTheLastGoodScreen(t *testing.T) {
+// Under -dev, an edit to main.qml's theme import repaints the screen, a bad save keeps the last
+// good one, and repeated reloads keep the query's focus and leak no view subscription. The themes
+// are golib's, so the import line is the dev file that chooses one.
+func TestADevThemeImportEditRepaintsAndABadSaveKeepsTheLastGoodScreen(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.CopyFS(dir, os.DirFS("qml")); err != nil {
 		t.Fatal(err)
@@ -78,50 +81,51 @@ func TestADevThemeFileEditRepaintsAndABadSaveKeepsTheLastGoodScreen(t *testing.T
 		tuiapp.Options{Dev: dir}, 100, 20)
 	s.WaitForText(t, "Options")
 	before := s.Backend.Snapshot()[0][0].Attrs.BG
-	file := filepath.Join(dir, "themes", "dark.qml")
+	file := filepath.Join(dir, "main.qml")
 	src, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	from := "menu {\n        window: \"#303030\""
-	to := "menu {\n        window: \"#123456\""
-	changed := strings.Replace(string(src), from, to, 1)
-	if changed == string(src) {
-		t.Fatal("the dark theme has no menu palette to edit")
+	const from = "import autodb.theme.dark 1.0"
+	importing := func(theme string) []byte {
+		return []byte(strings.Replace(string(src), from, "import autodb.theme."+theme+" 1.0", 1))
 	}
-	if err := os.WriteFile(file, []byte(changed), 0o644); err != nil {
+	if string(importing("light")) == string(src) {
+		t.Fatal("main.qml imports no dark theme to edit")
+	}
+	if err := os.WriteFile(file, importing("light"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s.WaitFor(t, "edited theme repainted live menu chrome", func(string) bool {
+	s.WaitFor(t, "edited import repainted live menu chrome", func(string) bool {
 		return s.Backend.Snapshot()[0][0].Attrs.BG != before
 	})
 	good := s.Backend.Snapshot()[0][0].Attrs.BG
-	if err := os.WriteFile(file, []byte("Theme {"), 0o644); err != nil {
+	if err := os.WriteFile(file, []byte("Window {"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	s.WaitFor(t, "invalid edit reported", func(sc string) bool {
-		return strings.Contains(h.SourceText("App.status"), "dark.qml") && strings.Contains(sc, "Options")
+		return strings.Contains(h.SourceText("App.status"), "main.qml") && strings.Contains(sc, "Options")
 	})
 	if got := s.Backend.Snapshot()[0][0].Attrs.BG; got != good {
-		t.Fatalf("invalid theme changed last good menu color: %+v -> %+v", good, got)
+		t.Fatalf("invalid layout changed last good menu color: %+v -> %+v", good, got)
 	}
 	if err := os.WriteFile(file, src, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s.WaitFor(t, "fixed theme restored", func(string) bool { return s.Backend.Snapshot()[0][0].Attrs.BG == before })
+	s.WaitFor(t, "fixed layout restored", func(string) bool { return s.Backend.Snapshot()[0][0].Attrs.BG == before })
 	if h.PaneWithFocus() != "editor" {
-		t.Fatal("theme reload lost the stable query focus")
+		t.Fatal("layout reload lost the stable query focus")
 	}
-	for _, color := range []string{"#112233", "#223344", "#334455"} {
-		next := strings.Replace(string(src), from, "menu {\n        window: \""+color+"\"", 1)
+	// three menu colours apart from dark's and from each other's
+	for _, theme := range []string{"retro", "nord", "kanagawa"} {
 		prior := s.Backend.Snapshot()[0][0].Attrs.BG
-		if err := os.WriteFile(file, []byte(next), 0o644); err != nil {
+		if err := os.WriteFile(file, importing(theme), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		s.WaitFor(t, "repeated theme repaint", func(string) bool { return s.Backend.Snapshot()[0][0].Attrs.BG != prior })
+		s.WaitFor(t, "repeated repaint to "+theme, func(string) bool { return s.Backend.Snapshot()[0][0].Attrs.BG != prior })
 		explorer, results := h.ViewSubscriberCounts()
 		if explorer != 1 || results != 1 || h.PaneWithFocus() != "editor" {
-			t.Fatalf("theme reload leaked a view subscription or focus: explorer %d, results %d", explorer, results)
+			t.Fatalf("layout reload leaked a view subscription or focus: explorer %d, results %d", explorer, results)
 		}
 	}
 }
