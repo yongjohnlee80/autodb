@@ -17,6 +17,7 @@ Flex {
     // a cursor on cells, sortable (s), its rows filtered by a WHERE (golib's DataTable); index is
     // the result's row, however it is sorted
     TableView {
+        id: resultsTable
         visible: App.resultsTable
         cellCursor: true
         sortable: true

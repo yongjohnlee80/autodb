@@ -38,6 +38,7 @@ import (
 	"github.com/yongjohnlee80/autodb/webserver"
 	"github.com/yongjohnlee80/golib/logger"
 	tuicore "github.com/yongjohnlee80/golib/tui"
+	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	tuiterm "github.com/yongjohnlee80/golib/tui/term"
 )
 
@@ -1276,14 +1277,14 @@ func runUI(ctx context.Context, configPath, remoteProfile string, b build) error
 	if err != nil {
 		return fmt.Errorf("terminal: %w", err)
 	}
-	return runUIOn(ctx, backend, ep.Network, cfg, start, configPath, addr, notesRoot, b)
+	return runUIOn(ctx, backend, nil, ep.Network, cfg, start, configPath, addr, notesRoot, b)
 }
 
 // runUIOn runs the standalone UI on the backend it is handed: a terminal's
 // (--ui) or a native window's (--gui). Everything else is the one program —
 // the session, the host, the catalog — exactly as golib's Backend seam
 // promises (golib/gui).
-func runUIOn(ctx context.Context, backend tuicore.Backend, network string, cfg config.Config, start tuiapp.Start, configPath, addr, notesRoot string, b build) error {
+func runUIOn(ctx context.Context, backend tuicore.Backend, style *tuidecl.Style, network string, cfg config.Config, start tuiapp.Start, configPath, addr, notesRoot string, b build) error {
 	// The terminal no longer builds a store at startup. It CANNOT: the personal
 	// root is `<base>/u-<subject>`, and the subject is the daemon's canonical
 	// identity, which does not exist until afterLogin. Constructing here is what
@@ -1325,6 +1326,7 @@ func runUIOn(ctx context.Context, backend tuicore.Backend, network string, cfg c
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	host, err := tuiapp.New(session, notesFor, cancel, tuiapp.Options{
+		Style:      style, // --gui's: the results' table in pixels; nil in a terminal
 		Start:      start,
 		KeymapFile: keymapFileFor(configPath),
 		About: tuiapp.AboutInfo{
