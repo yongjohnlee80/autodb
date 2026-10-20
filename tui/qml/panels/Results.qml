@@ -14,8 +14,12 @@ Flex {
         visible: App.resultsEmpty
         text: qsTrId("autodb.results.text")
     }
+    // a cursor on cells, sortable (s), its rows filtered by a WHERE (golib's DataTable); index is
+    // the result's row, however it is sorted
     TableView {
         visible: App.resultsTable
+        cellCursor: true
+        sortable: true
         model: App.results
         currentIndex: App.resultsIndex
         Layout.fillHeight: true
