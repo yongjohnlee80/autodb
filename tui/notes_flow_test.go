@@ -65,7 +65,7 @@ func TestANoteIsNamedEditedAndSaved(t *testing.T) {
 		t.Errorf("report.sql holds %q, want the query", b)
 	}
 	// The explorer lists it under the workspace's notes.
-	s.Keys(t, key(' '), key('e'), enter()) // main opens: connections, notes
+	s.Keys(t, ctrl('h'), enter()) // main opens: connections, notes
 	s.WaitForText(t, "notes")
 	s.Keys(t, key('j'), key('j'), enter()) // notes
 	s.WaitFor(t, "the note listed", func(string) bool { return rowUnder(s, "▾ notes", "report.sql") })
@@ -174,7 +174,7 @@ func TestEnterOnANoteOpensIt(t *testing.T) {
 	newNote(t, s, "second") // an empty buffer now
 	s.WaitFor(t, "the buffer emptied", func(sc string) bool { return !strings.Contains(sc, "from first") })
 
-	s.Keys(t, key(' '), key('e'), enter()) // main: connections, notes
+	s.Keys(t, ctrl('h'), enter()) // main: connections, notes
 	s.WaitForText(t, "notes")
 	s.Keys(t, key('j'), key('j'), enter())
 	s.WaitFor(t, "the notes", func(string) bool { return rowUnder(s, "▾ notes", "first.sql") })

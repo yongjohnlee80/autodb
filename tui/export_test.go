@@ -898,24 +898,52 @@ func (h *Host) SettleBackgroundTask() {
 	<-done
 }
 
-// PanelResized and PanelPlaced are a Panel's grip released and its move ended, as its signals are.
-func (h *Host) PanelResized(id string, size, length int) {
-	h.p.Post(func() { h.keep(h.panelResized(id, size, length)) })
+// PanelResized and PanelDocked are a tile's border moved and its re-dock, as its signals are.
+func (h *Host) PanelResized(id string, size float64) {
+	h.p.Post(func() { h.keep(h.panelResized(id, size)) })
 }
 
-func (h *Host) PanelPlaced(id string, r [4]float64) {
-	h.p.Post(func() { h.keep(h.panelPlaced(id, r)) })
+func (h *Host) PanelDocked(id, edge string) {
+	h.p.Post(func() { h.keep(h.panelDocked(id, edge)) })
+}
+
+// TileSteps is n keyboard resize steps of dw cells on a tile, by its document id, in one loop turn,
+// as its resizeBy is called.
+func (h *Host) TileSteps(tile string, dw, n int) {
+	done := make(chan struct{})
+	h.p.Post(func() {
+		for range n {
+			h.keep(h.p.Call(tile, "resizeBy", dw, 0))
+		}
+		close(done)
+	})
+	<-done
+}
+
+// TileBounds is where a tile is laid out now, by its document id, read on the loop.
+func (h *Host) TileBounds(tile string) (x, y, w, hh int) {
+	got := make(chan [4]int, 1)
+	h.p.Post(func() {
+		var r [4]int
+		if w := h.tileWindow(tile); w != nil {
+			b := w.Bounds()
+			r = [4]int{b.X, b.Y, b.W, b.H}
+		}
+		got <- r
+	})
+	r := <-got
+	return r[0], r[1], r[2], r[3]
 }
 
 // GoDock is a click on the dock icon key.
 func (h *Host) GoDock(key string) { h.p.Post(func() { h.keep(h.goDock(key)) }) }
 
-// PanelShown reports, on the loop, whether the panel id is open and not hidden by the dock.
+// PanelShown reports, on the loop, whether the panel id is not hidden by the dock.
 func (h *Host) PanelShown(id string) bool {
 	got := make(chan bool, 1)
 	h.p.Post(func() {
 		p := h.panelNamed(id)
-		got <- p != nil && h.panelOpen[id] && !h.panelHidden(p)
+		got <- p != nil && !h.panelHidden(p)
 	})
 	return <-got
 }
@@ -955,7 +983,20 @@ func (h *Host) PanelPrefsSettled() int {
 	return <-got
 }
 
-// ToggleMaximize is a Panel's own maximize control (its Drawer's toggleMaximize), by spec id.
+// PanelPrefsIdle reports, on the loop, whether no panel geometry write is in flight or waiting.
+func (h *Host) PanelPrefsIdle() bool {
+	got := make(chan bool, 1)
+	h.p.Post(func() {
+		idle := true
+		for _, p := range h.panelPrefs() {
+			idle = idle && p.active == 0 && p.pending == nil
+		}
+		got <- idle
+	})
+	return <-got
+}
+
+// ToggleMaximize is a panel's own maximize control (its tile's toggleMaximize), by spec id.
 func (h *Host) ToggleMaximize(id string) {
 	h.p.Post(func() { h.keep(h.p.Call(PanelQMLID(id), "toggleMaximize")) })
 }

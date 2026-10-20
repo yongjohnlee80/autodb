@@ -60,7 +60,7 @@ func TestQuerySearchFindsAndWrapsWithoutChangingEditorMode(t *testing.T) {
 func TestResultsSearchTargetsTheVisibleTableThenJSON(t *testing.T) {
 	h, s := signedIn(t)
 	s.WaitForText(t, "main")
-	s.Keys(t, key(' '), key('e'), enter())
+	s.Keys(t, ctrl('h'), enter())
 	s.WaitForText(t, "▸ connections")
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")
@@ -118,7 +118,7 @@ func TestResultsSearchTargetsTheVisibleTableThenJSON(t *testing.T) {
 func TestExplorerSearchRevealsALoadedRowUnderAClosedFolder(t *testing.T) {
 	h, s := signedIn(t)
 	s.WaitForText(t, "main")
-	s.Keys(t, key(' '), key('e'), enter())
+	s.Keys(t, ctrl('h'), enter())
 	s.WaitForText(t, "▸ connections")
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")
@@ -257,7 +257,7 @@ func TestExplorerSearchWalksManyMatchesAndTellsTwinRowsApart(t *testing.T) {
 	h, s := runHostSized(t, seededTwice(t), 120, 40)
 	loginAs(t, s, "root", rootPass)
 	s.WaitFor(t, "mounted", func(sc string) bool { return strings.Contains(sc, "▸ zeta") && h.PaneWithFocus() == "editor" })
-	s.Keys(t, key(' '), key('e'))
+	s.Keys(t, ctrl('h'))
 	s.WaitFor(t, "explorer focused", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
 	openTables(t, s, "main")
 	s.Keys(t, key('g'), key('h')) // close main; zeta is the next top row

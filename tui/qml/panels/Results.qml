@@ -4,19 +4,22 @@
 // it the rows as a table or, with SPC j, as JSON, or the hint when nothing has
 // run. The table's COLUMNS are the query's: App.results is a table model whose
 // columns the result sets, not this file.
+//
+// Whenever the JSON isn't shown the table is there, empty under the hint when nothing
+// has run: the results pane takes the keyboard (SPC t, Ctrl+j) whether or not there are rows.
 
 Flex {
     direction: Tui.Vertical
+    Text {
+        visible: App.resultsEmpty
+        text: qsTrId("autodb.results.text")
+    }
     TableView {
-        visible: App.resultsAsTable
+        visible: App.resultsTable
         model: App.results
         currentIndex: App.resultsIndex
         Layout.fillHeight: true
         onCurrentIndexChanged: App.resultsMoved(index)
         onActivated: App.inspectResult(index)
-    }
-    Text {
-        visible: App.resultsEmpty
-        text: qsTrId("autodb.results.text")
     }
 }

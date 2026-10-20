@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"slices"
-	"strconv"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui/panelgeometry"
@@ -12,47 +11,53 @@ import (
 	"github.com/yongjohnlee80/autodb/core/auth"
 )
 
-// THE PANELS — the explorer and the results, golib's Panels (tui.panels) over the query editor,
-// which is the page. Each opens docked at its edge and takes its strip from the page (reserve: the
-// editor makes room for a docked panel rather than lying under it), so the screen reads as a split
-// until a panel is moved: Alt/Option-left drag floats it, Alt/Option-right drag resizes it, and the dock in the menu
-// bar's corner hides and shows it. A dialog over a floating panel still has the keyboard and the
-// pointer: the panels are non-modal, and a Dialog's trap is above them.
+// THE PANELS — the explorer, the query and the results, tiles of golib's TileManager
+// (tui.tiles' TilePanel). They always share the screen and their borders, as a tiling window
+// manager's windows do: a hidden panel's space goes to the others, and growing one shrinks the
+// panels across the border it moved. Alt/Option-right drag in any of them moves the shared border
+// nearest the press, Alt/Option-left drag re-docks a panel at another edge it may take, and the
+// dock in the menu bar's corner hides and shows the explorer and the results. The query is the
+// centre: it never hides. Nothing floats.
 //
-// Their geometry is the account's: a panel's size and length at its edge and where it floats are
-// account options (tui.<panel>.<edge>.size, .length, tui.<panel>.float), which the server checks
-// against auth.PanelSpecs, the one table both read. Before a sign-in a drag changes the screen
-// and nothing is stored, as a theme picked then is.
+// Their geometry is the account's: the explorer's and the results' edge, and their size at each
+// edge they have docked to, are account options (tui.<panel>.edge, tui.<panel>.<edge>.size), which
+// the server checks against auth.PanelSpecs, the one table both read. A size keeps two decimals, so
+// a one-cell step is stored as made. Before a sign-in a drag changes the screen and nothing is
+// stored, as a theme picked then is.
 
-// panel is one of the screen's panels.
+// panel is the explorer or the results: a spec of auth.PanelSpecs, and the tile showing it.
 type panel struct {
 	spec  panelgeometry.Spec // auth.PanelSpecs' entry: its id, edges and bounds
-	qml   string             // its Panel's id in main.qml
+	qml   string             // its TilePanel's id in main.qml
 	view  string             // what in it takes the keyboard
 	icon  string             // its dock icon
-	size  int                // its size across its edge before the account sets one
+	size  float64            // its size across its edge before the account sets one
+	min   int                // the cells it keeps across its edge: legible, however small the Window
 	title string             // the dock's tooltip: English, as golib's tooltips are (string-only)
-	// its geometry preferences, at the edge it docks to: size and length, and where it floats
-	sizePref, lengthPref, floatPref *accountPref
-	// unmaximize: a zoom maximized it and it closed before Zoom out; its next opening undoes the
-	// maximize, which a closed Drawer cannot take
-	unmaximize bool
+	edge  string             // the edge it docks to now
+	// its geometry preferences: its edge, and its size at each edge it may dock to
+	edgePref  *accountPref
+	sizePrefs map[string]*accountPref
 }
-
-// edge is the edge a panel docks to: its spec's first.
-func (p *panel) edge() string { return p.spec.Edges[0] }
 
 // panelDefaults are what the screen gives each panel of auth.PanelSpecs, by id.
 var panelDefaults = map[string]panel{
-	"explorer": {view: paneExplorer, icon: "☰", size: 25, title: "explorer"},
-	"results":  {view: paneResults, icon: "⌗", size: 40, title: "results"},
+	"explorer": {view: paneExplorer, icon: "☰", size: 25, min: 15, title: "explorer"},
+	"results":  {view: paneResults, icon: "⌗", size: 40, min: 4, title: "results"},
 }
+
+// queryTile is the query's TilePanel: the centre, which has no spec, since it is never stored or
+// hidden. queryMin is the cells it keeps on both axes.
+const (
+	queryTile = "queryPanel"
+	queryMin  = 10
+)
 
 // editorIcon is the query editor's dock icon: the page, first in the dock.
 const editorIcon = "✎"
 
 // newPanels builds the screen's panels from auth.PanelSpecs, each with its geometry preferences. A
-// spec the screen has no Panel for is skipped; a test holds the two lists equal.
+// spec the screen has no TilePanel for is skipped; a test holds the two lists equal.
 func newPanels() []*panel {
 	out := make([]*panel, 0, len(auth.PanelSpecs))
 	for _, spec := range auth.PanelSpecs {
@@ -61,24 +66,32 @@ func newPanels() []*panel {
 			continue
 		}
 		p := d
-		p.spec, p.qml = spec, PanelQMLID(spec.ID)
-		edge := p.edge()
-		p.sizePref = newAccountPref(panelgeometry.SizeKey(spec.ID, edge), "", spec.ID+" size", func(h *Host, v string) { h.showPanelSize(&p, v) })
-		p.lengthPref = newAccountPref(panelgeometry.LengthKey(spec.ID, edge), "", spec.ID+" length", func(h *Host, v string) { h.showPanelLength(&p, v) })
-		p.floatPref = newAccountPref(panelgeometry.FloatKey(spec.ID), "", spec.ID+" place", func(h *Host, v string) { h.showPanelFloat(&p, v) })
+		p.spec, p.qml, p.edge = spec, PanelQMLID(spec.ID), spec.Edges[0]
+		p.edgePref = newAccountPref(panelgeometry.EdgeKey(spec.ID), spec.Edges[0], spec.ID+" edge", func(h *Host, v string) { h.showPanelEdge(&p, v) })
+		p.sizePrefs = map[string]*accountPref{}
+		for _, edge := range spec.Edges {
+			p.sizePrefs[edge] = newAccountPref(panelgeometry.SizeKey(spec.ID, edge), "", spec.ID+" size", func(h *Host, _ string) {
+				if p.edge == edge {
+					h.showPanelSize(&p)
+				}
+			})
+		}
 		out = append(out, &p)
 	}
 	return out
 }
 
-// PanelQMLID is the id of a spec's Panel in main.qml: explorerPanel for the explorer.
+// PanelQMLID is the id of a spec's TilePanel in main.qml: explorerPanel for the explorer.
 func PanelQMLID(specID string) string { return specID + "Panel" }
 
 // panelPrefs are every panel's geometry preferences, read after a sign-in as the others are.
 func (h *Host) panelPrefs() []*accountPref {
 	var out []*accountPref
 	for _, p := range h.panels {
-		out = append(out, p.sizePref, p.lengthPref, p.floatPref)
+		out = append(out, p.edgePref)
+		for _, edge := range p.spec.Edges {
+			out = append(out, p.sizePrefs[edge])
+		}
 	}
 	return out
 }
@@ -93,53 +106,38 @@ func (h *Host) panelNamed(id string) *panel {
 	return nil
 }
 
-// panelsState is what the document reads of the panels: each one's edge, its smallest size and
-// length (auth.PanelSpecs' bounds: the Panel's own constraints come from the one table), its size,
-// length, and where it floats (a docked one's rectangle is where it would float: the middle), and
-// the dock's rows.
+// panelsState is what the document reads of the panels: each one's edge, size and the cells it
+// keeps, the query's, and the dock's rows.
 func (h *Host) panelsState() map[string]any {
-	st := map[string]any{"App.dock": h.dock.model}
+	st := map[string]any{"App.dock": h.dock.model, "App.queryMinSize": queryMin}
 	for _, p := range h.panels {
 		id := p.spec.ID
-		st["App."+id+"Edge"] = p.edge()
-		st["App."+id+"MinSize"] = p.spec.Size[0]
-		st["App."+id+"MinLength"] = p.spec.Length[0]
+		st["App."+id+"Edge"] = p.edge
+		st["App."+id+"MinSize"] = p.min
 		st["App."+id+"Size"] = p.size
-		st["App."+id+"Length"] = 100
-		st["App."+id+"Floating"] = false
-		for i, k := range []string{"X", "Y", "W", "H"} {
-			st["App."+id+k] = [4]float64{25, 25, 50, 50}[i]
-		}
 	}
 	return st
 }
 
-// showPanelSize, showPanelLength and showPanelFloat put a stored geometry on the screen: "" (none
-// stored) or a value out of its bounds is the panel's default.
-func (h *Host) showPanelSize(p *panel, v string) {
-	n, ok := panelgeometry.Percent(v, p.spec.Size[0], p.spec.Size[1])
+// showPanelEdge puts a stored edge on the screen, and the size stored for that edge: "" or an edge
+// the spec doesn't allow is the panel's first.
+func (h *Host) showPanelEdge(p *panel, v string) {
+	if !slices.Contains(p.spec.Edges, v) {
+		v = p.spec.Edges[0]
+	}
+	p.edge = v
+	h.set("App."+p.spec.ID+"Edge", v)
+	h.showPanelSize(p)
+}
+
+// showPanelSize puts the size stored for the panel's edge on the screen: none stored, or one out of
+// its bounds, is the panel's default.
+func (h *Host) showPanelSize(p *panel) {
+	n, ok := panelgeometry.SizePercent(p.sizePrefs[p.edge].pref, p.spec.Size[0], p.spec.Size[1])
 	if !ok {
 		n = p.size
 	}
 	h.set("App."+p.spec.ID+"Size", n)
-}
-
-func (h *Host) showPanelLength(p *panel, v string) {
-	n, ok := panelgeometry.Percent(v, p.spec.Length[0], p.spec.Length[1])
-	if !ok {
-		n = 100
-	}
-	h.set("App."+p.spec.ID+"Length", n)
-}
-
-func (h *Host) showPanelFloat(p *panel, v string) {
-	r, ok := panelgeometry.ParseFloat(v)
-	h.set("App."+p.spec.ID+"Floating", ok)
-	if ok {
-		for i, k := range []string{"X", "Y", "W", "H"} {
-			h.set("App."+p.spec.ID+k, r[i])
-		}
-	}
 }
 
 // keepPanelPref writes a panel's geometry for the signed-in account, once golib's check (the
@@ -155,117 +153,92 @@ func (h *Host) keepPanelPref(pref *accountPref, value string) {
 	h.showPref(pref, value)
 }
 
-// panelResized is a panel's grip released: its size and length kept at its edge.
-func (h *Host) panelResized(id string, size, length int) error {
+// panelResized is a border the panel owns moved, from whichever tile the drag began in: its size at
+// its edge is kept, held to the spec's bounds.
+func (h *Host) panelResized(id string, size float64) error {
 	if p := h.panelNamed(id); p != nil {
-		h.keepPanelPref(p.sizePref, strconv.Itoa(size))
-		h.keepPanelPref(p.lengthPref, strconv.Itoa(length))
+		size = min(max(size, float64(p.spec.Size[0])), float64(p.spec.Size[1]))
+		h.keepPanelPref(p.sizePrefs[p.edge], panelgeometry.FormatPercent(size))
 	}
 	return nil
 }
 
-// panelPlaced is a panel's move or resize ended: it floats there, kept as percentages of the Window.
-func (h *Host) panelPlaced(id string, r [4]float64) error {
-	if p := h.panelNamed(id); p != nil {
-		h.keepPanelPref(p.floatPref, panelgeometry.FormatFloat(r))
+// panelDocked is the panel re-docked at another edge: the edge is kept, and the size stored there
+// comes back.
+func (h *Host) panelDocked(id, edge string) error {
+	if p := h.panelNamed(id); p != nil && edge != p.edge {
+		h.keepPanelPref(p.edgePref, edge)
 	}
 	return nil
 }
 
-// dockPanels forgets every panel's floating rectangle: View › Reset panel layout docks each at its
-// edge again.
-func (h *Host) dockPanels() {
+// resetPanels is View › Reset panel layout: each panel back at its first edge, at its default size.
+func (h *Host) resetPanels() {
 	for _, p := range h.panels {
-		if p.floatPref.pref != "" {
-			h.keepPanelPref(p.floatPref, "")
+		if p.edgePref.pref != p.spec.Edges[0] {
+			h.keepPanelPref(p.edgePref, p.spec.Edges[0])
+		}
+		if h.panelHidden(p) {
+			h.keep(h.p.Call(p.qml, "show"))
+		}
+		h.set("App."+p.spec.ID+"Size", p.size)
+		if size := p.sizePrefs[p.edge]; size.pref != "" {
+			h.keepPanelPref(size, panelgeometry.FormatPercent(p.size))
 		}
 	}
 }
 
-// openPanels opens every panel: the screen starts with both, as the split it replaces did. The
-// query editor keeps the keyboard (its focus: true).
-func (h *Host) openPanels() {
-	for _, p := range h.panels {
-		h.keep(h.p.Call(p.qml, "open"))
-	}
-}
-
-// showPane makes sure the panel holding pane is open and shown, then gives pane the keyboard: a
-// pane in a closed or hidden panel takes no focus.
+// showPane makes sure the panel holding pane is shown, then gives pane the keyboard: a pane in a
+// hidden panel takes no focus.
 func (h *Host) showPane(pane string) {
 	for _, p := range h.panels {
-		if p.view == pane && (!h.panelOpen[p.spec.ID] || h.panelHidden(p)) {
-			h.keep(h.p.Call(p.qml, "open"))
+		if p.view == pane && h.panelHidden(p) {
+			h.keep(h.p.Call(p.qml, "show"))
 		}
 	}
 	h.focusPane(pane)
 }
 
-// panelOpened and panelClosed follow the Panels, however they were opened or closed.
-func (h *Host) panelOpened(id string) error {
-	h.panelOpen[id] = true
-	if p := h.panelNamed(id); p != nil && p.unmaximize {
-		p.unmaximize = false
-		if h.panelState(p).Maximized {
-			h.keep(h.p.Call(p.qml, "toggleMaximize"))
-		}
+// toggleExplorer is SPC e: a shown explorer is hidden and the query gets the keyboard; a hidden one
+// is shown and gets it.
+func (h *Host) toggleExplorer() {
+	p := h.panelNamed("explorer")
+	if p == nil {
+		return
 	}
-	h.dock.hid = nil // a panel opened since the editor's icon hid them: its next click hides
-	h.refreshDock()
-	return nil
-}
-
-func (h *Host) panelClosed(id string) error {
-	h.panelOpen[id] = false
-	h.dock.hid = nil
-	if p := h.panelNamed(id); p != nil {
-		h.panelLeftZoom(p)
+	if h.panelHidden(p) {
+		h.showPane(paneExplorer)
+		return
 	}
-	h.refreshDock()
+	h.keep(h.p.Call(p.qml, "hide"))
 	h.focusPane(paneEditor)
-	return nil
 }
 
-// panelChanged is a Panel's window changed: its maximize undone by its own control ends a zoom
-// that had maximized it.
-func (h *Host) panelChanged(id, operation string, maximized bool) error {
-	if p := h.panelNamed(id); p != nil && operation == "maximize" && !maximized && h.zoomed == p.view {
+// panelChanged is a tile's completed operation: its maximize undone by its own control ends a zoom
+// that had maximized it, and a hidden panel is no longer zoomed.
+func (h *Host) panelChanged(tile, operation string, maximized, hidden bool) error {
+	view := paneEditor
+	if p := h.panelNamed(tile); p != nil {
+		view = p.view
+	}
+	if h.zoomed == view && ((operation == "maximize" && !maximized) || hidden) {
 		h.zoomed = ""
 		h.reproject()
 	}
 	return nil
 }
 
-// panelLeftZoom reconciles the zoom with a panel closed some other way than Zoom out: a zoom that
-// maximized it is undone, so it reopens docked, and a zoom of the query that hid it no longer
-// counts it, ending once it hides none. Zoom out is offered again as it then stands.
-func (h *Host) panelLeftZoom(p *panel) {
-	switch {
-	case h.zoomed == p.view:
-		p.unmaximize = true // closed: its maximize is undone when it opens again
-		h.zoomed = ""
-	case h.zoomed == paneEditor && slices.Contains(h.zoomHid, p.spec.ID):
-		h.zoomHid = slices.DeleteFunc(h.zoomHid, func(id string) bool { return id == p.spec.ID })
-		if len(h.zoomHid) == 0 {
-			h.zoomed = ""
-		}
-	default:
-		return
-	}
-	h.reproject()
-}
-
-// panelHidden reports whether a panel is hidden by the dock: open and minimized.
+// panelHidden reports whether a panel is hidden by the dock: its tile's window minimized.
 func (h *Host) panelHidden(p *panel) bool {
 	c, ok := h.p.Find(p.qml)
 	w, isWindow := c.(interface{ WindowBehavior() *widget.WindowCore })
 	return ok && isWindow && w.WindowBehavior() != nil && w.WindowBehavior().State().Minimized
 }
 
-// THE DOCK — the menu bar's corner: the query editor, then each panel open, one icon each. A click
-// on a shown panel's icon hides it (golib's minimize: open still, its state kept) and gives the
-// keyboard to the editor; on a hidden or closed one's it shows the panel and gives it the keyboard.
-// The editor's icon hides every shown panel, and its next click shows those again.
+// THE DOCK — the menu bar's corner: the query editor, then each panel, one icon each. A click on a
+// shown panel's icon hides it (its tile minimized: its state kept, its space the others') and gives
+// the keyboard to the editor; on a hidden one's it shows the panel and gives it the keyboard. The
+// editor's icon hides every shown panel, and its next click shows those again.
 
 // dockState is the dock: its rows, and the panels the editor's icon hid.
 type dockState struct {
@@ -277,18 +250,17 @@ func newDock() dockState {
 	return dockState{model: tuidecl.NewListModel("key", "icon", "title", "hidden")}
 }
 
-// refreshDock lists the dock again: the editor, then the open panels.
+// refreshDock lists the dock again: the editor, then the panels.
 func (h *Host) refreshDock() {
 	rows := []tuidecl.Row{{"key": "editor", "icon": editorIcon, "title": "query editor", "hidden": false}}
 	for _, p := range h.panels {
-		if h.panelOpen[p.spec.ID] {
-			rows = append(rows, tuidecl.Row{"key": p.spec.ID, "icon": p.icon, "title": p.title, "hidden": h.panelHidden(p)})
-		}
+		rows = append(rows, tuidecl.Row{"key": p.spec.ID, "icon": p.icon, "title": p.title, "hidden": h.panelHidden(p)})
 	}
 	h.dock.model.Reset(rows)
 }
 
-// goDock is a dock icon's click.
+// goDock is a dock icon's click. While another pane is zoomed, a panel's icon ends the zoom and
+// gives that panel the keyboard.
 func (h *Host) goDock(key string) error {
 	if key == "editor" {
 		h.hideOrShowPanels()
@@ -298,8 +270,13 @@ func (h *Host) goDock(key string) error {
 	if p == nil {
 		return fmt.Errorf("App.goDock: no panel %q", key)
 	}
-	if h.panelOpen[key] && !h.panelHidden(p) {
-		h.keep(h.p.Call(p.qml, "minimize"))
+	if h.zoomed != "" && h.zoomed != p.view { // another pane has the screen: this one comes back
+		h.zoom("")
+		h.showPane(p.view)
+		return nil
+	}
+	if !h.panelHidden(p) {
+		h.keep(h.p.Call(p.qml, "hide"))
 		h.focusPane(paneEditor)
 		return nil
 	}
@@ -313,15 +290,15 @@ func (h *Host) hideOrShowPanels() {
 	if hid := h.dock.hid; len(hid) > 0 {
 		h.dock.hid = nil
 		for _, id := range hid {
-			if p := h.panelNamed(id); p != nil && h.panelOpen[id] && h.panelHidden(p) {
-				h.keep(h.p.Call(p.qml, "open"))
+			if p := h.panelNamed(id); p != nil && h.panelHidden(p) {
+				h.keep(h.p.Call(p.qml, "show"))
 			}
 		}
 	} else {
 		var hid []string
 		for _, p := range h.panels {
-			if h.panelOpen[p.spec.ID] && !h.panelHidden(p) {
-				h.keep(h.p.Call(p.qml, "minimize"))
+			if !h.panelHidden(p) {
+				h.keep(h.p.Call(p.qml, "hide"))
 				hid = append(hid, p.spec.ID)
 			}
 		}
@@ -331,20 +308,10 @@ func (h *Host) hideOrShowPanels() {
 }
 
 // panelsHiddenChanged follows the window collector: a panel hidden or shown again, by the dock or
-// otherwise. Once the editor's icon hid them, a panel shown or closed since means its next click
-// hides again.
+// otherwise. Once the editor's icon hid them, a panel shown since means its next click hides again.
 func (h *Host) panelsHiddenChanged() {
-	shown := slices.ContainsFunc(h.panels, func(p *panel) bool { return h.panelOpen[p.spec.ID] && !h.panelHidden(p) })
-	if shown || slices.ContainsFunc(h.dock.hid, func(id string) bool { return !h.panelOpen[id] }) {
+	if slices.ContainsFunc(h.panels, func(p *panel) bool { return !h.panelHidden(p) }) {
 		h.dock.hid = nil
-	}
-	// a panel the query's zoom hid, shown again some other way (the dock): the zoom is over
-	if h.zoomed == paneEditor && slices.ContainsFunc(h.zoomHid, func(id string) bool {
-		p := h.panelNamed(id)
-		return p != nil && h.panelOpen[id] && !h.panelHidden(p)
-	}) {
-		h.zoomed, h.zoomHid = "", nil
-		h.reproject()
 	}
 	h.refreshDock()
 }

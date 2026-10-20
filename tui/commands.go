@@ -120,11 +120,9 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.saveWorkspace":           oneString("App.saveWorkspace", "a workspace name", h.saveWorkspace),
 		"App.attachToWorkspace":       workspaceAndName(h.attachToWorkspace),
 		"App.movePane":                oneString("App.movePane", "h, j, k or l", h.movePane),
-		"App.panelOpened":             oneString("App.panelOpened", "a panel", h.panelOpened),
-		"App.panelClosed":             oneString("App.panelClosed", "a panel", h.panelClosed),
 		"App.goDock":                  oneString("App.goDock", "a dock icon's key", h.goDock),
-		"App.panelResized":            panelAndNumbers("App.panelResized", 2, func(id string, n []float64) error { return h.panelResized(id, int(n[0]), int(n[1])) }),
-		"App.panelPlaced":             panelAndNumbers("App.panelPlaced", 4, func(id string, n []float64) error { return h.panelPlaced(id, [4]float64(n)) }),
+		"App.panelResized":            panelAndNumbers("App.panelResized", 1, func(id string, n []float64) error { return h.panelResized(id, n[0]) }),
+		"App.panelDocked":             strings_("App.panelDocked", 2, func(v []string) error { return h.panelDocked(v[0], v[1]) }),
 		"App.panelChanged":            panelChange(h.panelChanged),
 		"App.chooseConnection":        oneNumber("App.chooseConnection", "a row's index", h.chooseConnection),
 		"App.confirmed":               oneString("App.confirmed", "yes or no", h.confirmed),
@@ -246,7 +244,7 @@ func none(fn func() error) decl.HandlerFunc {
 	}
 }
 
-// panelAndNumbers is a command that takes a panel's id and n numbers: a Panel's resized or placed.
+// panelAndNumbers is a command that takes a panel's id and n numbers: a tile's resized.
 func panelAndNumbers(name string, n int, fn func(id string, nums []float64) error) decl.HandlerFunc {
 	return func(args []qml.SpecValue) error {
 		if len(args) != n+1 || args[0].Kind != qml.SpecValueString {
@@ -264,14 +262,15 @@ func panelAndNumbers(name string, n int, fn func(id string, nums []float64) erro
 	}
 }
 
-// panelChange is App.panelChanged(panel, operation, maximized): a Panel's changed signal, as far as
-// the host follows it.
-func panelChange(fn func(id, operation string, maximized bool) error) decl.HandlerFunc {
+// panelChange is App.panelChanged(tile, operation, maximized, hidden): a tile's changed signal, as
+// far as the host follows it.
+func panelChange(fn func(tile, operation string, maximized, hidden bool) error) decl.HandlerFunc {
 	return func(args []qml.SpecValue) error {
-		if len(args) != 3 || args[0].Kind != qml.SpecValueString || args[1].Kind != qml.SpecValueString || args[2].Kind != qml.SpecValueBool {
-			return fmt.Errorf("App.panelChanged takes a panel, an operation and whether it is maximized")
+		if len(args) != 4 || args[0].Kind != qml.SpecValueString || args[1].Kind != qml.SpecValueString ||
+			args[2].Kind != qml.SpecValueBool || args[3].Kind != qml.SpecValueBool {
+			return fmt.Errorf("App.panelChanged takes a tile, an operation, whether it is maximized and whether it is hidden")
 		}
-		return fn(args[0].Raw, args[1].Raw, args[2].Raw == "true")
+		return fn(args[0].Raw, args[1].Raw, args[2].Raw == "true", args[3].Raw == "true")
 	}
 }
 
