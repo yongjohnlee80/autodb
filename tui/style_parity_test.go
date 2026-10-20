@@ -7,10 +7,38 @@ import (
 
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
+	"github.com/yongjohnlee80/golib/tui/decl/themes"
+	"github.com/yongjohnlee80/golib/tui/style"
+
+	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
 func color(r, g, b uint8) tuicore.CellColor {
 	return tuicore.CellColor{Kind: tuicore.CellColorRGB, R: r, G: g, B: b}
+}
+
+// cellColorOf is a theme's colour value as a cell wears it: the terminal's default, an ANSI index,
+// or an RGB.
+func cellColorOf(t *testing.T, v string) tuicore.CellColor {
+	t.Helper()
+	c, err := style.ParseColor(v)
+	if err != nil {
+		t.Fatalf("colour %q: %v", v, err)
+	}
+	if c.IsDefault() {
+		return tuicore.CellColor{}
+	}
+	if i, ok := c.ANSIIndex(); ok {
+		return tuicore.CellColor{Kind: tuicore.CellColorANSI, Index: uint8(i)}
+	}
+	if i, ok := c.ANSI256Index(); ok {
+		return tuicore.CellColor{Kind: tuicore.CellColorANSI256, Index: uint8(i)}
+	}
+	r, g, b, ok := c.RGBValues()
+	if !ok {
+		t.Fatalf("colour %q is neither default, ANSI nor RGB", v)
+	}
+	return color(r, g, b)
 }
 
 // paintedLabel reads a real terminal cell rather than only the theme source.
@@ -86,18 +114,16 @@ func TestAllShippedThemesKeepTheFocusedExplorerSelectionLegible(t *testing.T) {
 	h, s := signedIn(t)
 	s.Keys(t, ctrl('h'))
 	s.WaitFor(t, "explorer focus", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
-	ansi := func(index uint8) tuicore.CellColor {
-		return tuicore.CellColor{Kind: tuicore.CellColorANSI, Index: index}
-	}
-	for _, tc := range []struct {
-		name   string
-		fg, bg tuicore.CellColor
-	}{
-		{"retro", color(0, 0, 0), color(0xff, 0xff, 0xff)},
-		{"mono", ansi(0), ansi(15)},
-		{"light", color(0xff, 0xff, 0xff), color(0, 0x5f, 0xd7)},
-		{"dark", color(0, 0, 0), color(0x87, 0xaf, 0xd7)},
-	} {
+	// each theme's own document cursor, as golib writes it: the colours are golib's, not this test's
+	for _, name := range tuiapp.ThemeNames() {
+		vals, err := themes.Values(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tc := struct {
+			name   string
+			fg, bg tuicore.CellColor
+		}{name, cellColorOf(t, vals["document.highlightedText"]), cellColorOf(t, vals["document.highlight"])}
 		h.RunCommand("options.theme." + tc.name)
 		s.WaitFor(t, tc.name+" rendered explorer cursor", func(sc string) bool {
 			if h.Theme() != tc.name || h.PaneWithFocus() != "explorerTree" || !strings.Contains(sc, "main (1)") {
