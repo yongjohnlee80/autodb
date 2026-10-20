@@ -1000,3 +1000,14 @@ func (h *Host) PanelPrefsIdle() bool {
 func (h *Host) ToggleMaximize(id string) {
 	h.p.Post(func() { h.keep(h.p.Call(PanelQMLID(id), "toggleMaximize")) })
 }
+
+// ShowResult puts a result on the results pane as a run's answer does: these columns and rows.
+func (h *Host) ShowResult(columns []string, rows [][]any) {
+	done := make(chan struct{})
+	h.p.Post(func() {
+		h.results.last = &ExecResult{Statements: 1, Verb: "select", Columns: columns, Rows: rows}
+		h.showResults()
+		close(done)
+	})
+	<-done
+}

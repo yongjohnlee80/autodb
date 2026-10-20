@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
+	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
 // RUNNING A QUERY, AND WHAT IT RETURNED.
@@ -21,11 +22,13 @@ import (
 //
 // The result is a host model the document's TableView shows — its columns are
 // the query's, whatever they are — or, with SPC j, the same rows as JSON. A
-// summary line sits above either.
+// summary line sits above either. The TableView has a cell cursor and sorts
+// (golib's DataTable, drawn in pixels in the GUI): the model knows each cell's
+// kind, so NULLs, numbers and booleans sort and filter as what they are.
 
 // results is the last result and how it is shown.
 type results struct {
-	model   *tuidecl.ListModel
+	model   *resultsTable
 	cursor  int
 	last    *ExecResult
 	asJSON  bool
@@ -38,7 +41,7 @@ type results struct {
 }
 
 func newResults() *results {
-	return &results{model: tuidecl.NewListModel(), run: func(ctx context.Context, b *Bound, connID int64, sql string) (*ExecResult, error) {
+	return &results{model: &resultsTable{ListModel: tuidecl.NewListModel()}, run: func(ctx context.Context, b *Bound, connID int64, sql string) (*ExecResult, error) {
 		return b.Run(ctx, connID, sql)
 	}}
 }
@@ -199,10 +202,40 @@ func (h *Host) showResults() {
 	}
 }
 
-// setTable puts a result's rows in the table model, one role per column.
+// resultsTable is the results' rows as the TableView reads them: a ListModel, one role per column,
+// and each cell's kind (widget.TableKinds), as the wire value was typed.
+type resultsTable struct {
+	*tuidecl.ListModel
+	kinds [][]widget.TableCellKind
+}
+
+// Kind is a cell's kind: text for one the result has none for.
+func (t *resultsTable) Kind(row, col int) widget.TableCellKind {
+	if row < 0 || row >= len(t.kinds) || col < 0 || col >= len(t.kinds[row]) {
+		return widget.TableCellText
+	}
+	return t.kinds[row][col]
+}
+
+// cellKind is what a wire value holds: NULL, a number (renderCell writes its literal), a boolean,
+// or text, bytes included.
+func cellKind(v any) widget.TableCellKind {
+	switch v.(type) {
+	case nil:
+		return widget.TableCellNull
+	case bool:
+		return widget.TableCellBool
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, json.Number:
+		return widget.TableCellNumber
+	}
+	return widget.TableCellText
+}
+
+// setTable puts a result's rows in the table model, one role per column, with each cell's kind.
 func (h *Host) setTable(res *ExecResult) {
 	m := h.results.model
 	if res == nil || len(res.Columns) == 0 {
+		m.kinds = nil
 		m.SetColumns()
 		m.Reset(nil)
 		return
@@ -212,15 +245,19 @@ func (h *Host) setTable(res *ExecResult) {
 		cols[i] = tuidecl.Column{Role: fmt.Sprintf("c%d", i), Title: name}
 	}
 	rows := make([]tuidecl.Row, len(res.Rows))
+	kinds := make([][]widget.TableCellKind, len(res.Rows))
 	for i, rr := range res.Rows {
 		row := tuidecl.Row{}
+		kinds[i] = make([]widget.TableCellKind, len(res.Columns))
 		for j := range res.Columns {
-			if j < len(rr) {
+			if j < len(rr) { // a short row's missing cell stays text, as it shows: empty
 				row[cols[j].Role] = renderCell(rr[j])
+				kinds[i][j] = cellKind(rr[j])
 			}
 		}
 		rows[i] = row
 	}
+	m.kinds = kinds // before the reset, which the view reads the kinds on
 	m.SetColumns(cols...)
 	m.Reset(rows)
 }
