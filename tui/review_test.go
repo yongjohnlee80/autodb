@@ -100,11 +100,13 @@ func TestADevThemeImportEditRepaintsAndABadSaveKeepsTheLastGoodScreen(t *testing
 		return s.Backend.Snapshot()[0][0].Attrs.BG != before
 	})
 	good := s.Backend.Snapshot()[0][0].Attrs.BG
-	if err := os.WriteFile(file, []byte("Window {"), 0o644); err != nil {
+	// a whole document the engine refuses: a save ending mid-construct is waited out as half-written
+	if err := os.WriteFile(file, []byte("import autodb 1.0\nWindow { NoSuchType {} }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	s.WaitFor(t, "invalid edit reported", func(sc string) bool {
-		return strings.Contains(h.SourceText("App.status"), "main.qml") && strings.Contains(sc, "Options")
+		st := h.SourceText("App.status")
+		return (strings.Contains(st, "main.qml") || strings.Contains(st, "NoSuchType")) && strings.Contains(sc, "Options")
 	})
 	if got := s.Backend.Snapshot()[0][0].Attrs.BG; got != good {
 		t.Fatalf("invalid layout changed last good menu color: %+v -> %+v", good, got)
