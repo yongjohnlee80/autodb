@@ -51,7 +51,8 @@ func TestAResultRowsNumberSelectsTheRow(t *testing.T) {
 	h, s := signedIn(t)
 	s.WaitForText(t, "main")
 	h.ShowResult([]string{"name", "qty"}, [][]any{{"alpha", int64(10)}, {"bravo", int64(9)}})
-	// numberAt is where the row's number is drawn on bravo's line: the 2 before its name
+	// numberAt is where the row's number is drawn on bravo's line: the 2 before its name, the
+	// gutter's rule between them
 	numberAt := func() (x, y int, ok bool) {
 		y = rowOf(s, "bravo")
 		if y < 0 {
@@ -60,7 +61,7 @@ func TestAResultRowsNumberSelectsTheRow(t *testing.T) {
 		line := rows(s)[y]
 		before := line[:strings.Index(line, "bravo")]
 		i := strings.LastIndex(before, "2")
-		if i < 0 || strings.TrimSpace(before[i+1:]) != "" {
+		if i < 0 || strings.TrimSpace(before[i+1:]) != "│" {
 			return 0, 0, false
 		}
 		return len([]rune(line[:i])), y, true
