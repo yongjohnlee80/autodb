@@ -380,6 +380,7 @@ func (h *Host) attach(p *tuidecl.Program) error {
 		return err
 	}
 	h.explorer.model.OnFetch = h.fetchExplorer
+	h.yankResultsToEditor()
 	h.reproject()
 	// the dock lists the panels once their tiles are mounted
 	p.Post(h.refreshDock)
