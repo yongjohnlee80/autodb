@@ -68,8 +68,12 @@ github.com/yongjohnlee80/golib v0.7.22-0.20261020212954-cfffe9ad6ca8 h1:uv8BWkhX
 github.com/yongjohnlee80/golib v0.7.22-0.20261020212954-cfffe9ad6ca8/go.mod h1:MxdtUttYXjsAnET0k31FgJAM7JU6LR1RHg2f/vJ+HTU=
 github.com/yongjohnlee80/golib v0.7.22 h1:oWfih7vz98LlbS6aqJr3hmtyhRO84pxrhJbDcOuGHfs=
 github.com/yongjohnlee80/golib v0.7.22/go.mod h1:MxdtUttYXjsAnET0k31FgJAM7JU6LR1RHg2f/vJ+HTU=
+github.com/yongjohnlee80/golib v0.7.23 h1:z+cBHYrmt3vsoEEFvfCnuOTe56i7UC1ROMeCGV0hytY=
+github.com/yongjohnlee80/golib v0.7.23/go.mod h1:MxdtUttYXjsAnET0k31FgJAM7JU6LR1RHg2f/vJ+HTU=
 github.com/yongjohnlee80/golib/gui v0.2.7 h1:hnIIVPAmwQXNUjYUbdJvHzjE6PxgvN7m6bpXKMpnwn4=
 github.com/yongjohnlee80/golib/gui v0.2.7/go.mod h1:mZ+zGuObYCks4D5QGY49FoSjk5cIycvMbITCbH4NKGA=
+github.com/yongjohnlee80/golib/gui v0.2.10 h1:w7sHe0jAPQ1hCwduHWXQxZM2WAAsbDEB9Z/KYzver3o=
+github.com/yongjohnlee80/golib/gui v0.2.10/go.mod h1:qiL1efGzMY4jfrjZN/DpcxuPt/z3fg/AG6xFdI8vOUc=
 golang.org/x/crypto v0.55.0 h1:+KWHjbgOaAQ66dh/YlkZKHlz9ZUlq61AFirAR9ntP8M=
 golang.org/x/crypto v0.55.0/go.mod h1:uq0V9dE/fzQuJtbnL+2EhWOE63vo164FY8xqEnV9xis=
 golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 h1:R84qjqJb5nVJMxqWYb3np9L5ZsaDtB+a39EqjV0JSUM=

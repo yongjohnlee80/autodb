@@ -69,5 +69,25 @@ func TestAResultRowsNumberSelectsTheRow(t *testing.T) {
 	x, y, _ := numberAt()
 	s.Keys(t, tuicore.MouseEvent{Kind: tuicore.MousePress, Button: tuicore.MouseLeft, X: x, Y: y},
 		tuicore.MouseEvent{Kind: tuicore.MouseRelease, Button: tuicore.MouseLeft, X: x, Y: y}, key('y'))
-	s.WaitFor(t, "bravo's row copied", func(string) bool { return string(s.Backend.Clipboard()) == "bravo\t9" })
+	s.WaitFor(t, "bravo's row copied", func(string) bool { return string(s.Backend.Clipboard()) == "bravo,9" })
+}
+
+// The results copy CSV, quoted as RFC 4180 has it, and r puts the cursor on its whole row: y then
+// copies the row, into the query editor's register as well, and r again brings the cell cursor back.
+func TestTheResultsCopyCSVAndTheirCursorCoversARow(t *testing.T) {
+	h, s := signedIn(t)
+	s.WaitForText(t, "main")
+	h.ShowResult([]string{"name", "qty"}, [][]any{{"smith, jr", int64(10)}, {"bravo", nil}})
+	s.WaitFor(t, "the rows", func(sc string) bool { return strings.Contains(sc, "bravo") })
+	s.Keys(t, ctrl('j'))
+	s.WaitFor(t, "the results in use", func(string) bool { return h.PaneWithFocus() == "results" })
+	s.Keys(t, key('y'))
+	s.WaitFor(t, "the cell, quoted", func(string) bool { return string(s.Backend.Clipboard()) == `"smith, jr"` })
+	s.Keys(t, key('r'), key('j'), key('y'))
+	s.WaitFor(t, "bravo's row as CSV", func(string) bool {
+		_, reg, _ := h.QueryAndRegister()
+		return string(s.Backend.Clipboard()) == "bravo,NULL" && reg == "bravo,NULL"
+	})
+	s.Keys(t, key('r'), key('y'))
+	s.WaitFor(t, "the cell cursor back: bravo's name", func(string) bool { return string(s.Backend.Clipboard()) == "bravo" })
 }

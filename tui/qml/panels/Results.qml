@@ -14,13 +14,14 @@ Flex {
         visible: App.resultsEmpty
         text: qsTrId("autodb.results.text")
     }
-    // a cursor on cells, sortable (s), its rows filtered by a WHERE (golib's DataTable); index is
-    // the result's row, however it is sorted
+    // a cursor on cells (r: on its whole row), sortable (s), its rows filtered by a WHERE (golib's
+    // DataTable); index is the result's row, however it is sorted
     TableView {
         visible: App.resultsTable
         cellCursor: true
         sortable: true
         rowNumbers: true   // a row's number selects the row: a click, or a drag over several
+        copyFormat: "csv"  // y copies CSV; r turns the cursor onto its whole row, which y copies whole
         model: App.results
         currentIndex: App.resultsIndex
         Layout.fillHeight: true
