@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/yongjohnlee80/golib/tui"
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
@@ -200,6 +201,35 @@ func (h *Host) showResults() {
 	if err := h.p.SetMany(state); err != nil {
 		h.keep(err)
 	}
+}
+
+// yankResultsToEditor has what the results' table copies (y, yy, a selection's y) land in the query
+// editor's register as well as the system clipboard, so p in the query pastes it, as a yank in
+// the editor does. golib's TableCore copies to the clipboard and tells the host (SetOnCopy).
+func (h *Host) yankResultsToEditor() {
+	body, ok := h.p.Find("resultsBody")
+	if !ok {
+		return
+	}
+	if d := resultsGrid(body); d != nil {
+		d.Core().SetOnCopy(func(text string) { h.editor.SetRegister(text, false) })
+	}
+}
+
+// resultsGrid is the results' cell-cursor table under c: the Results component keeps its ids to
+// itself, so it is found by walking its children.
+func resultsGrid(c tui.Component) *widget.DataTable {
+	if d := tuidecl.TableOf(c); d != nil {
+		return d
+	}
+	if ct, ok := c.(tui.Container); ok {
+		for ch := range ct.Children() {
+			if d := resultsGrid(ch); d != nil {
+				return d
+			}
+		}
+	}
+	return nil
 }
 
 // resultsTable is the results' rows as the TableView reads them: a ListModel, one role per column,

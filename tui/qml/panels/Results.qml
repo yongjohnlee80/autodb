@@ -20,6 +20,7 @@ Flex {
         visible: App.resultsTable
         cellCursor: true
         sortable: true
+        rowNumbers: true   // a row's number selects the row: a click, or a drag over several
         model: App.results
         currentIndex: App.resultsIndex
         Layout.fillHeight: true
