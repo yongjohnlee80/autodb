@@ -11,6 +11,7 @@ Dialog {
     defaultButton: Dialog.Close       // Enter closes it, as its help line says
     helpText: qsTrId("autodb.help.helpText")
     Editor {
+        cursorColor: Theme.document.cursor // the theme's cursor: a terminal's own may not show on its colours
         palette.highlight: Theme.document.highlight
         palette.highlightedText: Theme.document.highlightedText
         readOnly: true

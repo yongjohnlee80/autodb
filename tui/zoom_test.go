@@ -137,3 +137,14 @@ func TestAFocusKeyLeavesAnotherPanesZoom(t *testing.T) {
 		return strings.Contains(sc, "┌ explorer") && strings.Contains(sc, "┌ results") && h.PaneWithFocus() == "explorerTree"
 	})
 }
+
+// The query editor's cursor is the theme's: the terminal is told its colour (OSC 12), so it shows
+// on the theme's ground rather than the terminal's own colour, which a light theme can hide.
+func TestTheQueryCursorIsTheThemes(t *testing.T) {
+	_, s := signedIn(t)
+	s.WaitForText(t, "main")
+	s.WaitFor(t, "the dark theme's cursor, #ffaf00", func(string) bool {
+		c, ok := s.Backend.CursorColor()
+		return ok && c.R == 0xff && c.G == 0xaf && c.B == 0x00
+	})
+}

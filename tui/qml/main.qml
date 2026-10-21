@@ -214,6 +214,7 @@ Window {
                 palette.base: Theme.document.base
                 palette.text: Theme.document.text
                 Editor {
+                    cursorColor: Theme.document.cursor // the theme's cursor: a terminal's own may not show on its colours
                     id: editor
                     focus: true
                     keyset: App.keyset
@@ -249,7 +250,7 @@ Window {
                 palette.text: Theme.document.text
                 Text { text: App.resultsSummary }
                 Results { id: resultsBody; visible: App.resultsBodyShown; Layout.fillHeight: true }
-                Editor { id: resultsJSON; readOnly: true; visible: App.resultsAsJSON
+                Editor { cursorColor: Theme.document.cursor; id: resultsJSON; readOnly: true; visible: App.resultsAsJSON
                          text: App.resultsJSON; Layout.fillHeight: true }
             }
         }
