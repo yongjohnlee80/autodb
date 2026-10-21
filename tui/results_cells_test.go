@@ -51,13 +51,22 @@ func TestAResultRowsNumberSelectsTheRow(t *testing.T) {
 	h, s := signedIn(t)
 	s.WaitForText(t, "main")
 	h.ShowResult([]string{"name", "qty"}, [][]any{{"alpha", int64(10)}, {"bravo", int64(9)}})
-	s.WaitFor(t, "the rows numbered", func(string) bool {
-		y := rowOf(s, "bravo")
-		return y >= 0 && strings.Contains(rows(s)[y], "2 bravo")
-	})
-	y := rowOf(s, "bravo")
-	x := strings.Index(rows(s)[y], "2 bravo")
-	x = len([]rune(rows(s)[y][:x]))
+	// numberAt is where the row's number is drawn on bravo's line: the 2 before its name
+	numberAt := func() (x, y int, ok bool) {
+		y = rowOf(s, "bravo")
+		if y < 0 {
+			return 0, 0, false
+		}
+		line := rows(s)[y]
+		before := line[:strings.Index(line, "bravo")]
+		i := strings.LastIndex(before, "2")
+		if i < 0 || strings.TrimSpace(before[i+1:]) != "" {
+			return 0, 0, false
+		}
+		return len([]rune(line[:i])), y, true
+	}
+	s.WaitFor(t, "the rows numbered", func(string) bool { _, _, ok := numberAt(); return ok })
+	x, y, _ := numberAt()
 	s.Keys(t, tuicore.MouseEvent{Kind: tuicore.MousePress, Button: tuicore.MouseLeft, X: x, Y: y},
 		tuicore.MouseEvent{Kind: tuicore.MouseRelease, Button: tuicore.MouseLeft, X: x, Y: y}, key('y'))
 	s.WaitFor(t, "bravo's row copied", func(string) bool { return string(s.Backend.Clipboard()) == "bravo\t9" })
