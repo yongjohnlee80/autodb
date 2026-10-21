@@ -425,3 +425,22 @@ func TestManageOffersMyDevicesOnlySignedIn(t *testing.T) {
 		t.Fatalf("signed out, Manage offers %v; want only servers", got)
 	}
 }
+
+// The section's field stands apart from what the section shows: a blank row between the field and
+// the table's titles, so the two do not read as one block.
+func TestManagesSectionFieldHasARowToItself(t *testing.T) {
+	r := newRemoteRig(t)
+	r.openManage(t)
+	r.s.WaitForText(t, "staging")
+	lines := rows(r.s)
+	y := rowOf(r.s, "ADDRESS") // the servers table's titles
+	if y < 2 {
+		t.Fatalf("no table titles:\n%s", r.s.String())
+	}
+	x := strings.Index(lines[y], "SERVER")
+	x = len([]rune(lines[y][:x]))
+	above := []rune(lines[y-1])
+	if gap := strings.TrimSpace(string(above[x:min(x+40, len(above))])); gap != "" {
+		t.Fatalf("the row above the titles holds %q, want a blank row under the section's field:\n%s", gap, r.s.String())
+	}
+}

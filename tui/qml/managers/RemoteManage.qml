@@ -22,6 +22,7 @@ Dialog {
             currentIndex: App.manageSectionIndex
             onActivated: App.manageSection(index)
         }
+        Text { text: " " } // a blank row: the section's field stands apart from what it shows
         TableView {
             palette.highlight: Theme.document.highlight
             palette.highlightedText: Theme.document.highlightedText
@@ -73,6 +74,7 @@ Dialog {
             currentIndex: App.activityKindIndex
             onActivated: App.activityKind(index)
         }
+        Text { visible: App.manageOnActivity; text: " " } // a blank row under the kind's field, as under the section's
         TableView {
             palette.highlight: Theme.document.highlight
             palette.highlightedText: Theme.document.highlightedText
