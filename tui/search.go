@@ -135,11 +135,11 @@ func (h *Host) searchJump(dir int, includeCurrent bool) {
 			}
 		}
 	case "query":
-		rows = h.editor.Lines()
-		cur, _ = h.editor.Line()
+		rows = h.editor.Core().Lines()
+		cur, _ = h.editor.Core().Line()
 	case "json":
-		rows = h.jsonEditor.Lines()
-		cur, _ = h.jsonEditor.Line()
+		rows = h.jsonEditor.Core().Lines()
+		cur, _ = h.jsonEditor.Core().Line()
 	case "table":
 		cur = h.results.cursor
 		if h.results.last != nil {
@@ -198,10 +198,10 @@ func (h *Host) searchJump(dir int, includeCurrent bool) {
 		h.explorerAt = h.explorerKeys(at[row])
 		h.showPane(paneExplorer)
 	case "query":
-		h.editor.SetLine(row, cols[row])
+		h.editor.Core().SetLine(row, cols[row])
 		h.focusEditor()
 	case "json":
-		h.jsonEditor.SetLine(row, cols[row])
+		h.jsonEditor.Core().SetLine(row, cols[row])
 		h.showPane(paneResults)
 	case "table":
 		h.results.cursor = row

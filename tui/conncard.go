@@ -26,7 +26,7 @@ func (h *Host) copyCard() error {
 	if h.cardText == "" {
 		return nil
 	}
-	h.editor.SetRegister(h.cardText, false)
+	h.editor.Core().SetRegister(h.cardText, false)
 	if h.p.App().CopyToClipboard(h.cardText) {
 		h.statusMessage("autodb.conncard.status.status")
 	} else {

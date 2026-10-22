@@ -35,7 +35,7 @@ func (h *Host) attachWorkspace() error {
 	// q asks to quit from anywhere, the query editor's Normal mode included: the
 	// Vim profile would start a macro recording with it and keep it from the
 	// Window's Shortcut.
-	ed.OverlayKeymap(widget.Keymap{{Mode: widget.ModeNormal, Code: 'q'}: widget.ActUnbound})
+	ed.Core().OverlayKeymap(widget.Keymap{{Mode: widget.ModeNormal, Code: 'q'}: widget.ActUnbound})
 	json, ok := tuidecl.FindAs[*widget.Editor](h.p, "resultsJSON")
 	if !ok {
 		return fmt.Errorf("main.qml declares no read-only Editor with id: resultsJSON")
