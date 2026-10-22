@@ -190,10 +190,15 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	g.pool = newSessions(dial, cfg.Log)
 
+	// The pending-login budget, built first and handed to the park and the Manager (and through
+	// the Manager to the Handler's login route). Its cap is the park's capacity, so the two
+	// cannot disagree; it was the SSO's Max before golib v0.7.32.
+	adm := web.NewAdmission(web.AdmissionCap(cfg.MaxSessions))
+
 	sso, err := web.NewSSO(web.SSOConfig[*userSession]{
-		Max:    cfg.MaxSessions,
-		TTL:    TicketTTL,
-		Logger: cfg.Log,
+		Admission: adm,
+		TTL:       TicketTTL,
+		Logger:    cfg.Log,
 
 		// A direct attach — a ticket whose parked login has already expired —
 		// authenticated without going through the login route, so nothing was
@@ -227,7 +232,6 @@ func New(cfg Config) (*Gateway, error) {
 		return nil, err
 	}
 	g.sso = sso
-	hOpt, mOpt := sso.Options()
 
 	// The attach credential is a single-use ticket minted by the login route. A
 	// reusable secret is never an attach credential.
@@ -255,10 +259,10 @@ func New(cfg Config) (*Gateway, error) {
 	}
 
 	mgr, err := web.NewManager(
-		sso.Factory(func(b *web.Backend, id *auth.Identity, us *userSession) web.Runner {
+		sso.Factory(func(b tuicore.Backend, id *auth.Identity, us *userSession) web.Runner {
 			return &appRunner{gw: g, backend: b, user: us}
 		}),
-		mOpt,
+		web.ManagerAdmission(adm),
 		web.MaxSessions(cfg.MaxSessions),
 		web.IdleTimeout(cfg.Idle),
 		web.ManagerLogger(cfg.Log),
@@ -282,7 +286,7 @@ func New(cfg Config) (*Gateway, error) {
 		// from this gateway.
 		AllowedOrigins: []string{"http://" + addr},
 		ExpectedHost:   addr,
-	}, mgr, hOpt, web.HandlerLogger(cfg.Log), web.Title("autodb"))
+	}, mgr, web.HandlerLogger(cfg.Log), web.Title("autodb"))
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +345,7 @@ func (g *Gateway) Serve(ctx context.Context) error {
 // ending this session rather than the process.
 type appRunner struct {
 	gw      *Gateway
-	backend *web.Backend
+	backend tuicore.Backend
 	user    *userSession
 }
 
