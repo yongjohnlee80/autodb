@@ -16,7 +16,7 @@ require (
 	golang.org/x/term v0.45.0
 )
 
-require github.com/yongjohnlee80/golib/gui v0.2.14
+require github.com/yongjohnlee80/golib/gui v0.2.15
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
