@@ -134,12 +134,17 @@ func RevertOf(eng engine.Name, n int) (Script, bool, error) {
 // body is not a boundary — each with the line it starts on, for an error that
 // names where in the file it failed.
 func (s Script) Statements() ([]Statement, error) {
-	splitter := gsql.SQL{
-		DollarQuotes:        s.engine.DollarQuotedStrings(),
-		NestedBlockComments: s.engine.NestedBlockComments(),
-		EStringEscapes:      s.engine.EscapeStringConstants(),
+	var opts []gsql.Option
+	if s.engine.DollarQuotedStrings() {
+		opts = append(opts, gsql.DollarQuotes())
 	}
-	stmts, err := splitter.Parse(s.Body)
+	if s.engine.NestedBlockComments() {
+		opts = append(opts, gsql.NestedBlockComments())
+	}
+	if s.engine.EscapeStringConstants() {
+		opts = append(opts, gsql.EStringEscapes())
+	}
+	stmts, err := gsql.New(opts...).Parse(s.Body)
 	if err != nil {
 		return nil, fmt.Errorf("deployments: %s/%s: %w", s.engine, s.Name, err)
 	}
