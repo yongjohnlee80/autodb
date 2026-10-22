@@ -64,16 +64,16 @@ func resultsState(r *results) map[string]any {
 
 // runQuery is query.run: the selection, else the buffer.
 func (h *Host) runQuery() {
-	sql := h.editor.SelectedText()
+	sql := h.editor.Core().SelectedText()
 	if strings.TrimSpace(sql) == "" {
-		sql = h.editor.Value()
+		sql = h.editor.Core().Value()
 	}
 	h.runSQL(sql)
 }
 
 // runSelection is query.run_selection: the selection only.
 func (h *Host) runSelection() {
-	sql := h.editor.SelectedText()
+	sql := h.editor.Core().SelectedText()
 	if strings.TrimSpace(sql) == "" {
 		h.statusMessage("autodb.results.status.status")
 		return
@@ -212,7 +212,7 @@ func (h *Host) yankResultsToEditor() {
 		return
 	}
 	if d := resultsGrid(body); d != nil {
-		d.Core().SetOnCopy(func(text string) { h.editor.SetRegister(text, false) })
+		d.Core().SetOnCopy(func(text string) { h.editor.Core().SetRegister(text, false) })
 	}
 }
 
@@ -330,14 +330,14 @@ func (h *Host) openValue(col int) error {
 
 func (h *Host) copyInspected(col int) error {
 	if col >= 0 && col < len(h.inspected) {
-		h.editor.SetRegister(h.inspected[col], false)
+		h.editor.Core().SetRegister(h.inspected[col], false)
 		h.statusMessage("autodb.results.status.status8")
 	}
 	return nil
 }
 
 func (h *Host) copyValue() error {
-	h.editor.SetRegister(h.valueText, false)
+	h.editor.Core().SetRegister(h.valueText, false)
 	h.statusMessage("autodb.results.status.status9")
 	return nil
 }

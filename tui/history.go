@@ -350,7 +350,7 @@ func (h *Host) historyCopy(i int) error {
 	if !ok {
 		return nil
 	}
-	h.editor.SetRegister(r.Script, false)
+	h.editor.Core().SetRegister(r.Script, false)
 	if h.p.App().CopyToClipboard(r.Script) {
 		h.set(h.history.status, "script copied to clipboard and editor register")
 	} else {

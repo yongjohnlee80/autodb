@@ -487,15 +487,15 @@ func catalogCommands() []CommandOf[*Host] {
 			// These semantic actions operate on the query Editor even after
 			// a menu takes focus. Copy attempts system clipboard export; Cut
 			// and Paste use the editor's INTERNAL register only.
-			ID: "edit.copy", Visible: signedIn, Run: func(h *Host) { h.editor.Copy() },
+			ID: "edit.copy", Visible: signedIn, Run: func(h *Host) { h.editor.Core().Copy() },
 			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Copy/Yank (register; clipboard if available)", Hotkey: 'C', Order: 10}},
 		},
 		{
-			ID: "edit.cut", Visible: signedIn, Run: func(h *Host) { h.editor.Cut() },
+			ID: "edit.cut", Visible: signedIn, Run: func(h *Host) { h.editor.Core().Cut() },
 			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Cut to register", Hotkey: 'T', Order: 20}},
 		},
 		{
-			ID: "edit.paste", Visible: signedIn, Run: func(h *Host) { h.editor.Paste() },
+			ID: "edit.paste", Visible: signedIn, Run: func(h *Host) { h.editor.Core().Paste() },
 			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Paste register", Hotkey: 'P', Order: 30}},
 		},
 		{

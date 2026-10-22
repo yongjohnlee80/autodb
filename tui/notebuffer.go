@@ -168,7 +168,7 @@ func (h *Host) saveNote(after ...func()) {
 		h.statusMessage("autodb.notebuffer.status.status2")
 		return
 	}
-	body := h.editor.Value()
+	body := h.editor.Core().Value()
 	if h.buf.note == nil {
 		if strings.TrimSpace(body) == "" {
 			h.statusMessage("autodb.notebuffer.status.status3")
@@ -193,7 +193,7 @@ func (h *Host) saveNote(after ...func()) {
 		switch {
 		case err == nil:
 			// What was typed while it saved is still unsaved.
-			h.buf.dirty = h.editor.Value() != body
+			h.buf.dirty = h.editor.Core().Value() != body
 			h.setStatus("saved " + n.Name)
 			h.refreshWhere()
 			h.refreshNotes(n.WorkspaceID)
@@ -241,7 +241,7 @@ func (h *Host) conflictAnswered(answer string) error {
 				h.setStatus("overwrite failed: " + r.err.Error())
 				return
 			}
-			h.buf.note, h.buf.dirty = r.fresh, h.editor.Value() != body
+			h.buf.note, h.buf.dirty = r.fresh, h.editor.Core().Value() != body
 			h.setStatus("overwrote " + r.fresh.Name)
 			h.refreshWhere()
 		})
@@ -350,7 +350,7 @@ func (h *Host) nameNote(wsID int64, name string) error {
 			h.editor.SetValue("")
 			h.setStatus("created " + r.n.Name)
 		case "saveas":
-			h.buf.note, h.buf.dirty = r.n, h.editor.Value() != saveBody
+			h.buf.note, h.buf.dirty = r.n, h.editor.Core().Value() != saveBody
 			h.setStatus("saved " + r.n.Name)
 		}
 		h.buf.body = ""

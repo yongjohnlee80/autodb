@@ -339,10 +339,10 @@ func (h *Host) SearchCursor(target string) (int, int) {
 	h.p.Post(func() {
 		switch target {
 		case "query":
-			row, col := h.editor.Line()
+			row, col := h.editor.Core().Line()
 			got <- pos{row, col}
 		case "json":
-			row, col := h.jsonEditor.Line()
+			row, col := h.jsonEditor.Core().Line()
 			got <- pos{row, col}
 		case "table":
 			got <- pos{h.results.cursor, 0}
@@ -356,7 +356,7 @@ func (h *Host) SearchCursor(target string) (int, int) {
 
 func (h *Host) SetQueryCursor(row, col int) {
 	ready := make(chan struct{})
-	h.p.Post(func() { h.editor.SetLine(row, col); close(ready) })
+	h.p.Post(func() { h.editor.Core().SetLine(row, col); close(ready) })
 	<-ready
 }
 
@@ -393,8 +393,8 @@ func (h *Host) QueryAndRegister() (value, register string, linewise bool) {
 	}
 	got := make(chan state, 1)
 	h.p.Post(func() {
-		reg, line := h.editor.Register()
-		got <- state{h.editor.Value(), reg, line}
+		reg, line := h.editor.Core().Register()
+		got <- state{h.editor.Core().Value(), reg, line}
 	})
 	v := <-got
 	return v.value, v.register, v.linewise
@@ -402,7 +402,7 @@ func (h *Host) QueryAndRegister() (value, register string, linewise bool) {
 
 func (h *Host) QueryIsNormal() bool {
 	got := make(chan bool, 1)
-	h.p.Post(func() { got <- h.editor.Mode() == widget.ModeNormal })
+	h.p.Post(func() { got <- h.editor.Core().Mode() == widget.ModeNormal })
 	return <-got
 }
 

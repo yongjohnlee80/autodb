@@ -61,7 +61,7 @@ func (h *Host) copyCA() error {
 	if h.caText == "" {
 		return nil
 	}
-	h.editor.SetRegister(h.caText, false)
+	h.editor.Core().SetRegister(h.caText, false)
 	if h.p.App().CopyToClipboard(h.caText) {
 		h.set("App.caStatus", "certificate copied to clipboard and editor register")
 	} else {
