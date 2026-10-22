@@ -261,7 +261,7 @@ func TestEveryPanelBindsItsSpec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tree, err := (qml.QML{File: "main.qml"}).Parse(src)
+	tree, err := qml.New(qml.WithName("main.qml")).Parse(src)
 	if err != nil {
 		t.Fatal(err)
 	}

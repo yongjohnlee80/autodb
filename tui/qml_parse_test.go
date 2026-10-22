@@ -24,7 +24,7 @@ func TestEveryQMLFileParses(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if _, err := (qml.QML{File: p}).Parse(src); err != nil {
+		if _, err := qml.New(qml.WithName(p)).Parse(src); err != nil {
 			t.Errorf("%s: %v", p, err)
 		}
 		n++
