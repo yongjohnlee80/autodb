@@ -24,8 +24,36 @@ build:
 # `build`'s shape, static, so it starts on a host with no window libraries.
 # The dev `build` above stays cgo-less so a checkout with no window headers
 # still builds the whole program.
+# The Vulkan backend is optional: gio draws through EGL/OpenGL by default --
+# Wayland tries EGL first unless the app asks for app.PreferVulkan, and X11 keeps
+# Vulkan off entirely (gio's vulkanBuggy, gioui.org/issue/347) -- so a build
+# without it is a complete GUI. What it costs is a compile-time header,
+# vulkan/vulkan.h, which ships separately from the loader that installs vulkan.pc
+# (Arch: vulkan-headers, Debian/Ubuntu: libvulkan-dev), so a host can satisfy
+# `pkg-config --exists vulkan` and still fail to compile: build-gui probes the
+# header itself.
+#
+#   VULKAN=auto  (default) with Vulkan when the header is there, without it when not
+#   VULKAN=1     require it: fail naming the package when the header is missing
+#   VULKAN=0     omit it: EGL/OpenGL only, no header needed
+VULKAN ?= auto
+
 build-gui:
-	CGO_ENABLED=1 go build -tags gui -trimpath -ldflags "$(LDFLAGS)" -o bin/autodb ./cmd/autodb
+	@tags=gui; \
+	if printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c - $$(pkg-config --cflags vulkan 2>/dev/null) >/dev/null 2>&1; \
+		then have=yes; else have=no; fi; \
+	case "$(VULKAN)" in \
+	1) if [ $$have = no ]; then \
+	     echo "make build-gui VULKAN=1: vulkan/vulkan.h not found (Arch: vulkan-headers, Debian/Ubuntu: libvulkan-dev)"; \
+	     exit 1; \
+	   fi ;; \
+	0) tags=gui,novulkan ;; \
+	*) if [ $$have = no ]; then \
+	     tags=gui,novulkan; \
+	     echo "make build-gui: no vulkan/vulkan.h -- building EGL/OpenGL only (VULKAN=1 to require Vulkan)"; \
+	   fi ;; \
+	esac; \
+	set -x; CGO_ENABLED=1 go build -tags "$$tags" -trimpath -ldflags "$(LDFLAGS)" -o bin/autodb ./cmd/autodb
 
 # `test` is the honest signal: BOTH sides. The Lua suite drives a real daemon and
 # the neovim UI, and was previously in neither this target nor CI — so a whole
