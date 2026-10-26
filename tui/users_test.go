@@ -2,6 +2,7 @@ package tui_test
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,17 +12,20 @@ import (
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
 )
 
-func openUsers(t *testing.T, s *decltest.Screen) {
+// openUsers opens the users manager and waits for its list to answer: a row key pressed before
+// then finds no row ("choose a user first"), and opens nothing. "root" on the screen is no sign of
+// it, the status line names the signed-in user too.
+func openUsers(t *testing.T, h *tuiapp.Host, s *decltest.Screen) {
 	t.Helper()
 	s.Keys(t, key(' '), key('u'))
-	s.WaitFor(t, "admin users manager", func(sc string) bool {
-		return strings.Contains(sc, "┌ users ") && strings.Contains(sc, "root") && strings.Contains(sc, "admin")
+	s.WaitFor(t, "the users listed", func(sc string) bool {
+		return strings.Contains(sc, "┌ users ") && slices.Contains(h.UserNames(), "root")
 	})
 }
 
 func TestUsersManagerCreatesReaderAndChangesItsRole(t *testing.T) {
 	h, s := signedIn(t)
-	openUsers(t, s)
+	openUsers(t, h, s)
 	s.Keys(t, key('a'))
 	s.WaitForText(t, "┌ new user ")
 	if err := h.SetTestSource("App.userFormRoleIndex", 0); err != nil {
@@ -51,7 +55,7 @@ func TestUsersManagerGrantsAConnectionAndOpensItsPersonalAddresses(t *testing.T)
 	h, s := runHostSized(t, addr, 120, 32)
 	loginAs(t, s, "root", rootPass)
 	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
-	openUsers(t, s)
+	openUsers(t, h, s)
 	s.Keys(t, key('a'))
 	s.WaitForText(t, "┌ new user ")
 	if err := h.SetTestSource("App.userFormRoleIndex", 0); err != nil {
@@ -119,7 +123,7 @@ func TestUsersManagerGrantsAConnectionAndOpensItsPersonalAddresses(t *testing.T)
 
 func TestUsersManagerToggleAndRemoveRequireTheChosenRow(t *testing.T) {
 	h, s := signedIn(t)
-	openUsers(t, s)
+	openUsers(t, h, s)
 	s.Keys(t, key('a'))
 	s.WaitForText(t, "┌ new user ")
 	if err := h.SetTestSource("App.userFormRoleIndex", 0); err != nil {
@@ -176,7 +180,7 @@ func TestSelfDemotionRetiresTheOldAdminMenuAudience(t *testing.T) {
 	h, s := runHostSized(t, addr, 120, 32)
 	loginAs(t, s, "root", rootPass)
 	s.WaitFor(t, "root signed in", func(string) bool { return h.Auth() == "signed-in" })
-	openUsers(t, s)
+	openUsers(t, h, s)
 	s.Keys(t, key('r')) // root is the first row
 	s.WaitForText(t, "┌ role for root ")
 	if err := h.SetTestSource("App.userFormRoleIndex", 0); err != nil {

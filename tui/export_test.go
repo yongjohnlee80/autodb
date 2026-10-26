@@ -181,6 +181,20 @@ func (h *Host) SessionEpoch() uint64 { return h.session.IdentityEpoch() }
 
 func (h *Host) SessionRole() string { return h.session.User().Role }
 
+// UserNames are the users manager's rows as loaded, read on the loop: a key on a row (r, R, d)
+// finds one only once its list has answered.
+func (h *Host) UserNames() []string {
+	got := make(chan []string, 1)
+	h.p.Post(func() {
+		var names []string
+		for _, u := range h.users.rows {
+			names = append(names, u.Name)
+		}
+		got <- names
+	})
+	return <-got
+}
+
 func (h *Host) SelectWorkspaceRow(i int) {
 	ready := make(chan struct{})
 	h.p.Post(func() { h.selectWorkspace(i); close(ready) })
