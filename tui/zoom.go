@@ -1,5 +1,7 @@
 package tui
 
+import "github.com/yongjohnlee80/golib/tui/widget"
+
 // ZOOM AND PANE MOTION — the three panes, one at a time or all.
 //
 // A zoomed pane has the screen: the others are hidden (the document binds each
@@ -60,15 +62,53 @@ func (h *Host) zoom(pane string) {
 
 // zoomToggle is view.zoom_toggle (SPC z): the pane with the keyboard, or out.
 func (h *Host) zoomToggle() {
+	pane := h.paneWithFocus()
+	if h.zoomed != "" {
+		pane = h.zoomed
+	}
+	if pane == "" {
+		pane = paneEditor
+	}
+	if component, ok := h.p.Find(paneWindowID(pane)); ok {
+		if window, ok := component.(*widget.WindowMod); ok {
+			if window.InvokeInput(widget.WindowMaximizeAction{}) {
+				return
+			}
+		}
+	}
 	if h.zoomed != "" {
 		h.zoom("")
 		return
 	}
-	pane := h.paneWithFocus()
-	if pane == "" {
-		pane = paneEditor
-	}
 	h.zoom(pane)
+}
+
+type paneWindowTarget struct {
+	host *Host
+	pane string
+}
+
+func (t *paneWindowTarget) ToggleMaximize() bool {
+	before := t.host.zoomed
+	if before == t.pane {
+		t.host.zoom("")
+	} else {
+		t.host.zoom(t.pane)
+	}
+	return before != t.host.zoomed
+}
+func (t *paneWindowTarget) Maximized() bool { return t.host.zoomed == t.pane }
+
+func paneWindowID(pane string) string {
+	switch pane {
+	case paneExplorer:
+		return "explorerWindow"
+	case paneEditor:
+		return "editorWindow"
+	case paneResults:
+		return "resultsWindow"
+	}
+	return ""
 }
 
 // zoomedNow is the zoom-out command's offering: something must be zoomed.

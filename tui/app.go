@@ -398,6 +398,11 @@ func (h *Host) options(opt Options) []tuidecl.ProgramOption {
 		opts = append(h.modulesFrom(qmlFiles), tuidecl.LayoutSource("main.qml", src))
 	}
 	opts = append(opts,
+		tuidecl.AdapterOptions(tuidecl.WithWindowTargets(map[string]any{
+			"explorerWindow": &paneWindowTarget{host: h, pane: paneExplorer},
+			"editorWindow":   &paneWindowTarget{host: h, pane: paneEditor},
+			"resultsWindow":  &paneWindowTarget{host: h, pane: paneResults},
+		})),
 		tuidecl.Sources(h.state(h.pickTheme(src))),
 		tuidecl.Handlers(h.commands()),
 		tuidecl.AppOptions(opt.App...),

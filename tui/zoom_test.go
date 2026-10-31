@@ -2,10 +2,12 @@ package tui_test
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
+	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
 // zoom_test.go holds the three panes: moving between them, and one at a time.
@@ -82,4 +84,20 @@ func TestSpaceZZoomsThePaneInUse(t *testing.T) {
 	s.WaitFor(t, "out of the zoom, on the query", func(sc string) bool {
 		return h.PaneWithFocus() == "editor" && strings.Contains(sc, "┌ explorer") && strings.Contains(sc, "┌ results")
 	})
+}
+
+func TestSpaceZPublishesTheCapabilityWidgetsCompletion(t *testing.T) {
+	_, s := signedIn(t)
+	s.WaitForText(t, "main")
+	var completions atomic.Int64
+	cancel := tuicore.Subscribe[widget.WindowChangedEvent](s.Program.App().Bus(), func(e widget.WindowChangedEvent) {
+		if e.Key == "editor" && e.Operation == widget.WindowMaximize {
+			completions.Add(1)
+		}
+	})
+	t.Cleanup(cancel)
+	s.Keys(t, key(' '), key('z'))
+	s.WaitFor(t, "capability maximize completion", func(string) bool { return completions.Load() == 1 })
+	s.Keys(t, key(' '), key('z'))
+	s.WaitFor(t, "capability restore completion", func(string) bool { return completions.Load() == 2 })
 }

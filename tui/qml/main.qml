@@ -147,9 +147,13 @@ Window {
         palette.base: Theme.document.base
         palette.text: Theme.document.text
 
+        WindowMod {
+            id: explorerWindow
+            key: "explorer"
+            maximizable: true
+            visible: App.explorerShown
         Frame {
             title: qsTrId("autodb.main.title")
-            visible: App.explorerShown
             // Enter on a row: a folder opens, a table scaffolds its query, and
             // a connection — or anything under one — becomes the query's.
             TreeView {
@@ -174,14 +178,19 @@ Window {
                 onCurrentIndexChanged: App.explorerMoved(index)
             }
         }
+        }
 
         Split {
             orientation: Tui.Vertical
             ratio: 0.55
             visible: App.rightShown
+            WindowMod {
+                id: editorWindow
+                key: "editor"
+                maximizable: true
+                visible: App.editorShown
             Frame {
                 title: App.queryTitle
-                visible: App.editorShown
                 // The keyboard starts here, and every card gives it back here.
                 Editor {
                     id: editor
@@ -196,10 +205,15 @@ Window {
                     SyntaxHighlighter { definition: App.querySyntax }
                 }
             }
+            }
+            WindowMod {
+                id: resultsWindow
+                key: "results"
+                maximizable: true
+                visible: App.resultsShown
             Frame {
                 id: results
                 title: qsTrId("autodb.main.title2")
-                visible: App.resultsShown
                 Flex {
                     direction: Tui.Vertical
                     Text { text: App.resultsSummary }
@@ -207,6 +221,7 @@ Window {
                     Editor { id: resultsJSON; readOnly: true; visible: App.resultsAsJSON
                              text: App.resultsJSON; Layout.fillHeight: true }
                 }
+            }
             }
         }
     }
