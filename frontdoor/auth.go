@@ -546,5 +546,11 @@ func startupFailure(err error) (outcome.ReasonID, string) {
 	if errors.Is(err, auth.ErrLocked) {
 		return outcomeID(OutcomeStartupConnectionUnavailable), string(exec.DetailStoreUnavailable)
 	}
+	// A target slow or down past the pin's allowance is an outage, not pool
+	// pressure (owner ruling, 2026-11-07): the same "not available right now"
+	// frame, never 53300 and never the credential denial.
+	if errors.Is(err, exec.ErrBackendOpenTimeout) {
+		return outcomeID(OutcomeStartupConnectionUnavailable), string(exec.DetailBackendOpenTimeout)
+	}
 	return "", ""
 }

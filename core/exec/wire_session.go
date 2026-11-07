@@ -203,7 +203,14 @@ const (
 	// is going to be released and waiting would end in the same answer.
 	DenyAllCapacityInTransaction = "frontdoor/all-capacity-in-transaction"
 	DenyTargetGone               = "frontdoor/target-removed-while-waiting"
-	DenyEngineClosing            = "frontdoor/instance-shutting-down"
+	// DenyConnectionChanging: the connection is being moved to another pool
+	// or downgraded; it is still there, and a retry succeeds once it lands.
+	DenyConnectionChanging = "frontdoor/connection-changing"
+	// DenyTargetBudget: the session was admitted, but its pin waited for the
+	// pool's front-door share until its bound (a closing backend's socket was
+	// still in flight).
+	DenyTargetBudget  = "frontdoor/target-budget-exhausted"
+	DenyEngineClosing = "frontdoor/instance-shutting-down"
 	// DenyLeaseEncoding: the pinned target's server_encoding or client_encoding
 	// is not UTF8, or could not be established (matrix row 3.1: the lease is
 	// pinned UTF8; autodb does not transcode; the check FAILS CLOSED). On the
@@ -297,6 +304,8 @@ var denialCharge = map[string]ChargeClass{
 	DenyQueueTimeout:             ChargeCapacity,
 	DenyAllCapacityInTransaction: ChargeCapacity,
 	DenyTargetGone:               ChargeCapacity,
+	DenyConnectionChanging:       ChargeCapacity,
+	DenyTargetBudget:             ChargeCapacity,
 	DenyEngineClosing:            ChargeCapacity,
 
 	// None — our config, our stored state, our bug. Ruled uncharged: see docs/front-door/connection-holding-policy.md.
@@ -356,6 +365,7 @@ func DenialReasons() []string {
 		DenyProfileRefuses, DenyLeaseCap, DenySessionCap, DenyResidentBudget,
 		DenyLeaseEncoding, DenyStartupGUC,
 		DenyQueueTimeout, DenyAllCapacityInTransaction, DenyTargetGone, DenyEngineClosing,
+		DenyConnectionChanging, DenyTargetBudget,
 	}
 }
 
@@ -391,7 +401,11 @@ func admissionAnswer(rerr error) (reason, detail string, ok bool) {
 		// audit row would double-count one refusal: the denial the caller
 		// builds already becomes a registered occurrence, and the operator
 		// needs one record saying both what happened and which limit to raise.
-		d := fmt.Sprintf("waited %s and was not served", queueWait)
+		d := "waited and was not served"
+		var waited *QueueTimeoutError
+		if errors.As(rerr, &waited) {
+			d = fmt.Sprintf("waited %s and was not served", waited.Waited())
+		}
 		var qt *QueueTimeoutError
 		if errors.As(rerr, &qt) && qt.BlockedBy() != nil {
 			d += "; blocked by: " + qt.BlockedBy().Error()
@@ -403,6 +417,13 @@ func admissionAnswer(rerr error) (reason, detail string, ok bool) {
 		return DenyAllCapacityInTransaction, "", true
 	case errors.Is(rerr, ErrTargetGone):
 		return DenyTargetGone, "", true
+	case errors.Is(rerr, ErrConnectionDraining):
+		return DenyConnectionChanging, "", true
+	// The pin's own capacity refusal: its share stayed full until its bound.
+	// ErrBackendOpenTimeout is deliberately NOT here: a target that doesn't
+	// open in time is unavailable, not full (frontdoor startupFailure).
+	case errors.Is(rerr, ErrTargetBudgetExhausted):
+		return DenyTargetBudget, "", true
 	case errors.Is(rerr, ErrEngineClosing):
 		return DenyEngineClosing, "", true
 	case errors.Is(rerr, ErrSessionCapExceeded):
@@ -659,12 +680,21 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 
 	var statuses map[string]string
 	if connRow.Engine.SpeaksPostgresWire() {
-		// Pin now. A failure here is the target's, not the client's: the
-		// admitted session is withdrawn and the error is returned unframed.
-		pc, perr := e.pinWireSession(ctx, s, connRow)
+		// The pin and the startup parameters run under their own bound, which
+		// leaves the reply its reserve before the credential deadline.
+		pinCtx, cancelPin := context.WithDeadline(ctx, answerBy(ctx, e.now(), handshakeReserve))
+		defer cancelPin()
+		// Pin now. The admitted session is withdrawn on failure. A pin that
+		// waited out its share is a capacity refusal, framed like admission's;
+		// anything else (a slow or unreachable target) is returned for the
+		// front door's startup classification.
+		pc, perr := e.pinWireSession(pinCtx, s, connRow)
 		if perr != nil {
 			e.sessions.remove(s)
 			cancel()
+			if reason, detail, ok := admissionAnswer(perr); ok {
+				return out, denyAfterAuthorizationWithDetail(reason, detail)
+			}
 			return out, perr
 		}
 		// Row 3.1 fails CLOSED: no reporter, no statuses, or either encoding
@@ -679,8 +709,8 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 				fmt.Sprintf("conn %d: session %s: target reports %s", connRow.ID, s.id, enc))
 			// Nothing has run on this backend — the refusal is about what the
 			// target reported at startup, not about anything this session did
-			// — so it is given back untouched. There is no state to reset and
-			// no reason to make the next caller pay for a reconnect.
+			// — so it is given back untouched. A pool backend is then closed
+			// by pgxpool's release hook (reusesBackend), never reused.
 			pc.Discard()
 			s.mu.Lock()
 			s.pc = nil
@@ -694,7 +724,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		// reported ParameterStatus set the client receives already reflects
 		// them. Any refusal — ours or the target's — withdraws the session.
 		if len(req.StartupGUCs) > 0 {
-			if gerr := e.applyStartupGUCs(ctx, s, pc, req.StartupGUCs, pat.UserID, ip, connRow.ID); gerr != nil {
+			if gerr := e.applyStartupGUCs(pinCtx, s, pc, req.StartupGUCs, pat.UserID, ip, connRow.ID); gerr != nil {
 				// A refusal partway through leaves the settings that were
 				// already applied ON the backend, so this is not a fresh
 				// connection that can simply be handed back — it goes through
