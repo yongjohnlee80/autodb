@@ -62,6 +62,13 @@ func newLeakTarget(t *testing.T) *leakTarget {
 	ctx := context.Background()
 	f := newFixture(t)
 
+	// THE RESET PATH, which a backend outside every pool takes, and which
+	// part B's broker reuses. A backend in a connection pool is never reused
+	// (reusesBackend), so this matrix runs with no pools: the target's one
+	// backend then serves every session in turn, and the cells prove the reset
+	// clears what each leaves behind.
+	f.eng.pools = nil
+
 	// ONE physical connection for this target, set BEFORE the pool is opened.
 	// The pool is built on first use and cached, so a bound applied afterwards
 	// would be ignored and the matrix would quietly test nothing.

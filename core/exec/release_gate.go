@@ -191,7 +191,7 @@ func (v releaseVerdict) reason() string {
 // physical connection is closed. There is no path out of this function that
 // leaves the lease held.
 func (e *Engine) releaseBackend(ctx context.Context, s *session, pc golibpg.PinnedConn, txResidue error) releaseVerdict {
-	if !e.reusesBackend(s.connID) {
+	if s != nil && !e.reusesBackend(s.connID) {
 		e.destroyBackend(ctx, pc)
 		return releaseVerdict{limb: releaseLimbNotReused, detail: "a backend in a connection pool is closed, never reused"}
 	}

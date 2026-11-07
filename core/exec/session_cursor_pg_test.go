@@ -402,10 +402,10 @@ func TestSessionCursorPG_TheJanitorEndsAnIdleOrOldCursor(t *testing.T) {
 	}
 }
 
-// After a cursor ends its backend goes back to the pool clean: the next
-// borrower of that backend sees no portal, no prepared statement and the
-// default settings.
-func TestSessionCursorPG_TheBackendGoesBackClean(t *testing.T) {
+// After a cursor ends, its backend is CLOSED, not returned: a backend in a
+// connection pool is never reused (reusesBackend), so nothing the cursor left
+// on it can reach the next borrower, and its permit goes straight back.
+func TestSessionCursorPG_TheCursorsBackendIsClosedNotReused(t *testing.T) {
 	f, connID, sid, _ := cursorSession(t)
 	ctx := context.Background()
 	s := sessionOf(t, f, sid)
@@ -416,30 +416,23 @@ func TestSessionCursorPG_TheBackendGoesBackClean(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 	assertCursorGone(t, s, "the close")
-	if !auditMentions(t, f, "reset verified; returned to the pool") {
-		t.Error("the release gate did not return the cursor's backend to the pool")
+	if !auditMentions(t, f, "a backend in a connection pool is closed, never reused") {
+		t.Error("the release gate did not record the cursor's backend as closed")
 	}
-
-	// The probe's own portal and pgx's statement for it are on the backend
-	// too, so only the cursor's names count.
-	const probe = "SELECT pg_backend_pid(), (SELECT count(*) FROM pg_cursors WHERE name <> ''), " +
-		"(SELECT count(*) FROM pg_prepared_statements WHERE name LIKE 'cur-%'), " +
-		"current_setting('idle_in_transaction_session_timeout'), current_setting('transaction_read_only')"
+	// The close is synchronous at the driver, but the server notices the
+	// socket going a moment later.
+	probe := "SELECT count(*) FROM pg_stat_activity WHERE pid = " + pid
 	for try := 0; try < 40; try++ {
 		res, err := f.eng.Execute(ctx, f.rootTok, connID, probe, testIP)
 		if err != nil {
 			t.Fatalf("probe: %v", err)
 		}
-		r := res.Rows[0]
-		if fmt.Sprint(r[0]) != pid {
-			continue
+		if fmt.Sprint(res.Rows[0][0]) == "0" {
+			return
 		}
-		if got := fmt.Sprint(r[1], " ", r[2], " ", r[3], " ", r[4]); got != "0 0 0 off" {
-			t.Errorf("the cursor's backend came back with cursors, prepared statements, belt, read-only = %s; want 0 0 0 off", got)
-		}
-		return
+		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("40 pool reads never reached backend %s: the cell observed nothing", pid)
+	t.Fatalf("the cursor's backend %s is still connected: it was returned to the pool, not closed", pid)
 }
 
 // With the engine's own deadline never run, PostgreSQL's belt ends a backend

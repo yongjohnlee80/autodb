@@ -659,6 +659,9 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	// this changes only WHEN they are issued, and a capacity refusal now means
 	// the instance really had nothing coming rather than nothing at that
 	// instant. See scheduler.go.
+	// The lease is counted under the connection's pool, so the pools must know
+	// it before the first admission, loaded or not.
+	e.pools.ensurePoolOf(connRow)
 	if rerr := e.sessions.admitWithLeaseOrWait(ctx, s, connRow.ID, WireSessionOverhead); rerr != nil {
 		cancel()
 		// AUTHORIZED HERE, WHERE IT WAS ESTABLISHED. This is the reservation

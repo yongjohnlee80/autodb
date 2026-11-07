@@ -275,17 +275,25 @@ func (e *Engine) sqlPoolLimits(row *meta.Connection) func(*sql.DB) {
 // nothing of pgxpool's own: every hook that ties the pgxpool to the ledger is
 // installed here, in one place.
 func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
-	// Recorded before the ledger is read, so every pgx target that has ever
-	// been opened is known to the pools, loaded or not (pools.go).
-	e.pools.setPoolOf(row)
+	// Recorded before the ledger is read if the pools don't know it yet
+	// (ensurePoolOf), so every pgx target that has ever been opened is known.
+	e.pools.ensurePoolOf(row)
 	ledger := e.pools.ledgerFor(row.ID) // captured at build: a socket dies on the ledger that granted it
 	connID := row.ID
-	_, _, lifetime := e.poolLimitsFor(row)
+	max, idle, lifetime := e.poolLimitsFor(row)
 	return func(cfg *pgxpool.Config) {
 		if lifetime > 0 {
 			cfg.MaxConnLifetime = lifetime
 		}
+		// OUTSIDE EVERY POOL (an engine with no pools): the connection's own
+		// cap, exactly as MySQL and SQLite get it, and its backends are reused.
 		if ledger == nil {
+			if max > 0 {
+				cfg.MaxConns = int32(max)
+			}
+			if idle > 0 {
+				cfg.MaxConnIdleTime = idle
+			}
 			return
 		}
 		// NEVER BINDS: the ledger refuses the dial first, so a raised pool max

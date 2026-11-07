@@ -178,28 +178,36 @@ func livePool(t *testing.T, budget, poolMax int) (*pgxpool.Pool, *permitLedger) 
 func saturate(t *testing.T, pool *pgxpool.Pool, l *permitLedger) []*pgxpool.Conn {
 	t.Helper()
 	var held []*pgxpool.Conn
-	ordinary := l.Snapshot().OrdinaryLimit
-	for len(held) < ordinary {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		c, err := pool.Acquire(ctx)
-		cancel()
-		if err != nil {
-			t.Fatalf("acquiring ordinary connection %d of %d: %v", len(held)+1, ordinary, err)
+	snap := l.Snapshot()
+	// BOTH SHARES: the headroom with unmarked acquisitions, then the front
+	// door's with marked ones, so the only capacity left is the control lane.
+	shares := []struct {
+		class DialClass
+		n     int
+	}{{DialOrdinary, snap.OrdinaryLimit}, {DialFrontDoor, snap.FrontDoorLimit}}
+	for _, sh := range shares {
+		for range sh.n {
+			ctx, cancel := context.WithTimeout(withDialIntent(context.Background(), &dialIntent{class: sh.class}), 10*time.Second)
+			c, err := pool.Acquire(ctx)
+			cancel()
+			if err != nil {
+				t.Fatalf("acquiring %v connection %d of %d: %v", sh.class, len(held)+1, sh.n, err)
+			}
+			// Force the physical dial: an acquired-but-unused pool entry may not
+			// have opened a socket, and it is the SOCKET the ledger counts.
+			if _, err := c.Exec(context.Background(), "SELECT 1"); err != nil {
+				t.Fatalf("priming connection %d: %v", len(held)+1, err)
+			}
+			held = append(held, c)
 		}
-		// Force the physical dial: an acquired-but-unused pool entry may not
-		// have opened a socket, and it is the SOCKET the ledger counts.
-		if _, err := c.Exec(context.Background(), "SELECT 1"); err != nil {
-			t.Fatalf("priming connection %d: %v", len(held)+1, err)
-		}
-		held = append(held, c)
 	}
 	t.Cleanup(func() {
 		for _, c := range held {
 			c.Release()
 		}
 	})
-	if got := l.Snapshot().Outstanding; got != ordinary {
-		t.Fatalf("outstanding = %d after saturating, want %d", got, ordinary)
+	if got, want := l.Snapshot().Outstanding, snap.OrdinaryLimit+snap.FrontDoorLimit; got != want {
+		t.Fatalf("outstanding = %d after saturating, want %d", got, want)
 	}
 	return held
 }
@@ -376,11 +384,12 @@ func TestLivePG_ControlAccountingIsExactWhileTheLaneIsOccupied(t *testing.T) {
 	held := saturate(t, pool, ledger)
 	obs := observer(t)
 
-	// Steady state at Configured 50: O=49, K=0, Effective = max(50, 49+1).
-	if s := ledger.Snapshot(); s.Ordinary != 49 || s.Control != 0 ||
+	// Steady state at Configured 50: headroom 4 + front door 45 = 49 held,
+	// K=0, Effective = max(50, 49+1).
+	if s := ledger.Snapshot(); s.Ordinary != 4 || s.FrontDoor != 45 || s.Control != 0 ||
 		s.Outstanding != 49 || s.Effective != 50 {
-		t.Fatalf("steady: O=%d K=%d out=%d eff=%d, want 49/0/49/50",
-			s.Ordinary, s.Control, s.Outstanding, s.Effective)
+		t.Fatalf("steady: O=%d F=%d K=%d out=%d eff=%d, want 4/45/0/49/50",
+			s.Ordinary, s.FrontDoor, s.Control, s.Outstanding, s.Effective)
 	}
 
 	var pid int32
@@ -401,9 +410,9 @@ func TestLivePG_ControlAccountingIsExactWhileTheLaneIsOccupied(t *testing.T) {
 
 	// OCCUPIED, held still: 49 / 1 / 50 / 50.
 	s := ledger.Snapshot()
-	if s.Ordinary != 49 || s.Control != 1 || s.Outstanding != 50 || s.Effective != 50 {
-		t.Errorf("occupied: O=%d K=%d out=%d eff=%d, want 49/1/50/50",
-			s.Ordinary, s.Control, s.Outstanding, s.Effective)
+	if s.Control != 1 || s.Outstanding != 50 || s.Effective != 50 {
+		t.Errorf("occupied: K=%d out=%d eff=%d, want 1/50/50",
+			s.Control, s.Outstanding, s.Effective)
 	}
 	barrier.release()
 	awaitTerminated(t, obs, pid, 10*time.Second)
@@ -420,9 +429,9 @@ func TestLivePG_DrainAccountingHoldsAcrossCancelOccupancy(t *testing.T) {
 		t.Fatal(err)
 	}
 	idle := ledger.Snapshot()
-	if idle.Ordinary != 49 || idle.Control != 0 || idle.Outstanding != 49 || idle.Effective != 50 {
-		t.Fatalf("idle lane after 50->25: O=%d K=%d out=%d eff=%d, want 49/0/49/50",
-			idle.Ordinary, idle.Control, idle.Outstanding, idle.Effective)
+	if idle.Control != 0 || idle.Outstanding != 49 || idle.Effective != 50 || !idle.Draining {
+		t.Fatalf("idle lane after 50->25: K=%d out=%d eff=%d draining=%v, want 0/49/50/true",
+			idle.Control, idle.Outstanding, idle.Effective, idle.Draining)
 	}
 
 	var pid int32
@@ -442,9 +451,9 @@ func TestLivePG_DrainAccountingHoldsAcrossCancelOccupancy(t *testing.T) {
 	}
 
 	occ := ledger.Snapshot()
-	if occ.Ordinary != 49 || occ.Control != 1 || occ.Outstanding != 50 || occ.Effective != 50 {
-		t.Errorf("occupied during drain: O=%d K=%d out=%d eff=%d, want 49/1/50/50",
-			occ.Ordinary, occ.Control, occ.Outstanding, occ.Effective)
+	if occ.Control != 1 || occ.Outstanding != 50 || occ.Effective != 50 {
+		t.Errorf("occupied during drain: K=%d out=%d eff=%d, want 1/50/50",
+			occ.Control, occ.Outstanding, occ.Effective)
 	}
 	if occ.Effective != idle.Effective {
 		t.Errorf("the ceiling moved %d -> %d when the lane filled; a drain generation's "+
@@ -463,9 +472,9 @@ func TestLivePG_DrainAccountingHoldsAcrossCancelOccupancy(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if rel.Ordinary != 49 || rel.Control != 0 || rel.Outstanding != 49 || rel.Effective != 50 {
-		t.Errorf("released: O=%d K=%d out=%d eff=%d, want 49/0/49/50",
-			rel.Ordinary, rel.Control, rel.Outstanding, rel.Effective)
+	if rel.Control != 0 || rel.Outstanding != 49 || rel.Effective != 50 {
+		t.Errorf("released: K=%d out=%d eff=%d, want 0/49/50",
+			rel.Control, rel.Outstanding, rel.Effective)
 	}
 }
 

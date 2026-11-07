@@ -206,3 +206,25 @@ func TestValidateSessionLimits(t *testing.T) {
 		t.Errorf("a global cap one above the reservation was refused: %v", err)
 	}
 }
+
+// WithDefaultPoolMax sizes the default pool an engine starts with, and a new
+// PostgreSQL connection's front-door sessions count against that pool's share.
+func TestWithDefaultPoolMax_SizesTheDefaultPoolsShare(t *testing.T) {
+	t.Parallel()
+	e := New(nil, nil, WithDefaultPoolMax(3))
+	if got := e.pools.ledgerFor(0); got != nil {
+		t.Fatal("connection 0 resolved to a ledger")
+	}
+	e.pools.ensurePoolOf(&meta.Connection{ID: 5, Engine: "postgres", PoolID: meta.DefaultPoolID})
+	key, limit := e.sessions.leaseScope(5)
+	if key != (leaseKey{pool: meta.DefaultPoolID}) || limit != 1 {
+		t.Fatalf("a default pool of 3 scopes connection 5 to %+v with limit %d, want the default pool's 1", key, limit)
+	}
+	first := &session{id: "first", userID: 1, connID: 5}
+	if err := e.sessions.admitWithLease(first, 5, 0); err != nil {
+		t.Fatalf("first front-door session: %v", err)
+	}
+	if err := e.sessions.admitWithLease(&session{id: "second", userID: 2, connID: 5}, 5, 0); !errors.Is(err, ErrLeaseCapExceeded) {
+		t.Fatalf("a second front-door session in a share of 1 = %v, want ErrLeaseCapExceeded", err)
+	}
+}
