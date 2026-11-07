@@ -45,12 +45,12 @@ func TestExecOptions_EveryConfiguredValueReachesTheEngine(t *testing.T) {
 		JanitorInterval:      config.Duration(2 * time.Second),
 	}
 
-	// The front door's two registry-scoped bounds come from ITS section, and
-	// until F0f nothing wired either: both were zero in a running daemon,
-	// which means the lease cap and the resident budget did not exist
-	// outside tests.
+	// The front door's memory bound comes from ITS section, and until F0f
+	// nothing wired it: it was zero in a running daemon, which means it did
+	// not exist outside tests. (The lease limit is each pool's front-door
+	// share, from the meta store.)
 	cfg.FrontDoor = config.FrontDoor{
-		Enabled: true, MaxLeases: 5, ResidentBudgetBytes: 12345678,
+		Enabled: true, ResidentBudgetBytes: 12345678,
 	}
 
 	eng := coreexec.New(nil, nil, execOptions(cfg, func(string) {})...)
@@ -72,7 +72,6 @@ func TestExecOptions_EveryConfiguredValueReachesTheEngine(t *testing.T) {
 		{"pool_max_conns", got.PoolMaxConns, 6, "a target's connection budget was bounded by the default"},
 		{"pool_max_conn_idle_time", got.PoolMaxConnIdleTime, 21 * time.Second, ""},
 		{"pool_max_conn_lifetime", got.PoolMaxConnLifetime, 23 * time.Minute, ""},
-		{"frontdoor.max_leases", got.LeaseCap, 5, "the per-target wire-lease cap was zero, which is no cap at all"},
 		{"frontdoor.resident_budget_bytes", got.ResidentBudget, int64(12345678), "the wire sessions' memory budget was zero, which is no budget at all"},
 	} {
 		if c.got != c.want {
@@ -610,11 +609,10 @@ func TestPolicyRules_TheReloadAgreesWithTheConfigFile(t *testing.T) {
 			PoolMaxConnIdleTime:  config.Duration(10 * time.Minute),
 			PoolMaxConnLifetime:  config.Duration(60 * time.Minute),
 			JanitorInterval:      config.Duration(9 * time.Second),
-			MaxTargetConns:       25,
 		}
 		c.Meta = config.Meta{Engine: "sqlite", Path: ":memory:"}
 		c.FrontDoor = config.FrontDoor{
-			Enabled: true, Bind: "127.0.0.1:6543", MaxLeases: 4, ResidentBudgetBytes: 1 << 30,
+			Enabled: true, Bind: "127.0.0.1:6543", ResidentBudgetBytes: 1 << 30,
 			TLSCertFile: "/dev/null", TLSKeyFile: "/dev/null",
 			TLSHostNames: []string{"autodb.example"},
 		}
@@ -638,7 +636,6 @@ func TestPolicyRules_TheReloadAgreesWithTheConfigFile(t *testing.T) {
 		{"a zero session idle bound", func(e *config.Exec) { e.SessionIdleTimeout = 0 }},
 		{"a maximum above the ceiling", func(e *config.Exec) { e.MaxTxDuration = config.Duration(9 * time.Hour) }},
 		{"a session idle longer than the pool's", func(e *config.Exec) { e.SessionIdleTimeout = config.Duration(11 * time.Minute) }},
-		{"a budget of one", func(e *config.Exec) { e.MaxTargetConns = 1 }},
 		{"an idle bound below the sweep interval", func(e *config.Exec) {
 			e.IdleInTxTimeout = config.Duration(5 * time.Second)
 			e.DebugIdleInTxTimeout = config.Duration(5 * time.Second)
@@ -659,7 +656,6 @@ func TestPolicyRules_TheReloadAgreesWithTheConfigFile(t *testing.T) {
 			IdleInTxTimeout:      cfg.Exec.IdleInTxTimeout.Duration(),
 			MaxTxDuration:        cfg.Exec.MaxTxDuration.Duration(),
 			MaxTxDurationCeiling: cfg.Exec.MaxTxDurationCeiling.Duration(),
-			MaxTargetConns:       cfg.Exec.MaxTargetConns,
 		}
 
 		cerr := cfg.Validate()

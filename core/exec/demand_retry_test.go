@@ -17,7 +17,7 @@ import (
 func demandEngineWith(t *testing.T, leaseCap int, holders ...*session) *Engine {
 	t.Helper()
 	e := New(nil, nil)
-	e.sessions.leaseCap = leaseCap
+	e.sessions.pools = fixedLeases(leaseCap)
 	for _, s := range holders {
 		if err := e.sessions.admitWithLease(s, s.connID, 0); err != nil {
 			t.Fatalf("seeding holder %s: %v", s.id, err)
@@ -186,7 +186,7 @@ func TestDemandRetry_ACancelledRequestLeavesNoDemandBehind(t *testing.T) {
 		t.Fatal("the cancelled request never returned")
 	}
 
-	if r.demandOutstanding(7) {
+	if r.demandOutstanding(connKey(7)) {
 		t.Error("the target still reports unanswered demand after the only request waiting " +
 			"on it gave up")
 	}
@@ -263,7 +263,7 @@ func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
 		done.Add(1)
 		go func() {
 			defer done.Done()
-			r.pressDemand(7)
+			r.pressDemand(connKey(7))
 		}()
 	}
 
@@ -290,7 +290,7 @@ func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
 			"a demand unit checked in one critical section and spent in another is read "+
 			"as unspent by everybody who looks before the first one records it", reserved)
 	}
-	if n := r.promisedCount(7); n != 1 {
+	if n := r.promisedCount(connKey(7)); n != 1 {
 		t.Errorf("%d promises recorded for one waiter, want 1", n)
 	}
 	open := 0
@@ -338,14 +338,14 @@ func TestDemandRetry_AnOfferAfterTheWaiterHasGoneReservesNobody(t *testing.T) {
 
 	// And the reservation is attempted directly too, so the refusal is proved
 	// at the commit point and not merely at pressDemand's early check.
-	if v, ok := r.reserveDemandVictim(7, now); ok {
+	if v, ok := r.reserveDemandVictim(connKey(7), now); ok {
 		t.Errorf("reserved %q for a request that had already gone; the claim is what "+
 			"authorises ending somebody's session, and there was none to spend", v.s.id)
 	}
 	if holder.get() != sessOpen {
 		t.Error("an idle holder was ended although nobody was waiting for its lease")
 	}
-	if n := r.promisedCount(7); n != 0 {
+	if n := r.promisedCount(connKey(7)); n != 0 {
 		t.Errorf("%d promises recorded with no waiter, want 0", n)
 	}
 }

@@ -67,58 +67,13 @@ chmod +x /usr/local/bin/systemctl
 
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 
-# THE BUDGET REFUSAL MUST FIRE BEFORE THE FIRST SIDE EFFECT OF ANY KIND.
-#
-# Not merely before the config write. An earlier version refused only after the
-# run had created a service account, made and chowned directories, and
-# installed, enabled and started PostgreSQL -- a host extensively changed by a
-# run that was never going to succeed.
-#
-# Runs as root here, the only place --apply reaches these paths at all: outside
-# a container it refuses for lack of root first, so a test there would pass
-# without exercising any of this.
-echo "--- install_frontdoor.sh --apply, budget omitted"
-mkdir -p /etc/autodb
-printf '[exec]\nmax_target_conns = 7\n' > /etc/autodb/config.toml
-cp -p /etc/autodb/config.toml /tmp/config.before
-BEFORE_USER=no; id autodb >/dev/null 2>&1 && BEFORE_USER=yes
-
-sh /opt/install_frontdoor.sh --apply --non-interactive \
-   --assume-ram 961 --assume-cpus 1 \
-   --rpc-port 7419 --dns-name db.example.com --port 5432 \
-   > /tmp/omit.log 2>&1 && { cat /tmp/omit.log; fail "omitting max_target_conns was accepted"; }
-grep -q "max_target_conns" /tmp/omit.log \
-  || { cat /tmp/omit.log; fail "the run refused for some other reason, so this proves nothing"; }
-
-# Nothing may have been created. Each of these fails if validation drifts back
-# below the corresponding step.
-if [ "$BEFORE_USER" = "no" ]; then
-  id autodb >/dev/null 2>&1 \
-    && fail "a refused run created the service account -- validation moved below useradd"
-fi
-[ -e /var/lib/autodb ] \
-  && fail "a refused run created the state directory"
-[ -e /etc/autodb/keys ] \
-  && fail "a refused run created the key directory"
-[ -e /etc/systemd/system/autodb-frontdoor.service ] \
-  && fail "a refused run wrote the systemd unit"
-[ -e /etc/autodb/config.toml.bak ] \
-  && fail "a refused run wrote a config backup"
-cmp -s /etc/autodb/config.toml /tmp/config.before \
-  || fail "a refused run rewrote the existing config"
-grep -q "enable --now" /tmp/systemctl.log 2>/dev/null \
-  && fail "a refused run acted on a service"
-command -v psql >/dev/null 2>&1 && {
-  su - postgres -c "psql -tAc \"select 1 from pg_roles where rolname='autodb'\"" 2>/dev/null \
-    | grep -q 1 && fail "a refused run created the database role"
-}
-rm -f /etc/autodb/config.toml
+# (was: the budget refusal, which had to fire before the first side effect.
+# exec.max_target_conns is retired -- socket budgets are per connection pool in
+# the meta store -- so the installer no longer has a mandatory answer to refuse
+# on.)
 
 echo "--- install_frontdoor.sh --apply"
-# --max-target-conns is REQUIRED for --apply: exec.max_target_conns has no
-# default, and a non-interactive run that omits it is refused before anything
-# is written.
-sh /opt/install_frontdoor.sh --apply --non-interactive --max-target-conns 25 \
+sh /opt/install_frontdoor.sh --apply --non-interactive \
    --assume-ram 961 --assume-cpus 1 \
    --rpc-port 7419 --dns-name db.example.com --port 5432 \
    > /tmp/install.log 2>&1 || { cat /tmp/install.log; fail "install --apply exited non-zero"; }

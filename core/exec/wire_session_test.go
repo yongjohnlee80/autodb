@@ -318,7 +318,7 @@ func TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal(t *te
 	t.Parallel()
 	f, _, secret, dbName := wireFixture(t)
 	ctx := context.Background()
-	f.eng.sessions.leaseCap = 1
+	f.eng.sessions.pools = fixedLeases(1)
 	// Expire the wait instead of sitting out ninety real seconds of it.
 	f.eng.sessions.newTimer = func(time.Duration) *time.Timer {
 		return time.NewTimer(20 * time.Millisecond)
@@ -386,7 +386,7 @@ func TestAdmissionWait_TheBlockingCapIsDiagnosisAndNotAnIdentity(t *testing.T) {
 func TestAdmitWithLease_AnImmediateCapRefusalKeepsItsOwnIdentity(t *testing.T) {
 	t.Parallel()
 	r := newSessionRegistry(64, 64)
-	r.leaseCap = 1
+	r.pools = fixedLeases(1)
 	if err := r.admitWithLease(&session{id: "first", userID: 1, connID: 7}, 7, 0); err != nil {
 		t.Fatal(err)
 	}

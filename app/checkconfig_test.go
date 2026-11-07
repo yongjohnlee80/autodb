@@ -47,9 +47,12 @@ path = "` + filepath.Join(dir, "meta.db") + `"
 }
 
 const (
-	budgetSet    = "\n[exec]\nmax_target_conns = 25\n"
-	frontDoorOff = "\n[frontdoor]\nenabled = false\n"
-	frontDoorOn  = "\n[frontdoor]\nenabled = true\n" +
+	execSet = "\n[exec]\nmax_sessions_global = 64\n"
+	// sessionsHazard leaves the front door nothing once the slots kept for
+	// exec and the TUI are held back: the refusal loadConfig adds.
+	sessionsHazard = "\n[exec]\nmax_sessions_global = 16\n"
+	frontDoorOff   = "\n[frontdoor]\nenabled = false\n"
+	frontDoorOn    = "\n[frontdoor]\nenabled = true\n" +
 		"tls_cert_file = \"/etc/autodb/cert.pem\"\n" +
 		"tls_key_file = \"/etc/autodb/key.pem\"\n" +
 		"tls_host_names = [\"autodb.example.com\"]\n"
@@ -130,7 +133,7 @@ func seedStoreAndKey(t *testing.T, dir string) {
 
 func TestCheckConfig_AcceptsAConfigTheDaemonWouldLoad(t *testing.T) {
 	bin := buildAutodb(t)
-	cfg := serviceConfig(t, budgetSet, frontDoorOff)
+	cfg := serviceConfig(t, execSet, frontDoorOff)
 	dir := filepath.Dir(cfg)
 	seedStoreAndKey(t, dir)
 
@@ -197,15 +200,14 @@ func TestCheckConfig_AcceptsAConfigTheDaemonWouldLoad(t *testing.T) {
 	}
 }
 
-// The droplet's own shape: the front door ON and the budget ABSENT, which is
-// the transition that took a host down. Exit 78 is asserted by the entry-point
-// table in exitcode_test.go; what this adds is that the NAME reaches the
-// operator, because "78" alone sends them to read a file without saying which
-// line is wrong.
+// A configuration the daemon would refuse: the front door ON with a global
+// session cap the exec reservation leaves nothing of. Exit 78 is asserted by the
+// entry-point table in exitcode_test.go; what this adds is that the NAME reaches
+// the operator, because "78" alone sends them to read a file without saying
+// which line is wrong.
 func TestCheckConfig_RefusesTheUpgradeHazardAndNamesTheSetting(t *testing.T) {
 	bin := buildAutodb(t)
-	// The droplet's shape exactly: the surface ON and the budget ABSENT.
-	cfg := serviceConfig(t, "", frontDoorOn)
+	cfg := serviceConfig(t, sessionsHazard, frontDoorOn)
 
 	cmd := exec.Command(bin, "--config", cfg, "--check-config")
 	out, _ := cmd.CombinedOutput()
@@ -219,7 +221,7 @@ func TestCheckConfig_RefusesTheUpgradeHazardAndNamesTheSetting(t *testing.T) {
 	// anywhere, which a completely different refusal -- an unknown key -- also
 	// satisfied, so the cell passed without the constraint it exists for ever
 	// being reached.
-	if !strings.Contains(body, "exec.max_target_conns") {
+	if !strings.Contains(body, "exec.max_sessions_global") {
 		t.Errorf("the refusal does not name the setting, so the operator is told to fix "+
 			"a file without being told which line:\n%s", body)
 	}

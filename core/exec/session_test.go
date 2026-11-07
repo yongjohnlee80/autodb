@@ -284,7 +284,7 @@ func TestSessionRegistry_DrainingBlocksAConcurrentAdmit(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				for _, s := range r.setDraining(42) {
+				for _, s := range r.setDraining(42, drainRemoved) {
 					drained[s.id] = true
 				}
 				competing = r.admit(&session{id: "after-drain", userID: 1, connID: 42})
@@ -313,7 +313,7 @@ func TestSessionRegistry_DrainingBlocksAConcurrentAdmit(t *testing.T) {
 	r.mu.Lock()
 	var stranded []SessionID
 	for id, s := range r.byID {
-		if r.draining[s.connID] && !drained[id] {
+		if r.draining[s.connID] != 0 && !drained[id] {
 			stranded = append(stranded, id)
 		}
 	}
@@ -333,8 +333,8 @@ func TestSessionRegistry_ClearDrainingRestoresTheConnection(t *testing.T) {
 	t.Parallel()
 
 	r := newSessionRegistry(4, 8)
-	r.setDraining(9)
-	if !r.isDraining(9) {
+	r.setDraining(9, drainRemoved)
+	if r.drainErr(9) == nil {
 		t.Fatal("connection should be draining")
 	}
 	if err := r.admit(&session{id: "x", userID: 1, connID: 9}); !errors.Is(err, ErrConnectionDraining) {

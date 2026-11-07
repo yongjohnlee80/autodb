@@ -54,7 +54,7 @@ import (
 // where a leak would survive.
 func TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease(t *testing.T) {
 	// A cap of one, which is what turns the whole question into an observation.
-	l := pgLoopFull(t, exec.WithLeaseCap(1))
+	l := pgLoopFull(t, exec.WithDefaultPoolMax(3)) // a front-door share of 1
 	conn, fe := pgClientWithConn(t, l.addr, l.secret, l.database)
 
 	// 1. A GOES MID-SEGMENT. Execute, Flush, no Sync.

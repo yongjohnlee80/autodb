@@ -15,7 +15,7 @@ func TestReadings_TheyAreDerivedAndNothingIsInvented(t *testing.T) {
 	c := Caps{
 		Sessions: 3, SessionCap: 10,
 		PerUser: map[int64]int{7: 2, 9: 1}, PerUserCap: 4,
-		Leases: map[int64]int{100: 5}, LeaseCap: 5,
+		Leases: leaseRows(map[int64]int{100: 5}, 5),
 	}
 	first := Readings(c, 2, []string{"10.0.0.1"})
 	second := Readings(c, 2, []string{"10.0.0.1"})
@@ -39,7 +39,7 @@ func TestReadings_TheyAreDerivedAndNothingIsInvented(t *testing.T) {
 // "No limit configured" must not become a row that can never raise. An operator
 // who learns to skip a row learns to skip rows.
 func TestReadings_UnconfiguredCapsProduceNoRows(t *testing.T) {
-	got := Readings(Caps{Sessions: 99, PerUser: map[int64]int{1: 9}, Leases: map[int64]int{2: 9}}, 0, nil)
+	got := Readings(Caps{Sessions: 99, PerUser: map[int64]int{1: 9}, Leases: leaseRows(map[int64]int{2: 9}, 0)}, 0, nil)
 	for _, r := range got {
 		if r.Kind == Occupancy {
 			t.Errorf("%s was emitted with every cap unconfigured", r.ID)

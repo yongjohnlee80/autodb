@@ -111,7 +111,7 @@ func (b *dialBarrier) dialFunc() func(context.Context, string, string) (net.Conn
 		b.mu.Lock()
 		armed := b.arm
 		b.mu.Unlock()
-		if armed && isControlDial(ctx) {
+		if armed && dialMarkOf(ctx).class() == DialControl {
 			b.entered <- addr
 			select {
 			case <-b.gate:
@@ -131,21 +131,22 @@ func livePoolWithBarrier(t *testing.T, budget, poolMax int) (*pgxpool.Pool, *per
 	if dsn == "" {
 		t.Skip("TEST_PGURL not set; skipping live cancellation test")
 	}
-	e := New(nil, nil, WithTargetConnBudget(budget), WithPoolLimits(poolMax, 0, 0))
+	e := New(nil, nil, WithPoolLimits(poolMax, 0, 0))
+	row := e.testDefaultPool(t, budget)
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatalf("parsing TEST_PGURL: %v", err)
 	}
 	b := newDialBarrier()
 	cfg.ConnConfig.DialFunc = b.dialFunc() // UNDER the production wrapper
-	e.pgPoolLimits(nil)(cfg)
+	e.pgPoolLimits(row)(cfg)
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("opening the pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	return pool, e.targetPermits, b
+	return pool, e.pools.ledgerFor(row.ID), b
 }
 
 func livePool(t *testing.T, budget, poolMax int) (*pgxpool.Pool, *permitLedger) {
@@ -155,23 +156,25 @@ func livePool(t *testing.T, budget, poolMax int) (*pgxpool.Pool, *permitLedger) 
 		t.Skip("TEST_PGURL not set; skipping live cancellation test")
 	}
 
-	e := New(nil, nil, WithTargetConnBudget(budget), WithPoolLimits(poolMax, 0, 0))
+	e := New(nil, nil, WithPoolLimits(poolMax, 0, 0))
+	row := e.testDefaultPool(t, budget)
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatalf("parsing TEST_PGURL: %v", err)
 	}
-	e.pgPoolLimits(nil)(cfg)
+	e.pgPoolLimits(row)(cfg)
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("opening the pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	return pool, e.targetPermits
+	return pool, e.pools.ledgerFor(row.ID)
 }
 
-// saturate takes every ORDINARY slot, so the only capacity left is the
-// reserved control lane.
+// saturate takes every slot of the headroom share (unmarked acquisitions are
+// ordinary work), so the only capacity that work has left is the reserved
+// control lane.
 func saturate(t *testing.T, pool *pgxpool.Pool, l *permitLedger) []*pgxpool.Conn {
 	t.Helper()
 	var held []*pgxpool.Conn
@@ -231,7 +234,7 @@ func occupy(t *testing.T, conn *pgxpool.Conn, ctx context.Context) {
 // busy. Before the reserved lane existed, the cancel dial was charged to the
 // ordinary allowance and refused here.
 func TestLivePG_CancellationWorksAtOrdinarySaturation(t *testing.T) {
-	pool, ledger := livePool(t, 6, 16) // 5 ordinary + 1 reserved
+	pool, ledger := livePool(t, 6, 16) // headroom 3 + front door 2 + 1 reserved
 	held := saturate(t, pool, ledger)
 
 	// The cancel travels on its own socket; the query runs on a held one.
@@ -269,7 +272,7 @@ func TestLivePG_CancellationWorksAtOrdinarySaturation(t *testing.T) {
 // by definition while draining, so a control lane that re-tested against it
 // would refuse a cancel precisely when the system is most loaded.
 func TestLivePG_CancellationWorksDuringADrain(t *testing.T) {
-	pool, ledger := livePool(t, 10, 24) // 9 ordinary + 1 reserved
+	pool, ledger := livePool(t, 10, 24) // headroom 4 + front door 5 + 1 reserved
 	held := saturate(t, pool, ledger)
 
 	// Lower the budget under the live sockets: nothing is killed, and no new
@@ -311,7 +314,7 @@ func TestLivePG_CancellationWorksDuringADrain(t *testing.T) {
 // TestLivePG_OnlyOneControlDialEntersAtATime, which holds the first dial still
 // and shows the second has not entered.
 func TestLivePG_BothConcurrentCancellationsAreDelivered(t *testing.T) {
-	pool, ledger := livePool(t, 8, 24) // 7 ordinary + 1 reserved
+	pool, ledger := livePool(t, 8, 24) // headroom 4 + front door 3 + 1 reserved
 	held := saturate(t, pool, ledger)
 
 	// EACH GOROUTINE GETS ITS OWN OBSERVER. A pgx conn is not safe for

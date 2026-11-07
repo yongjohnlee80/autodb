@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -24,19 +25,15 @@ func goodSpec() PolicySpec {
 		IdleInTxTimeout:      90 * time.Minute,
 		MaxTxDuration:        6 * time.Hour,
 		MaxTxDurationCeiling: 8 * time.Hour,
-		MaxTargetConns:       40,
 	}
 }
 
-// policyFixture is a fixture whose engine carries a connection budget, so the
-// ledger half of the publication is exercised rather than skipped.
+// policyFixture is a fixture whose engine is built the way a daemon builds it.
 func policyFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := newFixture(t)
-	// The fixture's engine is built without a ledger; replace it with one
-	// built the way a front-door daemon builds it.
 	old := f.eng
-	f.eng = New(f.store, f.svc, WithMaxRows(3), WithTargetConnBudget(25))
+	f.eng = New(f.store, f.svc, WithMaxRows(3))
 	t.Cleanup(func() { _ = f.eng.Close() })
 	_ = old.Close()
 	return f
@@ -64,7 +61,7 @@ func TestReloadPolicy_RefusesAnyoneWhoIsNotAnAdmin(t *testing.T) {
 	if _, err := f.eng.ReloadPolicy(ctx, "not-a-token", goodSpec(), testIP); err == nil {
 		t.Error("an unauthenticated reload succeeded")
 	}
-	if got := f.eng.Settings(); got != before {
+	if got := f.eng.Settings(); !reflect.DeepEqual(got, before) {
 		t.Errorf("a refused reload changed the live settings:\n before %+v\n after  %+v", before, got)
 	}
 	if n := f.auditCount(t, "policy_reloaded"); n != 0 {
@@ -90,15 +87,10 @@ func TestReloadPolicy_AnInvalidSpecChangesNothing(t *testing.T) {
 		spec PolicySpec
 	}{
 		{"a zero duration", PolicySpec{IdleInTxTimeout: time.Hour, MaxTxDuration: time.Hour,
-			MaxTxDurationCeiling: time.Hour, MaxTargetConns: 25}},
+			MaxTxDurationCeiling: time.Hour}},
 		{"a max above the ceiling", func() PolicySpec {
 			s := goodSpec()
 			s.MaxTxDuration = 9 * time.Hour
-			return s
-		}()},
-		{"a budget of one", func() PolicySpec {
-			s := goodSpec()
-			s.MaxTargetConns = 1
 			return s
 		}()},
 		{"a session idle longer than the pool's", func() PolicySpec {
@@ -112,7 +104,7 @@ func TestReloadPolicy_AnInvalidSpecChangesNothing(t *testing.T) {
 		}
 	}
 
-	if got := f.eng.Settings(); got != before {
+	if got := f.eng.Settings(); !reflect.DeepEqual(got, before) {
 		t.Errorf("a refused spec moved the live settings:\n before %+v\n after  %+v", before, got)
 	}
 	if _, ok, _ := f.store.GetMeta(ctx, policyStoreKey); ok {
@@ -167,7 +159,6 @@ func TestReloadPolicy_PublishesTheBoundsAsOneGeneration(t *testing.T) {
 		{"idle in tx", got.IdleInTxTimeout, 90 * time.Minute},
 		{"max tx", got.MaxTxDuration, 6 * time.Hour},
 		{"ceiling", got.MaxTxDurationCeiling, 8 * time.Hour},
-		{"budget", got.TargetConns.Configured, 40},
 	} {
 		if c.got != c.want {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
@@ -182,7 +173,7 @@ func TestReloadPolicy_PublishesTheBoundsAsOneGeneration(t *testing.T) {
 	}
 	// A second reload advances again, from the new base.
 	second := goodSpec()
-	second.MaxTargetConns = 30
+	second.SessionIdleTimeout = 6 * time.Minute
 	if got, err := f.eng.ReloadPolicy(ctx, f.rootTok, second, testIP); err != nil || got.PolicyGeneration != 2 {
 		t.Errorf("second reload: generation %d err %v, want 2 and nil", got.PolicyGeneration, err)
 	}
@@ -230,7 +221,7 @@ func TestReloadPolicy_SurvivesARestart(t *testing.T) {
 
 	// A NEW ENGINE over the SAME store, built from the same configured
 	// defaults a restarted daemon would use.
-	restarted := New(f.store, f.svc, WithMaxRows(3), WithTargetConnBudget(25))
+	restarted := New(f.store, f.svc, WithMaxRows(3))
 	t.Cleanup(func() { _ = restarted.Close() })
 	if got := restarted.Settings(); got.IdleInTxTimeout == 90*time.Minute {
 		t.Fatal("the fresh engine already has the reloaded bound before loading it, so this " +
@@ -244,9 +235,6 @@ func TestReloadPolicy_SurvivesARestart(t *testing.T) {
 	if got.IdleInTxTimeout != 90*time.Minute || got.MaxTxDuration != 6*time.Hour ||
 		got.SessionIdleTimeout != 5*time.Minute || got.MaxTxDurationCeiling != 8*time.Hour {
 		t.Errorf("the restarted engine is running the configured policy, not the reloaded one: %+v", got)
-	}
-	if got.TargetConns.Configured != 40 {
-		t.Errorf("budget after restart = %d, want the reloaded 40", got.TargetConns.Configured)
 	}
 	if got.PolicyGeneration != 1 {
 		t.Errorf("generation after restart = %d, want the stored 1 — a restart that reset the "+
@@ -268,7 +256,7 @@ func TestLoadDurablePolicy_RefusesAStoredPolicyThatNoLongerValidates(t *testing.
 	// The pool's idle time is lowered underneath the stored session bound --
 	// exactly the kind of change that happens in a config file between
 	// deploys.
-	restarted := New(f.store, f.svc, WithPoolLimits(0, time.Minute, 0), WithTargetConnBudget(25))
+	restarted := New(f.store, f.svc, WithPoolLimits(0, time.Minute, 0))
 	t.Cleanup(func() { _ = restarted.Close() })
 	err := restarted.LoadDurablePolicy(ctx)
 	if !errors.Is(err, ErrPolicyInvalid) {
@@ -298,7 +286,7 @@ func TestReloadPolicy_AuditsTheChangeWithoutSecrets(t *testing.T) {
 	detail := rows[0]
 	// BEFORE AS WELL AS AFTER. "set to 90m" does not tell a reader whether
 	// anything actually changed.
-	for _, want := range []string{"generation 0 -> 1", "2h0m0s -> 1h30m0s", "max_target_conns -> 40"} {
+	for _, want := range []string{"generation 0 -> 1", "2h0m0s -> 1h30m0s"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("the audit detail is missing %q:\n%s", want, detail)
 		}
@@ -339,7 +327,7 @@ func TestReloadPolicy_RefusesADurationItCannotPersistExactly(t *testing.T) {
 
 	// NOTHING MOVED. The refusal happens before the store, the audit row and
 	// the generation, so a rejected duration leaves no trace but the error.
-	if got := f.eng.Settings(); got != before {
+	if got := f.eng.Settings(); !reflect.DeepEqual(got, before) {
 		t.Error("a refused duration changed the live settings")
 	}
 	if n := f.auditCount(t, "policy_reloaded"); n != 0 {
@@ -358,7 +346,7 @@ func TestReloadPolicy_RefusesADurationItCannotPersistExactly(t *testing.T) {
 	if got.IdleInTxTimeout != spec.IdleInTxTimeout {
 		t.Errorf("idle = %v, want %v", got.IdleInTxTimeout, spec.IdleInTxTimeout)
 	}
-	restarted := New(f.store, f.svc, WithMaxRows(3), WithTargetConnBudget(25))
+	restarted := New(f.store, f.svc, WithMaxRows(3))
 	t.Cleanup(func() { _ = restarted.Close() })
 	if err := restarted.LoadDurablePolicy(ctx); err != nil {
 		t.Fatalf("LoadDurablePolicy: %v", err)

@@ -453,11 +453,11 @@ func TestFrontDoorWiring_OnlyPressureCrossingsAreWrittenDurably(t *testing.T) {
 		func(action, detail string) { written = append(written, action+"|"+detail) })
 
 	opts.OnEvent(frontdoor.Event{Kind: frontdoor.EventPressure,
-		Reason: "leases.target{7}", Detail: `{"state":"entered"}`})
+		Reason: "leases.pool{pool:7}", Detail: `{"state":"entered"}`})
 	if len(written) != 1 {
 		t.Fatalf("a pressure crossing wrote %d durable rows, want 1: %v", len(written), written)
 	}
-	if !strings.Contains(written[0], "leases.target{7}") ||
+	if !strings.Contains(written[0], "leases.pool{pool:7}") ||
 		!strings.Contains(written[0], "entered") {
 		t.Errorf("the row is %q; it must carry which signal crossed and which way, or it "+
 			"answers nothing days later", written[0])

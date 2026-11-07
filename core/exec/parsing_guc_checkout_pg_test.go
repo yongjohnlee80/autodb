@@ -100,7 +100,7 @@ func TestParsingGUC_ATargetReportingOffIsRefusedAtCheckout(t *testing.T) {
 	// regression all counted as proof that the grammar check works. It asserted
 	// that something went wrong, which is not the claim.
 	refusal := func() error {
-		conn, oerr := openPostgres(ctx, "parsing-guc-off", dsn, pgPrepareConnVerify())
+		conn, oerr := openPostgres(ctx, "parsing-guc-off", dsn, pgPrepareConnVerify(0))
 		if oerr != nil {
 			return oerr
 		}
@@ -124,7 +124,7 @@ func TestParsingGUC_ATargetReportingOffIsRefusedAtCheckout(t *testing.T) {
 	// err != nil it replaced. A DSN nothing answers must NOT satisfy it.
 	dead := func() error {
 		conn, oerr := openPostgres(ctx, "parsing-guc-dead",
-			"postgres://nobody:nope@127.0.0.1:1/nosuchdb?sslmode=disable", pgPrepareConnVerify())
+			"postgres://nobody:nope@127.0.0.1:1/nosuchdb?sslmode=disable", pgPrepareConnVerify(0))
 		if oerr != nil {
 			return oerr
 		}
@@ -142,22 +142,17 @@ func TestParsingGUC_ATargetReportingOffIsRefusedAtCheckout(t *testing.T) {
 	}
 }
 
-// isCheckoutRefusal reports whether err is the pool declining to hand out a
-// connection because the checkout hook rejected every candidate.
+// isCheckoutRefusal reports whether err is the checkout hook refusing a
+// drifted connection.
 //
-// Drift is signalled to pgxpool as (false, nil) -- destroy this one and try
-// another -- precisely so a drifted session self-heals. That carries no error
-// of ours to match on, so what surfaces is the pool giving up after its bounded
-// attempts. That wording is therefore the observable signature of a refusal,
-// and the decoy above is what keeps this honest: if it ever starts matching an
-// ordinary connection failure too, the cell says so instead of passing.
+// A pool backend is never reused, so a drifted connection is a fresh one: the
+// server's own default is incompatible, and the hook fails it ONCE as a
+// configuration fact (DetailGrammarUnproved) rather than asking pgxpool to
+// redial. The decoy above keeps this honest: an ordinary connection failure
+// must not match.
 func isCheckoutRefusal(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "too many failed attempts acquiring connection") ||
-		strings.Contains(msg, "never reported standard_conforming_strings")
+	c, ok := ConfigFailureOf(err)
+	return ok && c.Detail() == DetailGrammarUnproved
 }
 
 // AND A TARGET REPORTING `on` IS SERVED.
@@ -169,7 +164,7 @@ func TestParsingGUC_ATargetReportingOnIsServed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	conn, err := openPostgres(ctx, "parsing-guc-on", dsn, pgPrepareConnVerify())
+	conn, err := openPostgres(ctx, "parsing-guc-on", dsn, pgPrepareConnVerify(0))
 	if err != nil {
 		t.Fatalf("a compatible target was refused at open: %v", err)
 	}

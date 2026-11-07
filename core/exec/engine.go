@@ -170,6 +170,9 @@ type Engine struct {
 	// pendingResidentCap holds the registry-scoped memory cap until every
 	// option has run. See WithResidentBudget.
 	pendingResidentCap int64
+	// pendingDefaultPoolMax sizes the default pool once it is built, after
+	// every option. See WithDefaultPoolMax.
+	pendingDefaultPoolMax int
 
 	// profile is the capability profile admission runs against
 	// (per-connection and per-grant profile sources arrive with the
@@ -278,6 +281,14 @@ func WithSessionLimits(perUser, global int) Option {
 			e.sessions = newSessionRegistry(perUser, global)
 		}
 	}
+}
+
+// WithDefaultPoolMax sizes the default connection pool until LoadPools reads
+// the store's. For an engine that never loads pools (embedded, or a cell), it
+// is the budget every pgx connection shares. Below meta.MinPoolConns it is
+// ignored, like any budget the ledger would refuse.
+func WithDefaultPoolMax(n int) Option {
+	return func(e *Engine) { e.pendingDefaultPoolMax = n }
 }
 
 // WithResidentBudget bounds the total memory reserved by open wire sessions
@@ -411,6 +422,9 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 	// registry here for the same reason as onDemand above.
 	e.pools = newPoolSet(e.poolMaxConns)
 	e.sessions.pools = e.pools
+	if n := e.pendingDefaultPoolMax; n > 0 {
+		_ = e.pools.setPool(&meta.ConnectionPool{ID: meta.DefaultPoolID, Name: "default", MaxConns: int64(n)})
+	}
 	// The registry-scoped memory cap is stamped LAST, because
 	// WithSessionLimits builds a fresh registry and would otherwise drop it.
 	if e.pendingResidentCap > 0 {

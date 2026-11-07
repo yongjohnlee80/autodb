@@ -68,7 +68,7 @@ func TestTarget_DrainAndPoolAreOneDecision(t *testing.T) {
 				once.Do(func() {
 					go func() {
 						defer close(deleted)
-						_, pool := e.beginDraining(f.connID)
+						_, pool := e.beginDraining(f.connID, drainRemoved)
 						drainedPool = pool
 						if pool != nil {
 							_ = pool.Close()

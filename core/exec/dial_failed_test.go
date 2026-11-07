@@ -305,7 +305,7 @@ func TestAcquireRequestBackend_ADrainKeepsItsOwnSentinel(t *testing.T) {
 		t.Fatalf("the target cannot be resolved even without a drain (%v), so this cell "+
 			"observes nothing", terr)
 	}
-	if _, pool := f.eng.beginDraining(f.connID); pool != nil {
+	if _, pool := f.eng.beginDraining(f.connID, drainRemoved); pool != nil {
 		_ = pool.Close()
 	}
 

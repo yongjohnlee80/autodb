@@ -11,7 +11,7 @@ import (
 func regFor(t *testing.T, perUser, global, leaseCap int, residentCap int64) *sessionRegistry {
 	t.Helper()
 	r := newSessionRegistry(perUser, global)
-	r.leaseCap = leaseCap
+	r.pools = fixedLeases(leaseCap)
 	r.residentCap = residentCap
 	return r
 }

@@ -43,11 +43,11 @@ func demandHolder(id string, userID, connID int64, idleSince time.Time) *session
 func demandRegistry(t *testing.T, holders ...*session) *sessionRegistry {
 	t.Helper()
 	r := newSessionRegistry(64, 64)
-	r.leaseCap = 1
+	r.pools = fixedLeases(1)
 	targets := map[int64]bool{}
 	for _, s := range holders {
 		r.byID[s.id] = s
-		s.reservation = reservation{LeaseConn: s.connID}
+		s.reservation = reservation{LeaseConn: s.connID, Key: connKey(s.connID)}
 		r.genSeq++
 		s.gen = r.genSeq
 		targets[s.connID] = true
@@ -59,7 +59,7 @@ func demandRegistry(t *testing.T, holders ...*session) *sessionRegistry {
 	// each cell to remember. A cell that wants to prove the opposite, that an
 	// ask with nobody waiting reserves nobody, builds its own registry.
 	for conn := range targets {
-		r.wantDemand(conn)
+		r.wantDemand(connKey(conn))
 	}
 	return r
 }
@@ -122,7 +122,7 @@ func TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen(t *testing.T) {
 			tc.spoil(s)
 			r := demandRegistry(t, s)
 			before := s.get()
-			if _, ok := r.reserveDemandVictim(7, now); ok {
+			if _, ok := r.reserveDemandVictim(connKey(7), now); ok {
 				t.Fatalf("a holder was chosen while %s — %s", tc.name, tc.why)
 			}
 			// COMPARED AGAINST WHAT IT WAS, not against open: one of these rows
@@ -139,7 +139,7 @@ func TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen(t *testing.T) {
 	t.Run("idle, quiet and reachable", func(t *testing.T) {
 		s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
 		r := demandRegistry(t, s)
-		v, ok := r.reserveDemandVictim(7, now)
+		v, ok := r.reserveDemandVictim(connKey(7), now)
 		if !ok {
 			t.Fatal("an idle holder with no transaction, no request in flight and a live owner was not chosen")
 		}
@@ -169,7 +169,7 @@ func TestDemandReclaim_TheLongestSilentHolderIsChosen(t *testing.T) {
 	middling := demandHolder("away-for-a-minute", 3, 7, now.Add(-time.Minute))
 	r := demandRegistry(t, recent, ancient, middling)
 
-	v, ok := r.reserveDemandVictim(7, now)
+	v, ok := r.reserveDemandVictim(connKey(7), now)
 	if !ok {
 		t.Fatal("no holder was chosen")
 	}
@@ -200,7 +200,7 @@ func TestDemandReclaim_TheReservationIsSingleUseUnderContention(t *testing.T) {
 		go func() {
 			defer done.Done()
 			start.Wait()
-			if _, ok := r.reserveDemandVictim(7, now); ok {
+			if _, ok := r.reserveDemandVictim(connKey(7), now); ok {
 				wins.Add(1)
 			}
 		}()
@@ -228,7 +228,7 @@ func TestDemandReclaim_OrdinaryCloseAndDemandContendForOneReservation(t *testing
 	if !s.beginClose("", "client-closed") {
 		t.Fatal("the ordinary close could not reserve an open session")
 	}
-	if _, ok := r.reserveDemandVictim(7, now); ok {
+	if _, ok := r.reserveDemandVictim(connKey(7), now); ok {
 		t.Error("demand reserved a session an ordinary close was already ending — the client " +
 			"would be framed twice and the lease released twice")
 	}
@@ -248,7 +248,7 @@ func TestDemandReclaim_ASessionThatBecameActiveIsNotReserved(t *testing.T) {
 
 	// The busy one has been idle longest, so it is tried first and must be
 	// passed over rather than reserved.
-	v, ok := r.reserveDemandVictim(7, now)
+	v, ok := r.reserveDemandVictim(connKey(7), now)
 	if !ok {
 		t.Fatal("no holder was reserved, though one was idle and quiet")
 	}
@@ -270,7 +270,7 @@ func TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession(t *testing.T
 	now := time.Now()
 	victim := demandHolder("chosen", 1, 7, now.Add(-time.Hour))
 	r := demandRegistry(t, victim)
-	v, ok := r.reserveDemandVictim(7, now)
+	v, ok := r.reserveDemandVictim(connKey(7), now)
 	if !ok {
 		t.Fatal("no holder was chosen")
 	}
@@ -284,7 +284,7 @@ func TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession(t *testing.T
 	replacement := demandHolder("chosen", 2, 7, now)
 	r.mu.Lock()
 	r.byID[replacement.id] = replacement
-	replacement.reservation = reservation{LeaseConn: 7}
+	replacement.reservation = reservation{LeaseConn: 7, Key: connKey(7)}
 	r.genSeq++
 	replacement.gen = r.genSeq
 	r.mu.Unlock()
@@ -331,7 +331,7 @@ func TestDemandReclaim_TheFreedLeaseGoesToTheLongestWaiter(t *testing.T) {
 
 	// The second arrival is what triggers the reclaim.
 	var once sync.Once
-	r.onDemand = func(int64) bool {
+	r.onDemand = func(leaseKey) bool {
 		once.Do(func() { r.remove(holder) })
 		return true
 	}
@@ -377,7 +377,7 @@ func TestDemandReclaim_ARetiredOfferCannotBeReserved(t *testing.T) {
 	if _, woken := e.RetireReceive(s.id, s.recvToken); woken {
 		t.Fatal("a notice was delivered when none had been published")
 	}
-	if _, ok := r.reserveDemandVictim(7, now); ok {
+	if _, ok := r.reserveDemandVictim(connKey(7), now); ok {
 		t.Error("a session was reserved after its owner had stopped listening; it would be " +
 			"terminated with no way to tell it, having lost a race it had in fact won")
 	}
@@ -397,7 +397,7 @@ func TestDemandReclaim_AReservationAlwaysCarriesItsNotice(t *testing.T) {
 	e := &Engine{sessions: r}
 	token := s.recvToken
 
-	v, ok := r.reserveDemandVictim(7, now)
+	v, ok := r.reserveDemandVictim(connKey(7), now)
 	if !ok {
 		t.Fatal("an eligible holder was not reserved")
 	}
@@ -430,7 +430,7 @@ func TestDemandReclaim_AStaleReceiveTokenIsIgnored(t *testing.T) {
 	if fresh == stale {
 		t.Fatal("a new offer reused the retired offer's token")
 	}
-	if _, ok := r.reserveDemandVictim(7, now); !ok {
+	if _, ok := r.reserveDemandVictim(connKey(7), now); !ok {
 		t.Fatal("the holder was not reserved")
 	}
 	if _, woken := e.RetireReceive(s.id, stale); woken {
@@ -472,7 +472,7 @@ func TestDemandReclaim_APassedOverHolderDoesNotEndTheSearch(t *testing.T) {
 	usable := demandHolder("reachable", 2, 7, now.Add(-time.Minute))
 	r := demandRegistry(t, unreachable, usable)
 
-	v, ok := r.reserveDemandVictim(7, now)
+	v, ok := r.reserveDemandVictim(connKey(7), now)
 	if !ok {
 		t.Fatal("no holder was reserved, though a reachable one was available")
 	}
@@ -500,7 +500,7 @@ func TestDemandReclaim_TheRecordKeepsTheIdleTimeTheDecisionWasMadeOn(t *testing.
 	clock := at
 	e := &Engine{sessions: r, now: func() time.Time { return clock }}
 
-	if _, ok := r.reserveDemandVictim(7, clock); !ok {
+	if _, ok := r.reserveDemandVictim(connKey(7), clock); !ok {
 		t.Fatal("the holder was not reserved")
 	}
 
@@ -607,7 +607,7 @@ func TestDemandReclaim_AHolderOfObjectsIsEndedAndTheRecordSaysSo(t *testing.T) {
 			r := demandRegistry(t, s)
 			e := &Engine{sessions: r, now: func() time.Time { return now }}
 
-			v, ok := r.reserveDemandVictim(7, now)
+			v, ok := r.reserveDemandVictim(connKey(7), now)
 			if !ok {
 				t.Fatal("a holder was not reclaimed; holding objects must not make a session " +
 					"safe from reclamation, only differently recorded")
@@ -662,7 +662,7 @@ func TestDemandReclaim_OneRecordCarriesTheFactsAsData(t *testing.T) {
 			r := demandRegistry(t, s)
 			e := &Engine{sessions: r, now: func() time.Time { return now }}
 
-			if _, ok := r.reserveDemandVictim(7, now); !ok {
+			if _, ok := r.reserveDemandVictim(connKey(7), now); !ok {
 				t.Fatal("the holder was not reserved")
 			}
 			if !e.claimDemandFinalisation(s, tc.delivery) {

@@ -7,33 +7,78 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yongjohnlee80/autodb/core/engine"
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-func TestPermitLedgerBoundsOutstandingSockets(t *testing.T) {
-	// A budget of 4 leaves 3 for ordinary dials; the fourth is the reserved
-	// control lane.
-	l := newPermitLedger(4)
-	var releases []func()
-	for i := range 3 {
-		rel, err := l.Acquire()
-		if err != nil {
-			t.Fatalf("acquire %d: %v", i, err)
+// doneCtx is an acquirer that has already given up: acquire grants a free slot
+// at once and otherwise refuses at once, without waiting in the line.
+func doneCtx() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+// tryAcquire is a non-waiting acquisition of one class.
+func tryAcquire(l *permitLedger, class DialClass) (*Permit, error) {
+	return l.acquire(dialMark{intent: &dialIntent{class: class}, acquirer: doneCtx()})
+}
+
+// THE SPLIT. A pool of 25 is 20 for front-door sessions, 4 for exec, TUI and
+// internal work, and 1 for cancels; small pools keep one socket each.
+func TestPoolShares(t *testing.T) {
+	for _, tc := range []struct{ budget, frontDoor, headroom int }{
+		{3, 1, 1}, {4, 1, 2}, {5, 2, 2}, {8, 3, 4}, {10, 5, 4}, {25, 20, 4}, {95, 90, 4},
+	} {
+		s := newPermitLedger(tc.budget).Snapshot()
+		if s.FrontDoorLimit != tc.frontDoor || s.OrdinaryLimit != tc.headroom {
+			t.Errorf("budget %d: front door %d, headroom %d; want %d and %d",
+				tc.budget, s.FrontDoorLimit, s.OrdinaryLimit, tc.frontDoor, tc.headroom)
 		}
-		releases = append(releases, rel.Release)
+		if s.FrontDoorLimit+s.OrdinaryLimit+1 != tc.budget {
+			t.Errorf("budget %d: the shares and the lane don't add up to the budget", tc.budget)
+		}
 	}
-	if _, err := l.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Fatalf("the fourth acquire must be refused, got %v", err)
+}
+
+// EACH SHARE IS BOUNDED BY ITSELF. Exec can't take the front door's sockets,
+// and a full front door leaves exec its own.
+func TestASharesSocketsAreItsOwn(t *testing.T) {
+	l := newPermitLedger(8) // front door 3, headroom 4, lane 1
+	var held []*Permit
+	for i := range 4 {
+		p, err := tryAcquire(l, DialOrdinary)
+		if err != nil {
+			t.Fatalf("headroom acquire %d: %v", i, err)
+		}
+		held = append(held, p)
 	}
-	releases[0]()
-	if _, err := l.Acquire(); err != nil {
-		t.Fatalf("a released permit must be reusable: %v", err)
+	if _, err := tryAcquire(l, DialOrdinary); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatalf("a fifth ordinary dial must be refused, got %v", err)
+	}
+	for i := range 3 {
+		if _, err := tryAcquire(l, DialFrontDoor); err != nil {
+			t.Fatalf("front-door acquire %d with the headroom full: %v — exec took the "+
+				"front door's sockets", i, err)
+		}
+	}
+	if _, err := tryAcquire(l, DialFrontDoor); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatalf("a fourth front-door dial must be refused, got %v", err)
+	}
+	held[0].Release()
+	if _, err := tryAcquire(l, DialOrdinary); err != nil {
+		t.Fatalf("a released headroom permit must be reusable: %v", err)
+	}
+	if got := l.Outstanding(); got != 7 {
+		t.Errorf("outstanding = %d, want 7", got)
 	}
 }
 
 // Releasing twice must not manufacture a slot that does not exist.
 func TestReleaseIsIdempotent(t *testing.T) {
-	l := newPermitLedger(2) // 1 ordinary + 1 reserved
-	p, err := l.Acquire()
+	l := newPermitLedger(3) // front door 1, headroom 1, lane 1
+	p, err := tryAcquire(l, DialOrdinary)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,226 +88,334 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	if got := l.Outstanding(); got != 0 {
 		t.Fatalf("outstanding = %d, want 0 — a double release invented capacity", got)
 	}
-	if _, err := l.Acquire(); err != nil {
+	if _, err := tryAcquire(l, DialOrdinary); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Fatal("the ordinary allowance must be unchanged after repeated releases")
+	if _, err := tryAcquire(l, DialOrdinary); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatal("the headroom share must be unchanged after repeated releases")
 	}
 }
 
-// the connection-budget policy: lowering the budget must DRAIN, never kill. This is the 50 -> 25
-// case with 50 sockets already open.
+// LOWERING A POOL DRAINS, NEVER KILLS: 51 -> 26 with 46 front-door sockets open.
 func TestLoweringTheBudgetDrainsRatherThanKilling(t *testing.T) {
-	l := newPermitLedger(51) // 50 ordinary + 1 reserved
-	var releases []func()
-	for range 50 {
-		rel, err := l.Acquire()
+	l := newPermitLedger(51) // front door 46
+	var held []*Permit
+	for range 46 {
+		p, err := tryAcquire(l, DialFrontDoor)
 		if err != nil {
 			t.Fatal(err)
 		}
-		releases = append(releases, rel.Release)
+		held = append(held, p)
 	}
-
 	_, genBefore := l.Budget()
-	if err := l.SetBudget(26); err != nil { // 25 ordinary + 1 reserved
+	if err := l.SetBudget(26); err != nil { // front door 21
 		t.Fatal(err)
 	}
-	budget, genAfter := l.Budget()
-	if budget != 26 {
-		t.Fatalf("budget = %d, want 26", budget)
+	if _, genAfter := l.Budget(); genAfter == genBefore {
+		t.Error("a budget change must open a new generation; monotonicity is per generation")
 	}
-	if genAfter == genBefore {
-		t.Error("a budget change must open a new generation; monotonicity is per-generation")
+	if got := l.Outstanding(); got != 46 {
+		t.Fatalf("outstanding = %d, want 46 — lowering the budget must not kill live work", got)
 	}
-
-	// Nothing was closed: the fifty live sockets are still live.
-	if got := l.Outstanding(); got != 50 {
-		t.Fatalf("outstanding = %d, want 50 — lowering the budget must not kill live work", got)
+	if s := l.Snapshot(); !s.Draining {
+		t.Error("a share above its new limit IS the drain; the snapshot must say so")
 	}
-	// And no new dial is granted while over the new budget.
-	if _, err := l.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Fatal("no new permit may be granted above the lowered budget")
+	if _, err := tryAcquire(l, DialFrontDoor); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatal("no new permit may be granted above the lowered share")
 	}
-	// Draining below the new budget makes room again.
 	for i := range 26 {
-		releases[i]()
+		held[i].Release()
 	}
-	if got := l.Outstanding(); got != 24 {
-		t.Fatalf("outstanding = %d, want 24", got)
+	if got := l.Outstanding(); got != 20 {
+		t.Fatalf("outstanding = %d, want 20", got)
 	}
-	if _, err := l.Acquire(); err != nil {
-		t.Fatalf("once drained below the budget a dial must be granted: %v", err)
+	if _, err := tryAcquire(l, DialFrontDoor); err != nil {
+		t.Fatalf("once drained below the share a dial must be granted: %v", err)
 	}
 }
 
-// The ledger is the aggregate across targets, so concurrent acquirers must
-// never collectively exceed it.
-func TestConcurrentAcquiresNeverExceedTheBudget(t *testing.T) {
-	const budget = 8 // 7 ordinary + 1 reserved
-	l := newPermitLedger(budget)
-
+// Concurrent acquirers never collectively exceed their share.
+func TestConcurrentAcquiresNeverExceedTheShare(t *testing.T) {
+	l := newPermitLedger(8) // headroom 4
 	var (
-		wg      sync.WaitGroup
-		mu      sync.Mutex
-		granted int
-		peak    int
-		held    []func()
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		peak int
+		held []*Permit
 	)
 	for range 200 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rel, err := l.Acquire()
+			p, err := tryAcquire(l, DialOrdinary)
 			if err != nil {
 				return
 			}
 			mu.Lock()
-			granted++
-			held = append(held, rel.Release)
-			if granted > peak {
-				peak = granted
-			}
+			held = append(held, p)
+			peak = max(peak, len(held))
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
-
-	if peak > budget-1 {
-		t.Fatalf("peak ordinary outstanding = %d, ordinary allowance = %d — the ledger over-granted",
-			peak, budget-1)
+	if peak > 4 {
+		t.Fatalf("peak = %d, headroom share = 4 — the ledger over-granted", peak)
 	}
 	if l.Outstanding() != len(held) {
 		t.Fatalf("outstanding = %d, granted-and-held = %d", l.Outstanding(), len(held))
 	}
 }
 
-// Absence of a budget is a NIL ledger, not a zero one.
-//
-// A zero-budget ledger used to mean "unbounded" and was incoherent under the
-// O/K algebra: it reported Effective = O+1 and Draining = true as soon as
-// anything was acquired, so the sentinel contradicted itself in use. It was
-// also unreachable from production, which represents absence by having no
-// ledger at all.
-func TestAbsenceOfABudgetIsANilLedger(t *testing.T) {
-	e := New(nil, nil)
-	if e.targetPermits != nil {
-		t.Fatal("an engine built without a budget must have no ledger")
+// A FULL SHARE IS A LINE, FIRST COME FIRST SERVED: each release goes to the
+// oldest waiter of that share, and an arrival never steps around the line.
+func TestAFullShareServesItsLineInOrder(t *testing.T) {
+	l := newPermitLedger(3) // headroom 1
+	first, err := tryAcquire(l, DialOrdinary)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := e.Settings().TargetConns; got.Configured != 0 || got.Draining {
-		t.Errorf("no-budget snapshot = %+v, want a zeroed, non-draining reading", got)
+	const waiters = 5
+	order := make(chan int, waiters)
+	var wg sync.WaitGroup
+	for i := range waiters {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p, err := l.acquire(dialMark{acquirer: ctx})
+			if err != nil {
+				t.Errorf("waiter %d: %v", i, err)
+				return
+			}
+			order <- i
+			p.Release()
+		}()
+		// Join the line one at a time, so its order is the arrival order.
+		waitFor(t, func() bool { return l.Snapshot().OrdinaryWaiting == i+1 })
 	}
+	// An arrival while the line is non-empty joins it rather than taking the
+	// slot the release frees.
+	first.Release()
+	wg.Wait()
+	close(order)
+	want := 0
+	for got := range order {
+		if got != want {
+			t.Fatalf("served waiter %d before waiter %d: the line is not first come first served", got, want)
+		}
+		want++
+	}
+}
 
-	// The dialer is the underlying one, unwrapped: nothing to count, nothing
-	// to refuse.
+// A CALLER THAT GIVES UP LEAVES THE LINE AND TAKES NOTHING. The slot it was
+// waiting for goes to the next waiter, not to a dial nobody wants.
+func TestAWaiterThatGivesUpLeavesTheLine(t *testing.T) {
+	l := newPermitLedger(3) // headroom 1
+	held, err := tryAcquire(l, DialOrdinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := l.acquire(dialMark{acquirer: gone})
+		done <- err
+	}()
+	waitFor(t, func() bool { return l.Snapshot().OrdinaryWaiting == 1 })
+	cancel()
+	if err := <-done; !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatalf("a waiter that gave up got %v, want the budget refusal", err)
+	}
+	if n := l.Snapshot().OrdinaryWaiting; n != 0 {
+		t.Fatalf("%d waiter(s) left in line after the caller gave up", n)
+	}
+	held.Release()
+	if got := l.Outstanding(); got != 0 {
+		t.Fatalf("outstanding = %d after the only holder released: the slot went to a waiter that had left", got)
+	}
+}
+
+// A RAISE SERVES BOTH SHARES' LINES AT ONCE.
+func TestARaiseServesWaitersAtOnce(t *testing.T) {
+	l := newPermitLedger(3) // front door 1, headroom 1
+	if _, err := tryAcquire(l, DialFrontDoor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tryAcquire(l, DialOrdinary); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	got := make(chan DialClass, 4)
+	for _, class := range []DialClass{DialFrontDoor, DialFrontDoor, DialOrdinary} {
+		go func() {
+			if p, err := l.acquire(dialMark{intent: &dialIntent{class: class}, acquirer: ctx}); err == nil {
+				got <- p.Class
+			}
+		}()
+	}
+	waitFor(t, func() bool {
+		s := l.Snapshot()
+		return s.FrontDoorWaiting == 2 && s.OrdinaryWaiting == 1
+	})
+	if err := l.SetBudget(10); err != nil { // front door 5, headroom 4
+		t.Fatal(err)
+	}
+	for range 3 {
+		select {
+		case <-got:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a raise left waiters in line beside free slots")
+		}
+	}
+}
+
+// A budget below the floor is refused, and a refused update changes nothing.
+func TestLiveBudgetUpdatesAreValidated(t *testing.T) {
+	l := newPermitLedger(10)
+	for _, n := range []int{-1, 0, 1, 2} {
+		if err := l.SetBudget(n); !errors.Is(err, ErrInvalidBudget) {
+			t.Errorf("SetBudget(%d) = %v, want a refusal below meta.MinPoolConns (%d)", n, err, meta.MinPoolConns)
+		}
+	}
+	if got := l.Snapshot().Configured; got != 10 {
+		t.Errorf("a refused update changed the budget to %d", got)
+	}
+	if err := l.SetBudget(int(meta.MinPoolConns)); err != nil {
+		t.Fatalf("the floor itself was refused: %v", err)
+	}
+}
+
+// The reserved lane survives both shares being full, and a drain: a cancel is
+// needed exactly when everything else is spent.
+func TestTheControlLaneSurvivesSaturationAndADrain(t *testing.T) {
+	l := newPermitLedger(10) // front door 5, headroom 4
+	for range 4 {
+		if _, err := tryAcquire(l, DialOrdinary); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 5 {
+		if _, err := tryAcquire(l, DialFrontDoor); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.SetBudget(3); err != nil {
+		t.Fatal(err)
+	}
+	if s := l.Snapshot(); !s.Draining {
+		t.Fatalf("expected a draining ledger, got %+v", s)
+	}
+	rel, err := l.AcquireControl(context.Background())
+	if err != nil {
+		t.Fatalf("a cancellation at saturation, during a drain, was refused: %v", err)
+	}
+	// A second cancel WAITS for the lane on its own context rather than being lost.
+	waiting, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := l.AcquireControl(waiting); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a second cancel must wait on its own context, got %v", err)
+	}
+	rel.Release()
+	if _, err := l.AcquireControl(context.Background()); err != nil {
+		t.Fatalf("the lane must be reusable once released: %v", err)
+	}
+}
+
+// A grant carries the terms it was made under, so an audit of a saturated or
+// draining moment can say which policy admitted each live socket.
+func TestAPermitCarriesItsGrantTerms(t *testing.T) {
+	l := newPermitLedger(10) // front door 5, headroom 4
+	ord, err := tryAcquire(l, DialOrdinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd, err := tryAcquire(l, DialFrontDoor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctl, err := l.AcquireControl(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		p     *Permit
+		class DialClass
+		limit int
+	}{{ord, DialOrdinary, 4}, {fd, DialFrontDoor, 5}, {ctl, DialControl, 1}} {
+		if c.p.Class != c.class || c.p.Limit != c.limit || c.p.ConfiguredTotal != 10 {
+			t.Errorf("%v grant: class %v, limit %d, configured %d; want %v, %d, 10",
+				c.class, c.p.Class, c.p.Limit, c.p.ConfiguredTotal, c.class, c.limit)
+		}
+	}
+	gen := ord.Generation
+	if err := l.SetBudget(3); err != nil {
+		t.Fatal(err)
+	}
+	if ord.Generation != gen {
+		t.Errorf("a live permit's generation changed under it: %d -> %d", gen, ord.Generation)
+	}
+	ord.Release()
+	fd.Release()
+	ctl.Release()
+	if got := l.Outstanding(); got != 0 {
+		t.Errorf("outstanding = %d after releases, want 0", got)
+	}
+}
+
+// A connection outside every pool has no ledger, and its dialer is the
+// underlying one, unwrapped.
+func TestAConnectionOutsideEveryPoolHasNoLedger(t *testing.T) {
+	e := New(nil, nil)
+	e.pools.setPoolOf(&meta.Connection{ID: 9, Engine: engine.MySQL, PoolID: meta.DefaultPoolID})
+	if l := e.pools.ledgerFor(9); l != nil {
+		t.Fatal("a MySQL connection was given a pool ledger; it is outside every pool whatever its pool_id says")
+	}
+	if !e.reusesBackend(9) {
+		t.Error("a connection outside every pool must keep backend reuse")
+	}
 	var dialed int
 	dial := permitDialer(nil, func(context.Context, string, string) (net.Conn, error) {
 		dialed++
 		server, client := net.Pipe()
-		// BOTH ends closed. Leaking a hundred pipes to prove a counter is a
-		// test that measures one thing and costs another.
 		t.Cleanup(func() { _ = server.Close() })
 		return client, nil
 	})
-	for range 100 {
+	for range 10 {
 		c, err := dial(context.Background(), "tcp", "a")
 		if err != nil {
 			t.Fatalf("an unbudgeted dial was refused: %v", err)
 		}
 		_ = c.Close()
 	}
-	if dialed != 100 {
-		t.Errorf("dialed %d times, want 100", dialed)
+	if dialed != 10 {
+		t.Errorf("dialed %d times, want 10", dialed)
 	}
 }
 
-// A LOW BUDGET IS HONOURED, NEVER RAISED.
-//
-// The previous version of this cell asserted that 1 becomes 2 and so
-// CERTIFIED A DEFECT: a caller authorising one socket would have had the
-// ledger claim two, quietly taking more of a production database than it was
-// permitted. A number the caller did not choose is not a safe default because
-// it is small.
-//
-// C=1 is a useless configuration and it is refused where configuration is
-// validated, with a message naming the key -- not corrected here into a
-// daemon that does something else.
-func TestALowBudgetIsHonouredNotRaised(t *testing.T) {
-	e := New(nil, nil, WithTargetConnBudget(1))
-
-	s := e.Settings().TargetConns
-	if s.Configured != 1 {
-		t.Fatalf("configured = %d, want the caller's 1 — the ledger must never claim "+
-			"more sockets than it was authorised", s.Configured)
-	}
-	if s.OrdinaryLimit != 0 || s.Outstanding != 0 || s.Effective != 1 || s.Draining {
-		t.Errorf("C=1 snapshot: ordinary=%d out=%d eff=%d draining=%v, want 0/0/1/false",
-			s.OrdinaryLimit, s.Outstanding, s.Effective, s.Draining)
-	}
-
-	// Every ordinary dial is refused, BEFORE the underlying dial runs.
-	var dialed int
-	dial := permitDialer(e.targetPermits, func(context.Context, string, string) (net.Conn, error) {
-		dialed++
-		server, client := net.Pipe()
-		_ = server.Close()
-		return client, nil
-	})
-	if _, err := dial(context.Background(), "tcp", "a"); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Errorf("an ordinary dial at C=1 must be refused, got %v", err)
-	}
-	if dialed != 0 {
-		t.Errorf("the underlying dial ran %d time(s); the refusal must precede it", dialed)
-	}
-
-	// The one slot is the control lane's, and it is counted.
-	ctl, err := e.targetPermits.AcquireControl(context.Background())
-	if err != nil {
-		t.Fatalf("the single slot belongs to the control lane: %v", err)
-	}
-	if occ := e.Settings().TargetConns; occ.Control != 1 || occ.Outstanding != 1 {
-		t.Errorf("occupied at C=1: K=%d out=%d, want 1 and 1", occ.Control, occ.Outstanding)
-	}
-	// And only one.
-	waiting, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if _, err := e.targetPermits.AcquireControl(waiting); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("a second control permit was granted at C=1: %v", err)
-	}
-	ctl.Release()
-
-	// Configuration still refuses it, visibly.
-	if err := e.setTargetConnBudget(1); !errors.Is(err, ErrInvalidBudget) {
-		t.Errorf("setTargetConnBudget(1) = %v, want a refusal", err)
-	}
-}
-
-// The dialer is where the ADR's three obligations meet: take a permit before
-// the dial, release it when the socket closes, and release it if the dial
-// fails.
+// The dialer's three obligations: take a permit before the dial, release it
+// when the socket closes, and release it if the dial fails.
 func TestPermitDialerReleasesOnDialFailure(t *testing.T) {
-	l := newPermitLedger(2)
+	l := newPermitLedger(3)
 	boom := errors.New("connection refused")
 	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
 		return nil, boom
 	})
-
 	for i := range 5 {
 		if _, err := dial(context.Background(), "tcp", "10.0.0.1:5432"); !errors.Is(err, boom) {
 			t.Fatalf("dial %d: err = %v, want the dial error", i, err)
 		}
 		if got := l.Outstanding(); got != 0 {
-			t.Fatalf("after failed dial %d outstanding = %d, want 0 — a failed dial leaked a permit, "+
-				"and a leaked permit is a slot lost until restart", i, got)
+			t.Fatalf("after failed dial %d outstanding = %d, want 0 — a failed dial leaked a permit", i, got)
 		}
 	}
 }
 
 func TestPermitDialerReleasesWhenTheSocketCloses(t *testing.T) {
-	l := newPermitLedger(2) // 1 ordinary + 1 reserved
+	l := newPermitLedger(3) // headroom 1
 	server, client := net.Pipe()
 	defer server.Close()
-
 	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
 		return client, nil
 	})
@@ -273,25 +426,19 @@ func TestPermitDialerReleasesWhenTheSocketCloses(t *testing.T) {
 	if got := l.Outstanding(); got != 1 {
 		t.Fatalf("outstanding = %d, want 1 while the socket is open", got)
 	}
-	// The budget is spent: a second dial is refused.
-	if _, err := dial(context.Background(), "tcp", "10.0.0.1:5432"); !errors.Is(err, ErrTargetBudgetExhausted) {
+	if _, err := dial(doneCtx(), "tcp", "10.0.0.1:5432"); !errors.Is(err, ErrTargetBudgetExhausted) {
 		t.Fatalf("second dial: err = %v, want the budget refusal", err)
 	}
-
+	_ = conn.Close()
 	_ = conn.Close()
 	if got := l.Outstanding(); got != 0 {
-		t.Fatalf("outstanding = %d after close, want 0", got)
-	}
-	// And closing again must not invent capacity.
-	_ = conn.Close()
-	if got := l.Outstanding(); got != 0 {
-		t.Fatalf("outstanding = %d after a second close, want 0", got)
+		t.Fatalf("outstanding = %d after close (twice), want 0", got)
 	}
 }
 
 // A refused dial must not open a socket at all.
-func TestPermitDialerDoesNotDialWhenTheBudgetIsSpent(t *testing.T) {
-	l := newPermitLedger(2) // 1 ordinary + 1 reserved
+func TestPermitDialerDoesNotDialWhenTheShareIsSpent(t *testing.T) {
+	l := newPermitLedger(3) // headroom 1
 	var dialed int
 	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
 		dialed++
@@ -302,11 +449,50 @@ func TestPermitDialerDoesNotDialWhenTheBudgetIsSpent(t *testing.T) {
 	if _, err := dial(context.Background(), "tcp", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dial(context.Background(), "tcp", "b"); !errors.Is(err, ErrTargetBudgetExhausted) {
+	if _, err := dial(doneCtx(), "tcp", "b"); !errors.Is(err, ErrTargetBudgetExhausted) {
 		t.Fatalf("err = %v, want the budget refusal", err)
 	}
 	if dialed != 1 {
 		t.Errorf("dialed %d times, want 1 — the refusal must happen BEFORE the dial", dialed)
+	}
+}
+
+// ONLY A MARKED DIAL TAKES ANOTHER SHARE OR THE LANE, and the marks can only
+// be set inside this package. An unmarked dial is ordinary work.
+func TestOnlyAMarkedDialTakesAnotherShareOrTheLane(t *testing.T) {
+	l := newPermitLedger(3) // front door 1, headroom 1, lane 1
+	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
+		_, client := net.Pipe()
+		return client, nil
+	})
+	if _, err := dial(context.Background(), "tcp", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dial(doneCtx(), "tcp", "b"); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatal("an unmarked dial must never take the front-door share or the lane")
+	}
+	intent := &dialIntent{class: DialFrontDoor}
+	if _, err := dial(withDialIntent(doneCtx(), intent), "tcp", "pin"); err != nil {
+		t.Fatalf("a front-door pin must have its share: %v", err)
+	}
+	if !intent.granted.Load() {
+		t.Error("the pin's intent must record that its permit was granted")
+	}
+	if _, err := dial(withDialIntent(context.Background(), &dialIntent{class: DialControl}), "tcp", "cancel"); err != nil {
+		t.Fatalf("a cancellation at full budget must still be delivered: %v", err)
+	}
+}
+
+// waitFor polls a condition the cell can't be told about directly, failing
+// after a bound rather than hanging the suite.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached within 5s")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -363,64 +549,6 @@ func TestTheCeilingDoesNotClipTheRuledMaximum(t *testing.T) {
 	}
 }
 
-// The reserved lane exists so a cancellation can still be delivered when every
-// ordinary slot is spent — which is exactly when someone reaches for cancel.
-func TestTheControlLaneSurvivesOrdinarySaturation(t *testing.T) {
-	l := newPermitLedger(3) // 2 ordinary + 1 reserved
-
-	for i := range 2 {
-		if _, err := l.Acquire(); err != nil {
-			t.Fatalf("ordinary acquire %d: %v", i, err)
-		}
-	}
-	if _, err := l.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Fatal("ordinary dials must stop one short of the budget")
-	}
-
-	rel, err := l.AcquireControl(context.Background())
-	if err != nil {
-		t.Fatalf("the control lane must be available at ordinary saturation: %v", err)
-	}
-	// Serialized: one at a time is enough for connect-write-close, and more
-	// would be a second budget nobody configured.
-	// A second cancel WAITS for the lane rather than being lost: the caller has
-	// already given up on their query and has no way to learn the cancel never
-	// went.
-	waiting, cancelWait := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancelWait()
-	if _, err := l.AcquireControl(waiting); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("a second cancel must WAIT on its own context, got %v", err)
-	}
-	rel.Release()
-	if _, err := l.AcquireControl(context.Background()); err != nil {
-		t.Fatalf("the lane must be reusable once released: %v", err)
-	}
-}
-
-// The reserved lane is only reachable through the marker, and the marker is
-// only settable inside this package.
-func TestOnlyAMarkedDialTakesTheControlLane(t *testing.T) {
-	l := newPermitLedger(2) // 1 ordinary + 1 reserved
-	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
-		_, client := net.Pipe()
-		return client, nil
-	})
-
-	// Saturate the ordinary allowance.
-	if _, err := dial(context.Background(), "tcp", "a"); err != nil {
-		t.Fatal(err)
-	}
-	// An UNMARKED dial cannot help itself to the reserved slot.
-	if _, err := dial(context.Background(), "tcp", "b"); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Fatal("an ordinary dial must never consume the reserved lane")
-	}
-	// A MARKED dial gets it — this is a cancellation at saturation, which is
-	// the only moment cancellation matters.
-	if _, err := dial(withControlDial(context.Background()), "tcp", "cancel"); err != nil {
-		t.Fatalf("a cancellation at full budget must still be delivered: %v", err)
-	}
-}
-
 // The core/exec mirror of the policy defaults, pinned to literals.
 //
 // core/config carries the same numbers and pins them independently. Both are
@@ -443,297 +571,5 @@ func TestExecPolicyMirrorIsTheRuledValues(t *testing.T) {
 			t.Errorf("%s = %v, want %v — the core/exec mirror has drifted from the ruled policy",
 				tc.name, tc.got, tc.want)
 		}
-	}
-}
-
-// A live update must not be able to remove a bound that configuration refuses
-// to remove at startup.
-func TestLiveBudgetUpdatesAreValidated(t *testing.T) {
-	l := newPermitLedger(10)
-	for _, n := range []int{0, -1, 1} {
-		if err := l.SetBudget(n); !errors.Is(err, ErrInvalidBudget) {
-			t.Errorf("SetBudget(%d) = %v, want a refusal — a nonpositive budget is not "+
-				"'unlimited', and 1 is consumed entirely by the reserved lane", n, err)
-		}
-	}
-	if got := l.Snapshot().Configured; got != 10 {
-		t.Errorf("a refused update changed the budget to %d", got)
-	}
-	if err := l.SetBudget(4); err != nil {
-		t.Fatalf("a valid update was refused: %v", err)
-	}
-}
-
-// The snapshot's fields only mean something together, so they are read under
-// one lock — and it must say plainly when a lowered budget is draining rather
-// than leaving a caller to compare two numbers and get it backwards.
-func TestSnapshotIsCoherentAndNamesTheDrain(t *testing.T) {
-	l := newPermitLedger(6) // 5 ordinary + 1 reserved
-
-	before := l.Snapshot()
-	if before.Configured != 6 || before.OrdinaryLimit != 5 {
-		t.Fatalf("configured=%d ordinary=%d, want 6 and 5", before.Configured, before.OrdinaryLimit)
-	}
-	if before.Draining {
-		t.Error("an untouched ledger is not draining")
-	}
-
-	for range 5 {
-		if _, err := l.Acquire(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := l.SetBudget(3); err != nil {
-		t.Fatal(err)
-	}
-
-	after := l.Snapshot()
-	if after.Generation <= before.Generation {
-		t.Error("an accepted update must open a new generation")
-	}
-	if after.Outstanding != 5 {
-		t.Errorf("outstanding = %d, want 5 — lowering the budget must not kill live work",
-			after.Outstanding)
-	}
-	if !after.Draining {
-		t.Error("outstanding above configured IS the drain; the snapshot must say so rather " +
-			"than leaving a caller to derive it")
-	}
-}
-
-// THE DRAIN CASE. While a lowered budget drains, outstanding is above the new
-// number by definition — so a control lane that re-tested against it would
-// refuse a cancellation precisely because too much work is already running,
-// which is the one moment cancelling matters most.
-func TestTheControlLaneSurvivesADrainingGeneration(t *testing.T) {
-	l := newPermitLedger(51) // 50 ordinary + 1 reserved
-	for range 50 {
-		if _, err := l.Acquire(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := l.SetBudget(26); err != nil { // 25 ordinary + 1 reserved
-		t.Fatal(err)
-	}
-
-	snap := l.Snapshot()
-	if !snap.Draining || snap.Outstanding <= snap.Configured {
-		t.Fatalf("expected a draining ledger, got %+v", snap)
-	}
-	// Ordinary work is correctly refused while over the new budget...
-	if _, err := l.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Fatal("no new ordinary permit may be granted above the lowered budget")
-	}
-	// ...and a cancellation still goes through.
-	if _, err := l.AcquireControl(context.Background()); err != nil {
-		t.Fatalf("a cancellation during a drain was refused: %v — this is the state where "+
-			"cancelling matters most", err)
-	}
-}
-
-// A grant carries the terms it was made under, so an audit of a saturated or
-// draining moment can say which policy admitted each live socket.
-func TestAPermitCarriesItsGrantTerms(t *testing.T) {
-	l := newPermitLedger(6) // 5 ordinary + 1 reserved
-
-	ord, err := l.Acquire()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ord.Class != DialOrdinary {
-		t.Errorf("class = %v, want ordinary", ord.Class)
-	}
-	if ord.Limit != 5 {
-		t.Errorf("ordinary limit = %d, want 5 — one short of the budget", ord.Limit)
-	}
-	genAtGrant := ord.Generation
-
-	ctl, err := l.AcquireControl(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ctl.Class != DialControl {
-		t.Errorf("class = %v, want control", ctl.Class)
-	}
-	if ctl.Limit != 1 {
-		t.Errorf("control limit = %d, want 1 — the lane is one holder, whatever the "+
-			"budget is", ctl.Limit)
-	}
-	// The terms that disambiguate a grant during a drain. Limit alone cannot:
-	// a control permit's limit is 1 either way.
-	if ctl.ConfiguredTotal != 6 || ctl.EffectiveCeiling != 6 {
-		t.Errorf("control grant terms: configured=%d effective=%d, want 6 and 6",
-			ctl.ConfiguredTotal, ctl.EffectiveCeiling)
-	}
-	if ord.ConfiguredTotal != 6 {
-		t.Errorf("ordinary grant configured total = %d, want 6", ord.ConfiguredTotal)
-	}
-
-	// A permit granted before an update keeps the generation that admitted it:
-	// that correlation is the whole reason the field exists.
-	if err := l.SetBudget(3); err != nil {
-		t.Fatal(err)
-	}
-	if ord.Generation != genAtGrant {
-		t.Errorf("a live permit's generation changed under it: %d -> %d",
-			genAtGrant, ord.Generation)
-	}
-	if now := l.Snapshot().Generation; now == genAtGrant {
-		t.Error("the ledger's generation did not advance on an accepted update")
-	}
-
-	ord.Release()
-	ord.Release()
-	ctl.Release()
-	if got := l.Outstanding(); got != 0 {
-		t.Errorf("outstanding = %d after releases, want 0", got)
-	}
-}
-
-// The EXPORTED engine path, across the transitions an operator actually makes.
-func TestEngineTargetBudgetTransitions(t *testing.T) {
-	// THE OPERATOR'S NUMBER IS THE TOTAL, including the reserved control
-	// socket. An earlier version of this cell configured 51 and called it
-	// "50", which is the off-by-one that makes a test describe a policy
-	// nobody set: max_target_conns = 50 means fifty sockets, of which
-	// forty-nine are available to ordinary work.
-	e := New(nil, nil, WithTargetConnBudget(50))
-
-	if s := e.Settings().TargetConns; s.Configured != 50 || s.OrdinaryLimit != 49 {
-		t.Fatalf("configured=%d ordinary=%d, want 50 and 49 — the budget is the TOTAL",
-			s.Configured, s.OrdinaryLimit)
-	}
-
-	var held []*Permit
-	for range 49 {
-		p, err := e.targetPermits.Acquire()
-		if err != nil {
-			t.Fatal(err)
-		}
-		held = append(held, p)
-	}
-	// The fiftieth is the control lane's and ordinary work cannot have it.
-	if _, err := e.targetPermits.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Fatal("ordinary work must stop at 49 of a 50 budget")
-	}
-
-	// 50 -> 25: drains, kills nothing.
-	if err := e.setTargetConnBudget(25); err != nil {
-		t.Fatalf("lowering the budget was refused: %v", err)
-	}
-	s := e.Settings().TargetConns
-	if s.Configured != 25 || s.OrdinaryLimit != 24 {
-		t.Fatalf("after 50->25: configured=%d ordinary=%d, want 25 and 24",
-			s.Configured, s.OrdinaryLimit)
-	}
-	if s.Outstanding != 49 || !s.Draining {
-		t.Fatalf("outstanding=%d draining=%v, want 49 and true — lowering must not kill",
-			s.Outstanding, s.Draining)
-	}
-	// Effective = max(Configured, O+1) = max(25, 50) = 50. The reserved slot is
-	// part of the ceiling whether or not a cancel is in flight.
-	if s.Ordinary != 49 || s.Control != 0 {
-		t.Fatalf("O=%d K=%d, want 49 and 0", s.Ordinary, s.Control)
-	}
-	if s.Effective != 50 {
-		t.Errorf("effective = %d, want 50 = max(Configured 25, O+1) — the ceiling counts "+
-			"the reserved slot at all times, because a cancel may arrive at any moment",
-			s.Effective)
-	}
-
-	// A refused update must change nothing, including the generation.
-	genBefore := e.Settings().TargetConns.Generation
-	if err := e.setTargetConnBudget(0); !errors.Is(err, ErrInvalidBudget) {
-		t.Fatalf("a nonpositive update was accepted: %v", err)
-	}
-	after := e.Settings().TargetConns
-	if after.Generation != genBefore {
-		t.Errorf("a REFUSED update advanced the generation %d -> %d; a reader comparing "+
-			"snapshots would believe the policy changed", genBefore, after.Generation)
-	}
-	if after.Configured != 25 {
-		t.Errorf("a refused update changed the budget to %d", after.Configured)
-	}
-
-	// 25 -> 60: raising ends the drain immediately, without touching sockets.
-	if err := e.setTargetConnBudget(60); err != nil {
-		t.Fatal(err)
-	}
-	if up := e.Settings().TargetConns; up.Draining || up.Configured != 60 || up.Effective != 60 {
-		t.Errorf("after 25->60: draining=%v configured=%d effective=%d, want false, 60, 60",
-			up.Draining, up.Configured, up.Effective)
-	}
-
-	// 60 -> 20: lowering again while still over.
-	if err := e.setTargetConnBudget(20); err != nil {
-		t.Fatal(err)
-	}
-	if down := e.Settings().TargetConns; !down.Draining || down.Configured != 20 || down.Effective != 50 {
-		t.Errorf("after 60->20: draining=%v configured=%d effective=%d, want true, 20, 50",
-			down.Draining, down.Configured, down.Effective)
-	}
-
-	// A cancellation still goes through while draining, is COUNTED in
-	// Outstanding, and does NOT move the ceiling.
-	idle := e.Settings().TargetConns
-	ctl, err := e.targetPermits.AcquireControl(context.Background())
-	if err != nil {
-		t.Fatalf("a cancellation during a drain was refused: %v", err)
-	}
-	occupied := e.Settings().TargetConns
-	if occupied.Control != 1 || occupied.Outstanding != 50 {
-		t.Errorf("occupied: K=%d outstanding=%d, want 1 and 50 — the control socket must "+
-			"be ACCOUNTED FOR, not exempted", occupied.Control, occupied.Outstanding)
-	}
-	if occupied.Effective != idle.Effective {
-		t.Errorf("effective moved from %d to %d when the lane was occupied; a drain "+
-			"generation's ceiling must not rise and fall with cancel traffic",
-			idle.Effective, occupied.Effective)
-	}
-	ctl.Release()
-	if released := e.Settings().TargetConns; released.Control != 0 ||
-		released.Outstanding != idle.Outstanding || released.Effective != idle.Effective {
-		t.Errorf("after release: K=%d outstanding=%d effective=%d, want %d, %d, %d",
-			released.Control, released.Outstanding, released.Effective,
-			0, idle.Outstanding, idle.Effective)
-	}
-
-	// Draining below the new budget clears the state -- and the ceiling must
-	// fall MONOTONICALLY on the way. Observing only the endpoint would pass a
-	// ledger whose Effective bounced upward in the middle, which is exactly
-	// the defect the O+1 definition exists to prevent.
-	previous := e.Settings().TargetConns.Effective
-	for i := range 35 {
-		held[i].Release()
-		now := e.Settings().TargetConns.Effective
-		if now > previous {
-			t.Fatalf("effective rose %d -> %d while retiring ordinary socket %d; a drain "+
-				"generation's ceiling must converge downwards and never back up",
-				previous, now, i)
-		}
-		previous = now
-	}
-	// Retiring ordinary sockets converges the ceiling DOWN to Configured and
-	// never back up.
-	end := e.Settings().TargetConns
-	if end.Draining || end.Outstanding != 14 {
-		t.Errorf("after draining: draining=%v outstanding=%d, want false and 14",
-			end.Draining, end.Outstanding)
-	}
-	if end.Effective != 20 {
-		t.Errorf("effective = %d, want Configured 20 once drained — a drain must converge",
-			end.Effective)
-	}
-}
-
-// An engine built without a budget refuses a live update rather than silently
-// creating one nobody configured.
-func TestEngineWithoutABudgetRefusesLiveUpdates(t *testing.T) {
-	e := New(nil, nil)
-	if err := e.setTargetConnBudget(25); !errors.Is(err, ErrInvalidBudget) {
-		t.Errorf("err = %v, want a refusal", err)
-	}
-	if got := e.Settings().TargetConns; got.Configured != 0 {
-		t.Errorf("an engine without a budget reported %d", got.Configured)
 	}
 }
