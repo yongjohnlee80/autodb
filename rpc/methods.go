@@ -1914,8 +1914,9 @@ func (s *Server) register() {
 		// A client from before connection pools still sends max_target_conns
 		// fifth. Say what replaced it rather than "wrong number of arguments".
 		if len(req.Params) == 6 {
-			return nil, errors.New("policy.reload no longer takes max_target_conns: socket budgets " +
-				"are per connection pool now; change one with pool.update")
+			return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+				Message: "policy.reload no longer takes max_target_conns: socket budgets are " +
+					"per connection pool now; change one with pool.update"}
 		}
 		if err := exactArgs(req.Params, 5); err != nil {
 			return nil, err
