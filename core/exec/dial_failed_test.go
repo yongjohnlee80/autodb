@@ -309,10 +309,12 @@ func TestAcquireRequestBackend_ADrainKeepsItsOwnSentinel(t *testing.T) {
 		_ = pool.Close()
 	}
 
+	// A delete's drain answers "gone" (drainErr), and that is the caller's
+	// own answer, not a dial failure.
 	_, aerr := f.eng.acquireRequestBackend(ctx, &session{}, row)
-	if !errors.Is(aerr, ErrConnectionDraining) {
-		t.Errorf("acquiring a backend for a draining connection returned %v, want the "+
-			"draining sentinel; the caller cannot act on anything else", aerr)
+	if !errors.Is(aerr, ErrTargetGone) {
+		t.Errorf("acquiring a backend for a connection being deleted returned %v, want the "+
+			"gone sentinel; the caller cannot act on anything else", aerr)
 	}
 	if errors.Is(aerr, ErrDialFailed) {
 		t.Errorf("a draining connection is reported as a dial failure (%v), so the client "+

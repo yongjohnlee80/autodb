@@ -33,22 +33,26 @@ func sess(id SessionID, userID, connID int64) *session {
 func TestReservation_EachMemberRefusesOnItsOwn(t *testing.T) {
 	t.Parallel()
 
+	// The per-user cap binds exec and TUI sessions, which take no lease; a
+	// front-door session isn't counted per user (TestAdmission_FrontDoor...).
 	t.Run("the per-user session cap", func(t *testing.T) {
 		t.Parallel()
 		r := regFor(t, 2, 100, 100, 1<<30)
 		for i := 0; i < 2; i++ {
-			if err := r.admitWithLease(sess(SessionID(string(rune('a'+i))), 7, 1), 1, 16); err != nil {
+			if err := r.admitWithLease(sess(SessionID(string(rune('a'+i))), 7, 1), 0, 16); err != nil {
 				t.Fatalf("admit %d: %v", i, err)
 			}
 		}
-		if err := r.admitWithLease(sess("over", 7, 1), 1, 16); !errors.Is(err, ErrSessionCapExceeded) {
+		if err := r.admitWithLease(sess("over", 7, 1), 0, 16); !errors.Is(err, ErrSessionCapExceeded) {
 			t.Errorf("err = %v, want ErrSessionCapExceeded", err)
 		}
 	})
 
+	// The front door's global cap is the global cap less the slots kept for
+	// exec and the TUI.
 	t.Run("the global session cap", func(t *testing.T) {
 		t.Parallel()
-		r := regFor(t, 100, 2, 100, 1<<30)
+		r := regFor(t, 100, execReservedSessions+2, 100, 1<<30)
 		for i := 0; i < 2; i++ {
 			if err := r.admitWithLease(sess(SessionID(string(rune('a'+i))), int64(i), 1), 1, 16); err != nil {
 				t.Fatalf("admit %d: %v", i, err)

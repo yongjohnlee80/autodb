@@ -1098,10 +1098,19 @@ func (r *sessionRegistry) drainErrLocked(connID int64) error {
 // The heartbeat carries it because one holder idling is a person thinking, and
 // the same person holding nine backends while idling is a leak -- and the
 // record that shows only the one backend cannot tell those apart.
+// holderCount is a user's open sessions of EVERY class, front door included.
+// Derived from the sessions themselves, not perUser, which counts only exec
+// and TUI sessions now.
 func (r *sessionRegistry) holderCount(userID int64) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.perUser[userID]
+	n := 0
+	for _, s := range r.byID {
+		if s.userID == userID {
+			n++
+		}
+	}
+	return n
 }
 
 func (r *sessionRegistry) snapshot() []*session {

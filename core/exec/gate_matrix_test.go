@@ -144,6 +144,16 @@ var gateMatrixWalkExempt = map[string]string{
 	// surface rather than by anything a statement passes through.
 	"ErrInvalidBudget": "live target-budget update refused; an operator-surface validation " +
 		"error, not a gate refusal — no statement path can raise it",
+	// A pin that got its permit but whose target didn't open in time. Raised
+	// at the pin, before any statement is judged, and answered by the front
+	// door's startup classification as unavailable, never by an admission stage.
+	"ErrBackendOpenTimeout": "a pin's target did not open within its allowance; raised at the pin " +
+		"before any statement is judged and answered as startup-unavailable, not a gate refusal",
+	// Connection-pool administration, on the operator surface alone.
+	"ErrInvalidPool": "a pool write refused (bad max, unknown pool, an engine outside every pool); " +
+		"an admin-surface validation error, not a gate refusal — no statement path can raise it",
+	"ErrPoolInUse": "deleting a pool a connection still belongs to; an admin-surface refusal, " +
+		"not a gate refusal — no statement path can raise it",
 	// A request's backend connection could not be opened. Raised where a
 	// backend is acquired, BEFORE any statement is judged, so no admission
 	// stage can produce it — the same reason the budget sentinel above is

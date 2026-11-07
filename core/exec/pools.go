@@ -123,6 +123,9 @@ func (p *poolSet) dropPool(poolID int64) {
 // setPoolOf records the pool a connection is in, from its row: its pool_id for
 // a pgx connection (the default pool if that id isn't loaded), 0 otherwise.
 func (p *poolSet) setPoolOf(row *meta.Connection) {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.setPoolOfLocked(row)
@@ -144,6 +147,9 @@ func (p *poolSet) setPoolOfLocked(row *meta.Connection) {
 // every pool. pgPoolLimits records the row first (setPoolOf), so every pgx
 // target that has ever been opened is known here.
 func (p *poolSet) ledgerFor(connID int64) *permitLedger {
+	if p == nil { // an Engine built without New: no pools, so none budgets anything
+		return nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.ledgers[p.poolOf[connID]]

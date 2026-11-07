@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -31,7 +32,7 @@ func TestPoolLimits_BoundAndCap(t *testing.T) {
 	e := New(nil, nil, WithPoolLimits(12, 3*time.Minute, 40*time.Minute))
 
 	pg := func(row *meta.Connection) *pgxpool.Config {
-		cfg := &pgxpool.Config{}
+		cfg := &pgxpool.Config{ConnConfig: &pgx.ConnConfig{}}
 		e.pgPoolLimits(row)(cfg)
 		return cfg
 	}
@@ -48,28 +49,37 @@ func TestPoolLimits_BoundAndCap(t *testing.T) {
 		return db.Stats()
 	}
 
-	// The install-wide bound applies when a row asks for nothing — on EVERY
-	// driver. mysql and sqlite were the unbounded case: database/sql caps
-	// nothing by default and keeps idle physical connections to the target
-	// indefinitely, while only postgres was wired.
-	if got := pg(&meta.Connection{}).MaxConns; got != 12 {
-		t.Errorf("postgres MaxConns = %d, want 12 — an unbounded pool lets open "+
-			"transactions exhaust the target's connection budget", got)
+	// A POSTGRES TARGET IS BOUNDED BY ITS CONNECTION POOL'S LEDGER, and by
+	// nothing of pgxpool's own: MaxConns is the schema ceiling and never binds,
+	// whatever the row or the install asks, and a member idles out in a second
+	// because a pool backend is never reused.
+	pgRow := func(request int64) *meta.Connection {
+		return &meta.Connection{ID: 1, Engine: engine.Postgres, PoolID: meta.DefaultPoolID, PoolMaxConns: request}
 	}
+	for _, request := range []int64{0, 4, 500} {
+		cfg := pg(pgRow(request))
+		if cfg.MaxConns != int32(meta.MaxPoolConns) {
+			t.Errorf("postgres MaxConns = %d for a row asking %d, want the never-binding %d — "+
+				"the pool's ledger is the bound", cfg.MaxConns, request, meta.MaxPoolConns)
+		}
+		if cfg.MaxConnIdleTime != strayBackendIdle || cfg.MaxConnLifetime != 40*time.Minute {
+			t.Errorf("postgres retirement = idle %s / lifetime %s, want %s / 40m",
+				cfg.MaxConnIdleTime, cfg.MaxConnLifetime, strayBackendIdle)
+		}
+		if cfg.ConnConfig.DialFunc == nil || cfg.ConnConfig.Tracer == nil {
+			t.Error("a postgres target opened without the ledger's dialer and acquire marker")
+		}
+	}
+
+	// The install-wide bound applies to MySQL and SQLite, outside every pool,
+	// when a row asks for nothing: database/sql caps nothing by default and
+	// keeps idle physical connections to the target indefinitely.
 	if got := sqlDB(&meta.Connection{}).MaxOpenConnections; got != 12 {
 		t.Errorf("database/sql MaxOpenConnections = %d, want 12 — mysql and sqlite targets "+
 			"open connections without any cap at all", got)
 	}
-	if cfg := pg(&meta.Connection{}); cfg.MaxConnIdleTime != 3*time.Minute || cfg.MaxConnLifetime != 40*time.Minute {
-		t.Errorf("postgres retirement = idle %s / lifetime %s, want 3m / 40m; without a "+
-			"lifetime a server-side change needs a daemon restart to take effect",
-			cfg.MaxConnIdleTime, cfg.MaxConnLifetime)
-	}
 
-	// A row may ask for FEWER, on every driver.
-	if got := pg(&meta.Connection{PoolMaxConns: 4}).MaxConns; got != 4 {
-		t.Errorf("postgres MaxConns = %d, want the row's own lower request of 4", got)
-	}
+	// A row may ask for FEWER.
 	if got := sqlDB(&meta.Connection{PoolMaxConns: 4}).MaxOpenConnections; got != 4 {
 		t.Errorf("database/sql MaxOpenConnections = %d, want the row's own lower request of 4", got)
 	}
@@ -79,10 +89,6 @@ func TestPoolLimits_BoundAndCap(t *testing.T) {
 	// having one — and the request is capped when the pool is OPENED, so
 	// lowering the install-wide value immediately binds rows that had asked
 	// for more, with no stored values to rewrite.
-	if got := pg(&meta.Connection{PoolMaxConns: 500}).MaxConns; got != 12 {
-		t.Errorf("postgres MaxConns = %d, want it capped to the install-wide 12; a connection "+
-			"row raised its own share of the target's connection budget", got)
-	}
 	if got := sqlDB(&meta.Connection{PoolMaxConns: 500}).MaxOpenConnections; got != 12 {
 		t.Errorf("database/sql MaxOpenConnections = %d, want it capped to the install-wide 12", got)
 	}
@@ -97,7 +103,7 @@ func TestPoolLimits_DefaultsAreBounded(t *testing.T) {
 	e := New(nil, nil)
 
 	cfg := &pgxpool.Config{}
-	e.pgPoolLimits(&meta.Connection{})(cfg)
+	e.pgPoolLimits(&meta.Connection{ID: 1, Engine: engine.Postgres, PoolID: meta.DefaultPoolID})(cfg)
 	if cfg.MaxConns <= 0 || cfg.MaxConnLifetime <= 0 {
 		t.Errorf("a default eng opens postgres pools with MaxConns=%d lifetime=%s; unbounded "+
 			"by default means every unconfigured install can exhaust its target",
@@ -236,13 +242,13 @@ func TestOpenTarget_EveryDriverBranchAppliesThePoolBounds(t *testing.T) {
 				if pgCfg == nil {
 					t.Fatal("the postgres branch passed nothing")
 				}
-				if pgCfg.MaxConns != 11 {
-					t.Errorf("MaxConns = %d, want 11 — the postgres branch opens without the "+
-						"engine's pool bound", pgCfg.MaxConns)
+				if pgCfg.MaxConns != int32(meta.MaxPoolConns) || pgCfg.ConnConfig.DialFunc == nil {
+					t.Errorf("MaxConns = %d, want %d with the ledger's dialer — the postgres branch "+
+						"opens without its connection pool's bound", pgCfg.MaxConns, meta.MaxPoolConns)
 				}
-				if pgCfg.MaxConnIdleTime != 7*time.Minute || pgCfg.MaxConnLifetime != 44*time.Minute {
-					t.Errorf("retirement = idle %s / lifetime %s, want 7m / 44m",
-						pgCfg.MaxConnIdleTime, pgCfg.MaxConnLifetime)
+				if pgCfg.MaxConnIdleTime != strayBackendIdle || pgCfg.MaxConnLifetime != 44*time.Minute {
+					t.Errorf("retirement = idle %s / lifetime %s, want %s / 44m",
+						pgCfg.MaxConnIdleTime, pgCfg.MaxConnLifetime, strayBackendIdle)
 				}
 				return
 			}
