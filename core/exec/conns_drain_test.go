@@ -107,8 +107,8 @@ func TestTarget_DrainAndPoolAreOneDecision(t *testing.T) {
 			}
 			switch {
 			case gotErr != nil:
-				if !errors.Is(gotErr, ErrConnectionDraining) {
-					t.Errorf("target refused for the wrong reason: %v", gotErr)
+				if !errors.Is(gotErr, ErrTargetGone) {
+					t.Errorf("target refused for the wrong reason: %v (a delete answers gone)", gotErr)
 				}
 			case got != drainedPool:
 				t.Errorf("target handed out a pool the delete never saw (%v, drained %v); "+

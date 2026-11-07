@@ -100,6 +100,7 @@ func TestConfigFailure_EveryRaiseSiteUsesTheClosedSet(t *testing.T) {
 	allowedIdents := map[string]bool{
 		"DetailUnknownEngine": true, "DetailDSNUnusable": true, "DetailDSNRefused": true, "DetailPoolRefused": true,
 		"DetailGrammarUnproved": true, "DetailNoDestroy": true, "DetailStoreUnavailable": true,
+		"DetailPermitUnreadable": true,
 	}
 
 	fset := token.NewFileSet()

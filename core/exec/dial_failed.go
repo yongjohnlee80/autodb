@@ -388,7 +388,9 @@ func requestTargetFailure(ctx context.Context, connID int64, err error) error {
 	if _, ok := ConfigFailureOf(err); ok {
 		return err
 	}
-	for _, own := range []error{ErrConnectionDraining, auth.ErrLocked, context.Canceled} {
+	// Both drain answers are the caller's to act on (drainErr): a delete's
+	// ErrTargetGone and a change's ErrConnectionDraining. Neither is an outage.
+	for _, own := range []error{ErrConnectionDraining, ErrTargetGone, auth.ErrLocked, context.Canceled} {
 		if errors.Is(err, own) {
 			return err
 		}

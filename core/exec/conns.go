@@ -285,7 +285,7 @@ func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 		if lifetime > 0 {
 			cfg.MaxConnLifetime = lifetime
 		}
-		if ledger == nil || cfg.ConnConfig == nil {
+		if ledger == nil {
 			return
 		}
 		// NEVER BINDS: the ledger refuses the dial first, so a raised pool max
@@ -297,6 +297,9 @@ func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 		// not row 12's ten minutes. was: row 12.
 		cfg.MaxConnIdleTime = strayBackendIdle
 		cfg.HealthCheckPeriod = strayBackendIdle
+		if cfg.ConnConfig == nil {
+			return
+		}
 		// Every socket takes a permit of its mark's share, and the mark is
 		// set for every acquisition by the acquire tracer (dial_marks.go).
 		cfg.ConnConfig.DialFunc = permitDialer(ledger, cfg.ConnConfig.DialFunc)
@@ -316,7 +319,7 @@ func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 			}
 			permit, err := permitOf(conn)
 			if err != nil {
-				return false, NewConfigFailure(ConfigStageUnclassified, connID, DetailUnclassified, err)
+				return false, NewConfigFailure(ConfigStagePool, connID, DetailPermitUnreadable, err)
 			}
 			return permit.Class == dialMarkOf(ctx).class(), nil
 		}

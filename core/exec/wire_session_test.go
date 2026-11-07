@@ -451,18 +451,24 @@ func TestOpenWireSession_TheRemainingRefusals(t *testing.T) {
 		}
 	})
 
-	t.Run("the per-user session cap", func(t *testing.T) {
+	// A client's own connection pool is not a person opening sessions: the
+	// per-user cap doesn't apply at the front door (owner ruling, 2026-11-07).
+	// The global cap less the exec reservation does.
+	t.Run("the global front-door session cap", func(t *testing.T) {
 		t.Parallel()
 		f, _, secret, dbName := wireFixture(t)
 		ctx := context.Background()
 		f.eng.sessions.perUserCap = 1
+		f.eng.sessions.globalCap = execReservedSessions + 2
 
-		if _, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP); err != nil {
-			t.Fatalf("first: %v", err)
+		for i := range 2 {
+			if _, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP); err != nil {
+				t.Fatalf("front-door session %d past a per-user cap of 1: %v", i, err)
+			}
 		}
 		_, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
 		if err == nil {
-			t.Fatal("a second session was admitted past a per-user cap of 1")
+			t.Fatal("a third session was admitted past the front door's global cap")
 		}
 		if got := DenialReason(err); got != DenySessionCap {
 			t.Errorf("reason = %q, want %q", got, DenySessionCap)

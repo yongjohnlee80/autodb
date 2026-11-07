@@ -74,7 +74,10 @@ func newFixtureOn(t *testing.T, cfg config.Meta) *fixture {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	eng := New(store, svc, WithMaxRows(3))
+	// pool_max_conns set, not left to 2 x this host's cores: the fixture's SQLite
+	// connection is outside every pool, so it is its front-door session limit
+	// (less headroom), and cells must not pass or wait by the CI machine's size.
+	eng := New(store, svc, WithMaxRows(3), WithPoolLimits(64, 0, 0))
 	t.Cleanup(func() { _ = eng.Close() })
 
 	dsn := fmt.Sprintf("file:exectest%d_%d?mode=memory&cache=shared", time.Now().UnixNano(), fixtureSeq.Add(1))

@@ -422,26 +422,9 @@ func TestScheduler_TheServerWaitExpiresWithItsOwnIdentity(t *testing.T) {
 	}
 }
 
-// THE CALLER'S DEADLINE CAPS THE SERVER'S WAIT.
-//
-// A client with a short deadline is not held for ninety seconds to be told
-// something its own context already decided.
-func TestScheduler_TheCallerDeadlineCapsTheServerWait(t *testing.T) {
-	r := schedRegistry(t, 1)
-	holder := schedSession("holder", 1, 7)
-	mustAdmit(t, r, holder, 7)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	err := r.admitWithLeaseOrWait(ctx, schedSession("short-deadline", 2, 7), 7, 0)
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("the wait took %s — the caller's deadline did not cap the server's", elapsed)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("got %v, want the caller's deadline", err)
-	}
-}
+// (was: the caller's deadline capped the server's wait by ending it itself.
+// The server's bound now always ends the wait, early enough for the answer:
+// TestScheduler_TheServerBoundOwnsTheWaitAndKeepsTheAnswersTime.)
 
 // THE SERVER WAIT IS NINETY SECONDS AND IS NOT DERIVED FROM ANYTHING ELSE.
 //
@@ -554,8 +537,10 @@ func TestScheduler_RemovingATargetAnswersOnlyItsOwnWaiters(t *testing.T) {
 	late := schedSession("arrives-after-the-removal", 5, 1)
 	late.connID = 1
 	lateErr := r.admitWithLeaseOrWait(context.Background(), late, 1, 0)
-	if !errors.Is(lateErr, ErrConnectionDraining) {
-		t.Errorf("a request arriving after the removal got %v, want the draining refusal", lateErr)
+	// The drain's one answer for a delete: the newcomer is told the
+	// connection is gone, exactly as the swept waiters were (drainErr).
+	if !errors.Is(lateErr, ErrTargetGone) {
+		t.Errorf("a request arriving after the removal got %v, want the gone refusal", lateErr)
 	}
 	if d := r.lineDepth(); d != 1 {
 		t.Errorf("line depth = %d, want 1", d)
@@ -586,15 +571,16 @@ func TestScheduler_ShutdownAnswersTheLineAndRefusesLaterArrivals(t *testing.T) {
 
 // A REFUSAL WAITING CANNOT CURE IS NOT QUEUED.
 //
-// A per-user cap is no better in ninety seconds than it is now, so queueing one
-// would hold a client open only to tell it the same thing later.
+// A full front door (the global cap less the exec reservation) is no better in
+// ninety seconds than it is now, so queueing one would hold a client open only
+// to tell it the same thing later.
 func TestScheduler_ARefusalWaitingCannotCureIsAnsweredImmediately(t *testing.T) {
 	r := schedRegistry(t, 4)
-	r.perUserCap = 1
+	r.globalCap = execReservedSessions + 1
 	mustAdmit(t, r, schedSession("first", 1, 7), 7)
-	err := r.admitWithLeaseOrWait(context.Background(), schedSession("second-for-same-user", 1, 7), 7, 0)
+	err := r.admitWithLeaseOrWait(context.Background(), schedSession("second", 2, 7), 7, 0)
 	if !errors.Is(err, ErrSessionCapExceeded) {
-		t.Fatalf("got %v, want the per-user cap refusal", err)
+		t.Fatalf("got %v, want the global session cap refusal", err)
 	}
 	if d := r.lineDepth(); d != 0 {
 		t.Errorf("line depth = %d, want 0 — a refusal waiting cannot cure was queued", d)
