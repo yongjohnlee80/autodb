@@ -765,6 +765,10 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"authenticate-and-open", "frontdoor/queue-timeout", outcome.Refusal, outcome.Capacity},
 		{"authenticate-and-open", "frontdoor/all-capacity-in-transaction", outcome.Refusal, outcome.Capacity},
 		{"authenticate-and-open", "frontdoor/target-removed-while-waiting", outcome.Refusal, outcome.Capacity},
+		// A connection being moved to another pool or downgraded, and a pin
+		// that waited out its pool's front-door share: capacity, never charged.
+		{"authenticate-and-open", "frontdoor/connection-changing", outcome.Refusal, outcome.Capacity},
+		{"authenticate-and-open", "frontdoor/target-budget-exhausted", outcome.Refusal, outcome.Capacity},
 		{"authenticate-and-open", "frontdoor/instance-shutting-down", outcome.Refusal, outcome.Capacity},
 		{"authenticate-and-open", "frontdoor/lease-encoding", outcome.Refusal, outcome.None},
 		{"authenticate-and-open", "frontdoor/no-grant", outcome.Refusal, outcome.None},

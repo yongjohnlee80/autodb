@@ -44,7 +44,9 @@ local M = {}
 -- `BEGIN; …; COMMIT;` a user could already send means something
 -- different now, so a stale pairing has to fail at the handshake
 -- rather than silently apply half a script.
-M.PROTOCOL = 14
+-- 15: the connection pool verbs (pool.list / create / update / delete and
+-- conn.set_pool), and policy.reload lost its fifth value, max_target_conns.
+M.PROTOCOL = 15
 ---@class AutodbClientOpts
 ---@field addr string                 -- socket path, or host:port for TCP
 ---@field mode string?                -- "pipe" (default endpoint) or "tcp"

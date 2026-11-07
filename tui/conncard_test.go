@@ -89,9 +89,9 @@ func TestCardBudget_TheConnectionsOwnBoundLeads(t *testing.T) {
 	c, ep := cardFixture()
 	text := buildCardText("fake-token", c, ep, "root", "admin", "")
 	budget := strings.SplitN(text, "LIMITS THAT APPLY TO THIS TOKEN", 2)
-	if len(budget) != 2 || !strings.Contains(budget[1], "this connection        4") ||
-		strings.Index(budget[1], "this connection") > strings.Index(budget[1], "sessions per user") {
-		t.Fatal("connection-owned bound did not lead the shared ceilings")
+	if len(budget) != 2 || !strings.Contains(budget[1], "pool prod              25") ||
+		strings.Index(budget[1], "pool prod") > strings.Index(budget[1], "sessions, instance") {
+		t.Fatal("the connection's own pool did not lead the shared ceilings")
 	}
 }
 

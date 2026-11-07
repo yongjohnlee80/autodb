@@ -7,7 +7,6 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -38,10 +37,11 @@ type poolLookup interface {
 	limitOf(key leaseKey) int
 }
 
-// inLedger reports whether a connection's sockets are budgeted by a pool. Only
-// pgx targets dial through permitDialer; MySQL and SQLite use database/sql and
-// are outside every pool whatever their pool_id says.
-func inLedger(row *meta.Connection) bool { return row.Engine == engine.Postgres }
+// inLedger reports whether a connection's sockets are budgeted by a pool: the
+// targets that speak the PostgreSQL wire, which autodb opens through pgxpool and
+// permitDialer. MySQL and SQLite use database/sql and are outside every pool
+// whatever their pool_id says.
+func inLedger(row *meta.Connection) bool { return row.Engine.SpeaksPostgresWire() }
 
 // poolSet owns pool membership and the pool ledgers.
 //
