@@ -801,7 +801,7 @@ func (e *Engine) pinTargetBackend(ctx context.Context, s *session, target dao.Da
 	// borrow and return connections without passing the release gate, so where
 	// this backend came from proves nothing about what is on it. Prove it here,
 	// before the session can run anything: see proveCheckoutClean.
-	if cerr := e.proveCheckoutClean(ctx, pc); cerr != nil {
+	if cerr := e.proveCheckoutClean(ctx, s.connID, pc); cerr != nil {
 		// A BACKEND THIS PACKAGE COULD NOT SANITISE IS NAMED AS A SETTINGS
 		// FAILURE, AND IT IS NAMED EXPLICITLY RATHER THAN CLASSIFIED.
 		//

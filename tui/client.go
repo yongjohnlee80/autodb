@@ -971,12 +971,16 @@ type ConnInfo struct {
 	// the fact whose absence cost an evening.
 	TargetDB string
 
-	// PoolMaxConns is this connection's OWN bound on pooled connections, and
-	// it is the number that actually deals with a client opening more than it
-	// should. Zero means the connection sets none and the engine's ceiling
-	// applies. Johno's ruling: "Each conn should have allowed MAX CONNS to
-	// deal with anyways."
+	// PoolID and PoolName are the connection pool whose budget this
+	// connection shares; PoolID 0 is outside every pool (MySQL, SQLite).
+	PoolID   int64
+	PoolName string
+	// PoolMaxConns is what the connection's backends are held to: its pool's
+	// max_conns, or, outside every pool, its own pooled-connection cap.
 	PoolMaxConns int
+	// FrontDoorShare is how many front-door sessions the pool (or the
+	// connection, outside every pool) admits at once; more wait their turn.
+	FrontDoorShare int
 }
 
 func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
@@ -991,6 +995,8 @@ func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
 			ID: mI(m, "id"), Name: mS(m, "name"), Engine: mS(m, "engine"),
 			Profile: mS(m, "profile"), FrontDoorExposed: mB(m, "frontdoor_exposed"),
 			TargetDB: mS(m, "target_db"), PoolMaxConns: int(mI(m, "pool_max_conns")),
+			PoolID: mI(m, "pool_id"), PoolName: mS(m, "pool_name"),
+			FrontDoorShare: int(mI(m, "front_door_share")),
 		})
 	}
 	return out, nil
@@ -1012,7 +1018,6 @@ type FrontDoorEndpoint struct {
 	// cap of zero and is rendered differently.
 	MaxSessionsPerUser int
 	MaxSessionsGlobal  int
-	MaxTargetConns     int
 }
 
 // Configured reports whether a token minted now could actually be used.
@@ -1038,7 +1043,6 @@ func (b *Bound) FrontDoorEndpoint(ctx context.Context) (FrontDoorEndpoint, error
 
 		MaxSessionsPerUser: int(mI(m, "max_sessions_per_user")),
 		MaxSessionsGlobal:  int(mI(m, "max_sessions_global")),
-		MaxTargetConns:     int(mI(m, "max_target_conns")),
 	}
 	for _, h := range asList(m["host_names"]) {
 		if s, ok := h.(string); ok {

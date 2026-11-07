@@ -55,9 +55,11 @@ const (
 type admitWaiter struct {
 	s         *session
 	leaseConn int64
-	overhead  int64
-	seq       uint64
-	state     waitState
+	// claim is the lease key this waiter's demand claim was recorded under.
+	claim    leaseKey
+	overhead int64
+	seq      uint64
+	state    waitState
 	// blockedBy is the most recent capacity refusal that passed this waiter
 	// over. Guarded by r.mu, like everything else about the line.
 	blockedBy error
@@ -175,8 +177,12 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 	// Taken here and not after unlocking, because between those two points a
 	// release could serve this waiter, and a claim recorded for a request that
 	// is no longer queued is one the retry would spend on nobody.
+	// THE CLAIM KEEPS THE KEY IT WAS MADE UNDER, so dropping it never looks
+	// the pool up again.
 	w.wantsDemand = true
-	r.wantDemand(leaseConn)
+	w.claim, _ = r.leaseScope(leaseConn)
+	claim := w.claim
+	r.wantDemand(claim)
 
 	hook := r.hookWaiterQueued
 	r.mu.Unlock()
@@ -199,7 +205,7 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 	// Outside the lock because selecting a victim reads sessions, and the freed
 	// lease is NOT handed back here -- it goes through the line like any other
 	// release, so demand cannot become a way to jump the queue.
-	r.pressDemand(leaseConn)
+	r.pressDemand(claim)
 
 	if hook != nil {
 		// Announced OUTSIDE the lock and only once the request is genuinely
@@ -356,7 +362,7 @@ func (r *sessionRegistry) clearDemandClaimLocked(w *admitWaiter) {
 		return
 	}
 	w.wantsDemand = false
-	r.dropDemand(w.leaseConn)
+	r.dropDemand(w.claim)
 }
 
 // serveLine admits everyone in the line who can be admitted now. Caller holds
@@ -449,25 +455,30 @@ func (r *sessionRegistry) closeLine() int {
 // Done together, the transition has no inside. Every request is on exactly one
 // side of it: already waiting, and answered here; or arriving afterwards, and
 // refused by the draining mark before it can join anything.
-func (r *sessionRegistry) beginDrainingTarget(connID int64) (int, []*session) {
+func (r *sessionRegistry) beginDrainingTarget(connID int64, why drainCause) (int, []*session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// MARK FIRST. Everything after this point in this critical section is
 	// cleanup of what was already there; nothing new can arrive behind it.
-	r.draining[connID] = true
+	r.draining[connID] = why
 
 	kept := r.line[:0]
 	dropped := 0
 	for _, w := range r.line {
 		if w.leaseConn == connID {
 			// ANSWERED AT THE MOMENT OF REMOVAL, not by letting the wait
-			// expire. A timeout invites a retry that can now never succeed;
-			// this says the thing they asked for no longer exists. The send
-			// cannot block: the outcome channel is buffered by one and each
-			// waiter is resolved exactly once.
+			// expire, and with the drain's own answer (drainErrLocked): a
+			// delete says the connection no longer exists, a change says it
+			// is being changed and a retry will work. The send cannot block:
+			// the outcome channel is buffered by one and each waiter is
+			// resolved exactly once.
 			r.clearDemandClaimLocked(w)
-			w.resolve(WaitTargetGone, ErrTargetGone)
+			if why == drainRemoved {
+				w.resolve(WaitTargetGone, r.drainErrLocked(connID))
+			} else {
+				w.resolve(WaitDurableRefusal, r.drainErrLocked(connID))
+			}
 			dropped++
 			continue
 		}

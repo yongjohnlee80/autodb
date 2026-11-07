@@ -1592,29 +1592,11 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, s.wireErrFor(req, err)
 		}
-		// THE EFFECTIVE CAP, NOT THE REQUEST.
-		//
-		// A connection row's PoolMaxConns is a REQUEST -- poolLimitsFor keeps
-		// the SMALLER of it and the engine's own ceiling, and a row asking for
-		// more than the install allows simply does not get it. Publishing the
-		// row value made the card advertise 100 pooled connections on an
-		// install that would grant 8, under a heading promising ceilings the
-		// caller will actually meet.
-		//
-		// Read once, outside the loop: every row is bounded by the same engine
-		// ceiling, and taking it per row would let a concurrent reload split
-		// one list across two policies.
-		engineCeiling := s.eng.Settings().PoolMaxConns
-		effectivePool := func(request int64) int64 {
-			// Zero means the row asks for nothing of its own, so the engine's
-			// ceiling is the whole answer.
-			if request <= 0 || int(request) > engineCeiling {
-				return int64(engineCeiling)
-			}
-			return int64(request)
-		}
 		out := make([]any, 0, len(conns))
 		for _, c := range conns {
+			// WHAT THIS CONNECTION WILL ACTUALLY BE HELD TO, from the engine
+			// (ConnBudget), never re-derived here.
+			budget := s.eng.ConnBudget(c)
 			out = append(out, map[string]any{
 				"id": c.ID, "name": c.Name, "engine": c.Engine.String(),
 				"created_by": c.CreatedBy, "created_at": c.CreatedAt,
@@ -1623,10 +1605,12 @@ func (s *Server) register() {
 				// prevents clients from reconstructing one from the other.
 				"profile": c.Profile, "frontdoor_exposed": c.FrontDoorExposed != 0,
 				"target_db": c.TargetDB,
-				// WHAT THIS CONNECTION WILL ACTUALLY BE HELD TO: the row's
-				// request and the engine's ceiling, whichever binds. Additive,
-				// so no protocol bump -- the verb surface is unchanged.
-				"pool_max_conns": effectivePool(c.PoolMaxConns),
+				// Additive, so no protocol bump: the verb surface is unchanged.
+				// pool_id 0 means outside every pool (MySQL, SQLite), and then
+				// pool_max_conns is the connection's own cap.
+				"pool_id": budget.PoolID, "pool_name": budget.PoolName,
+				"pool_max_conns":   int64(budget.MaxConns),
+				"front_door_share": int64(budget.FrontDoorShare),
 			})
 		}
 		return out, nil
@@ -1737,7 +1721,7 @@ func (s *Server) register() {
 			// unchanged, which is what the handshake number tracks.
 			"max_sessions_per_user": int64(info.MaxSessionsPerUser),
 			"max_sessions_global":   int64(info.MaxSessionsGlobal),
-			"max_target_conns":      int64(info.MaxTargetConns),
+			// was: max_target_conns. Budgets are per pool: conn.list.
 		}, nil
 	})
 
@@ -1812,7 +1796,13 @@ func (s *Server) register() {
 		return s.eng.ShowPolicy(ctx, token)
 	})
 	s.handle("policy.reload", func(ctx context.Context, req *golibrpc.Request) (any, error) {
-		if err := exactArgs(req.Params, 6); err != nil {
+		// A client from before connection pools still sends max_target_conns
+		// fifth. Say what replaced it rather than "wrong number of arguments".
+		if len(req.Params) == 6 {
+			return nil, errors.New("policy.reload no longer takes max_target_conns: socket budgets " +
+				"are per connection pool now; change one with pool.update")
+		}
+		if err := exactArgs(req.Params, 5); err != nil {
 			return nil, err
 		}
 		token, err := argStr(req.Params, 0, "token")
@@ -1822,7 +1812,7 @@ func (s *Server) register() {
 		// Milliseconds, not duration strings. The wire carries a number that
 		// means one thing, rather than a format whose parser has to agree on
 		// both sides of a version boundary.
-		names := []string{"session_idle_ms", "idle_in_tx_ms", "max_tx_ms", "max_tx_ceiling_ms", "max_target_conns"}
+		names := []string{"session_idle_ms", "idle_in_tx_ms", "max_tx_ms", "max_tx_ceiling_ms"}
 		vals := make([]int64, len(names))
 		for i, name := range names {
 			v, ierr := argInt(req.Params, i+1, name)
@@ -1837,7 +1827,7 @@ func (s *Server) register() {
 		// duration, or as a small one, and be validated as though the operator
 		// had asked for it.
 		const maxMS = int64(math.MaxInt64) / int64(time.Millisecond)
-		for i, name := range names[:4] {
+		for i, name := range names {
 			if vals[i] < 0 || vals[i] > maxMS {
 				return nil, fmt.Errorf("%s is %d; it must be between 0 and %d milliseconds, "+
 					"beyond which the conversion wraps into a different duration",
@@ -1850,7 +1840,6 @@ func (s *Server) register() {
 			IdleInTxTimeout:      ms(vals[1]),
 			MaxTxDuration:        ms(vals[2]),
 			MaxTxDurationCeiling: ms(vals[3]),
-			MaxTargetConns:       int(vals[4]),
 		}, peerIP(req))
 		if rerr != nil {
 			return nil, s.wireErrFor(req, rerr)

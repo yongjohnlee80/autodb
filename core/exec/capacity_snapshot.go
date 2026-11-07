@@ -1,5 +1,10 @@
 package exec
 
+import (
+	"math"
+	"sort"
+)
+
 // CapacitySnapshot is what the caps and their occupants looked like at one
 // instant, for anything that wants to report pressure.
 //
@@ -14,9 +19,17 @@ type CapacitySnapshot struct {
 	// PerUser is each user's session count, against PerUserCap.
 	PerUser    map[int64]int
 	PerUserCap int
-	// Leases is each target's wire-lease count, against LeaseCap.
-	Leases   map[int64]int
-	LeaseCap int
+	// Leases is each lease key's front-door sessions against its limit: one
+	// row per pool, and one per connection outside every pool. was: one count
+	// per target against a single LeaseCap.
+	Leases []LeaseOccupancy
+}
+
+// LeaseOccupancy is one lease key's front-door sessions. Pool is the pool id,
+// or 0 for a connection outside every pool, which Conn then names.
+type LeaseOccupancy struct {
+	Pool, Conn  int64
+	Held, Limit int
 }
 
 // CapacitySnapshot reads every cap and its occupancy in ONE hold.
@@ -40,8 +53,7 @@ func (e *Engine) CapacitySnapshot() CapacitySnapshot {
 		SessionCap: r.globalCap,
 		PerUser:    make(map[int64]int, len(r.perUser)),
 		PerUserCap: r.perUserCap,
-		Leases:     make(map[int64]int, len(r.leases)),
-		LeaseCap:   r.leaseCap,
+		Leases:     make([]LeaseOccupancy, 0, len(r.leases)),
 	}
 	// COPIED, NOT SHARED. Handing out the live maps would let a reader range
 	// over them while an admission writes, which is a data race the caller
@@ -49,8 +61,16 @@ func (e *Engine) CapacitySnapshot() CapacitySnapshot {
 	for u, n := range r.perUser {
 		snap.PerUser[u] = n
 	}
-	for c, n := range r.leases {
-		snap.Leases[c] = n
+	for key, n := range r.leases {
+		limit := math.MaxInt
+		if r.pools != nil {
+			limit = r.pools.limitOf(key)
+		}
+		snap.Leases = append(snap.Leases, LeaseOccupancy{Pool: key.pool, Conn: key.conn, Held: n, Limit: limit})
 	}
+	sort.Slice(snap.Leases, func(i, j int) bool {
+		a, b := snap.Leases[i], snap.Leases[j]
+		return a.Pool < b.Pool || (a.Pool == b.Pool && a.Conn < b.Conn)
+	})
 	return snap
 }

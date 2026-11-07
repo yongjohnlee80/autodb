@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"net"
 	"sync"
+
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// ErrTargetBudgetExhausted means this instance already holds every production
-// connection its operator allowed it to hold.
+// ErrTargetBudgetExhausted means a dial found its share of a pool's budget
+// spent and waited for it as long as its caller did.
 //
 // It is a CAPACITY refusal and never charges the credential throttle — see
 // ChargeCapacity and the charge-class policy.
@@ -18,20 +20,26 @@ var ErrTargetBudgetExhausted = errors.New("exec: target connection budget exhaus
 // ErrInvalidBudget means a live budget update was refused.
 var ErrInvalidBudget = errors.New("exec: invalid target connection budget")
 
-// DialClass says which side of the budget a socket was charged to.
+// DialClass says which part of a pool's budget a socket was charged to.
 type DialClass uint8
 
 const (
-	// DialOrdinary is query, health-check and control-query traffic: it stops
-	// one short of the budget.
+	// DialOrdinary is exec, TUI and internal work (queries, introspection,
+	// routine refreshes, reconciliation): it draws the headroom share.
 	DialOrdinary DialClass = iota
 	// DialControl is the reserved lane — today, a cancellation.
 	DialControl
+	// DialFrontDoor is a front-door session's pin: it draws the front-door
+	// share, which the session line admits sessions against (leaseScope).
+	DialFrontDoor
 )
 
 func (c DialClass) String() string {
-	if c == DialControl {
+	switch c {
+	case DialControl:
 		return "control"
+	case DialFrontDoor:
+		return "front-door"
 	}
 	return "ordinary"
 }
@@ -49,7 +57,7 @@ type Permit struct {
 	Generation uint64
 	// Limit is the allowance in force for this permit's class at grant time.
 	Limit int
-	// Class is which side of the budget it was charged to.
+	// Class is which part of the budget it was charged to.
 	Class DialClass
 	// ConfiguredTotal and EffectiveCeiling are the operator's number and the
 	// immediately exercisable ceiling at grant time. Limit alone is ambiguous
@@ -73,230 +81,153 @@ func (p *Permit) Release() {
 	p.once.Do(p.release)
 }
 
-// permitLedger enforces `exec.max_target_conns`: the total number of sockets
-// this instance may have open to production targets, across every target.
+// permitLedger is one connection pool's socket budget: every socket autodb
+// holds to the pool's targets, whatever opened it (db_pool_connections).
 //
-// A RUNTIME PERMIT, NOT A SUM OF CONFIGURED CAPS (The policy). Summing each
-// target's pool_max_conns pre-slices the budget: two targets configured at 8
-// each reserve 16 whether or not either is busy, so one target queues while
-// the other's slice sits idle and nothing can rebalance. A permit is taken
-// when a socket is about to be dialled and released when it closes, so the
-// budget is spent by connections that actually exist.
+// A RUNTIME PERMIT, NOT A SUM OF CONFIGURED CAPS. A permit is taken when a
+// socket is about to be dialled and released when it closes, so the budget is
+// spent by connections that actually exist.
 //
-// Per-target pool_max_conns remains a technical CEILING on one pool. It is
-// not an allocation, and two targets may each be allowed more than the budget
-// — the ledger is what makes that safe (see docs/front-door/connection-holding-policy.md).
+// TWO SHARES AND A LANE. Front-door sessions hold their backend for life, and
+// exec, TUI and internal work come and go. With one shared allowance either
+// side could take every socket the other needs: exec the ones the session line
+// admitted front-door sessions against, or a full front door the ones a
+// routine refresh needs. So each has its own share, and the line's limit IS
+// the front-door share (leaseScope).
 //
-// Budget Allocation Layout:
+//	[Budget: N sockets]
+//	┌──────────────────────────────────┬──────────────────────┬──────────────┐
+//	│ front-door share                 │ headroom share       │ control lane │
+//	│ N − 1 − poolHeadroom(N)          │ poolHeadroom(N) ≤ 4  │ 1            │
+//	│ front-door session pins          │ exec, TUI, internal  │ cancels      │
+//	└──────────────────────────────────┴──────────────────────┴──────────────┘
 //
-//	[Total Budget: N Sockets]
-//	┌───────────────────────────────────────────────────┬──────────────────┐
-//	│ Ordinary Sockets Lane (O <= budget - 1)           │ Control (1 slot) │
-//	│ (Queries, Health checks, Pool leases)             │ (Cancel queries) │
-//	└───────────────────────────────────────────────────┴──────────────────┘
+// A DIAL WHOSE SHARE IS FULL WAITS IN THAT SHARE'S LINE, first come first
+// served, for as long as its acquirer waits (dial_marks.go). A release hands
+// its slot straight to the share's oldest waiter under the ledger's lock, so
+// the count never dips where another dial could step in.
 type permitLedger struct {
-	// queue orders the requests that could not be served immediately. Nil in
-	// the low-level cells that exercise the ledger's arithmetic alone.
-
 	mu     sync.Mutex
 	budget int
-	// ordinary (O) and control (K) are counted SEPARATELY, and that is not
-	// bookkeeping taste. With one combined counter the effective ceiling rose
-	// and fell inside a single drain generation as the short-lived cancel
-	// socket came and went -- 49, then 50, then 49 -- which contradicts the
-	// rule that a drain converges monotonically. Separating them lets the
-	// ceiling be stated in terms of ordinary occupancy alone.
-	ordinary int
-	control  int
-	// generation increments on every budget change. It exists because a
-	// lowered budget cannot be enforced retroactively: with 50 sockets open
-	// and a new budget of 25, the invariant "outstanding <= budget" is FALSE
-	// and stays false until sockets close on their own. Monotonicity is
-	// therefore asserted per generation rather than absolutely, and a caller
-	// that wants to reason about a drain needs to know which generation it is
-	// looking at.
+	// ordinary, frontDoor and control are counted SEPARATELY, so each share's
+	// ceiling is stated in terms of its own occupancy and a drain converges
+	// monotonically per share.
+	ordinary  int
+	frontDoor int
+	control   int
+	// generation increments on every budget change. A lowered budget cannot
+	// be enforced retroactively: with 50 sockets open and a new budget of 25,
+	// "outstanding <= budget" is FALSE until sockets close on their own, so
+	// monotonicity is asserted per generation.
 	generation uint64
+	// waiting is each share's line, oldest first.
+	waiting map[DialClass][]*shareWaiter
 
 	// testBeforePublish pauses a publication while its lock is held.
 	testBeforePublish func()
-
 	// testAfterSelect pauses AFTER a generation has been chosen and BEFORE it
-	// is published.
-	//
-	// It sits at that seam precisely because the rejected shape -- choose,
-	// unlock, relock, publish -- puts the seam OUTSIDE the lock while the
-	// correct one keeps it inside. A cell pausing here therefore blocks a
-	// second caller in the correct shape and lets one through in the rejected
-	// one, which is the difference the cell has to be able to see.
-	//
-	// testBeforePublish cannot see it: it is inside the publication lock in
-	// both shapes, so the second caller blocks either way and the rejected
-	// shape passes.
+	// is published, inside the lock, so a cell can see a second caller block.
 	testAfterSelect func()
 	// controlLane serializes the reserved slot to one holder.
 	controlLane chan struct{}
 }
 
+// shareWaiter is one dial waiting for its share. granted is buffered by one,
+// so the releasing path never blocks on a waiter that has already given up.
+type shareWaiter struct{ granted chan *Permit }
+
+// maxPoolHeadroom caps the headroom share: exec, TUI and internal work get at
+// most this many sockets of any pool, and every other socket below the control
+// lane is the front door's.
+const maxPoolHeadroom = 4
+
+// poolHeadroom is THE definition of the headroom share. Nothing else computes
+// it: the session line reads the front-door share through leaseScope.
+func poolHeadroom(budget int) int {
+	return min(max(budget, 0)/2, maxPoolHeadroom)
+}
+
 // newPermitLedger builds a ledger for exactly the budget it is given.
 //
-// IT NEVER RAISES A BUDGET. An earlier version silently turned anything below
-// 2 into 2, which let a caller authorising ONE socket end up holding two --
-// the ledger claiming more of a production database than it was permitted,
-// quietly, which is the precise failure this whole mechanism exists to
-// prevent. A number the caller did not choose is not a safe default just
-// because it is small.
+// IT NEVER RAISES A BUDGET. A number the caller did not choose is not a safe
+// default just because it is small; a budget too small to be useful is REFUSED
+// WHERE IT IS VALIDATED (meta.MinPoolConns, the schema's CHECK), so an operator
+// gets a message naming it rather than a daemon that quietly does something
+// else.
 //
-// A budget of 1 is therefore honoured as 1: the single slot is the control
-// lane's, the ordinary limit is 0, and every ordinary dial is refused. That is
-// a useless configuration, and it is REFUSED WHERE CONFIGURATION IS VALIDATED
-// rather than corrected here -- an operator gets a message naming the key, not
-// a daemon that quietly does something else.
-//
-// THERE IS NO "UNBOUNDED" LEDGER. A zero budget used to mean unlimited, which
-// was dead surface and incoherent besides: under the O/K algebra it reported
-// Effective = O+1 and Draining = true the moment anything was acquired.
-// ABSENCE IS A NIL LEDGER, which is what production already does -- an engine
-// built without a budget has no ledger at all and the dialer returns the
-// underlying dial untouched.
+// THERE IS NO "UNBOUNDED" LEDGER. Absence is a nil ledger: a target outside
+// every pool (MySQL, SQLite) has none, and the dialer returns the underlying
+// dial untouched.
 func newPermitLedger(budget int) *permitLedger {
-	// GENERATION ZERO IS THE CONFIGURED POLICY, and it starts here at zero for
-	// the same reason the engine's policy does: they are ONE generation, and
-	// two counters that start apart can never agree afterwards however
-	// carefully each is incremented.
-	//
-	// It used to start at 1. The engine's policy started at 0, each reload
-	// bumped both independently, and so after the first reload the policy
-	// reported generation 1 beside a ledger reporting 2 -- permanently offset,
-	// and described in the readout as "one generation".
-	return &permitLedger{budget: budget, generation: 0, controlLane: make(chan struct{}, 1)}
+	return &permitLedger{
+		budget:      budget,
+		waiting:     map[DialClass][]*shareWaiter{},
+		controlLane: make(chan struct{}, 1),
+	}
 }
 
 // SetBudget publishes a new budget as a new generation.
 //
-// IT NEVER CLOSES ANYTHING. Lowering the budget from 50 to 25 while 50 sockets
-// are open must not kill twenty-five live sessions to make the number true —
-// that would take a configuration edit and turn it into an outage. Instead no
-// new permit is granted above the new budget and outstanding DRAINS as work
-// finishes. The number becomes true by attrition, which is the only way it can
-// become true without breaking correct work.
+// IT NEVER CLOSES ANYTHING. Lowering a pool from 50 to 25 while 50 sockets are
+// open must not kill twenty-five live sessions to make the number true; no new
+// permit is granted above the new shares and outstanding DRAINS as work
+// finishes. A raise serves both shares' lines at once.
 func (l *permitLedger) SetBudget(n int) error {
-	// A NONPOSITIVE BUDGET IS NOT "UNLIMITED", and accepting it here would make
-	// a live update the one way to remove a production-safety bound that
-	// configuration refuses to remove at startup.
-	if n < 2 {
-		return fmt.Errorf("%w: a live budget update to %d is refused; the minimum is 2, "+
-			"because one permit is reserved so a cancellation can still be delivered",
-			ErrInvalidBudget, n)
+	if int64(n) < meta.MinPoolConns {
+		return fmt.Errorf("%w: a pool budget of %d is refused; the minimum is %d, one socket "+
+			"each for the control lane, the headroom share and the front-door share",
+			ErrInvalidBudget, n, meta.MinPoolConns)
 	}
-	// The caller has no policy to align with, so the generation simply
-	// advances -- CHOSEN AND PUBLISHED IN ONE CRITICAL SECTION.
-	//
-	// It used to read generation+1 under the lock, release it, and reacquire
-	// to publish. Two callers could then read the same current value and
-	// publish the same next one, or publish in the reverse order to the one
-	// they chose in: a generation that repeats, or goes backwards, is worse
-	// than no generation at all, because the whole point of the number is to
-	// let two observers say whether they saw the same publication.
+	// CHOSEN AND PUBLISHED IN ONE CRITICAL SECTION, so two callers can never
+	// publish the same next generation or publish in the reverse order.
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	next := l.generation + 1
 	if l.testAfterSelect != nil {
 		l.testAfterSelect()
 	}
-	return l.setBudgetLocked(n, next, nil)
+	l.setBudgetLocked(n, next)
+	return nil
 }
 
-// setBudgetWith changes the budget and runs publish -- if there is one --
-// while the ledger's lock is still held.
-//
-// The seam exists so a policy reload lands as ONE generation. Snapshot takes
-// this same lock, so no reader can observe the new budget beside the old
-// timeouts, or the reverse: the pair is either wholly before the change or
-// wholly after it. Two separate publishes would leave a window in which the
-// engine reported a configuration no operator ever asked for, and the window
-// is exactly when somebody is watching, because they just made the change.
-//
-// THE GENERATION IS GIVEN, NOT INVENTED. The policy owns it: a reload picks
-// one number and hands the same one to both sides, so a readout that reports
-// them together reports one fact rather than two counters that drifted apart.
-//
-// publish MUST NOT touch the ledger; it holds the lock.
-func (l *permitLedger) setBudgetWith(n int, generation uint64, publish func()) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.setBudgetLocked(n, generation, publish)
-}
-
-// setBudgetLocked is setBudgetWith for a caller that already holds the lock,
-// so that choosing a generation and publishing it cannot be two critical
-// sections with a window between them.
-func (l *permitLedger) setBudgetLocked(n int, generation uint64, publish func()) error {
-	// A cell's barrier, held INSIDE the lock and before anything is published,
-	// so the reader ordering can be exercised deterministically rather than
-	// raced for. Nil outside this package's own cells.
+// setBudgetLocked publishes a budget and serves both shares' lines, since a
+// raise can free several slots of each. Caller holds the lock.
+func (l *permitLedger) setBudgetLocked(n int, generation uint64) {
 	if l.testBeforePublish != nil {
 		l.testBeforePublish()
 	}
 	l.budget = n
 	l.generation = generation
-	if publish != nil {
-		publish()
-	}
-	return nil
+	l.serveLocked(DialFrontDoor)
+	l.serveLocked(DialOrdinary)
 }
 
-// snapshotWith takes a coherent reading of the ledger AND of whatever else the
-// caller needs to pair with it, with both read under this lock.
-//
-// THE READER'S ORDERING IS THE POINT, and locking the writer was not enough.
-// A reader that loaded the policy pointer, was descheduled while a reload
-// published, and then took the ledger snapshot would pair the OLD timeouts
-// with the NEW budget -- a tuple no moment ever held, handed to the operator
-// who just made the change and is watching for it to land.
-func (l *permitLedger) snapshotWith(alongside func()) LedgerSnapshot {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if alongside != nil {
-		alongside()
-	}
-	return l.snapshotLocked()
-}
-
-// LedgerSnapshot is one coherent reading of the ledger.
-//
-// TAKEN UNDER ONE LOCK, because the fields only mean something together.
-// Reading outstanding and then budget separately can observe a state that
-// never existed — an outstanding count from before a resize against a budget
-// from after it — and an operator diagnosing saturation would be looking at a
-// number no moment ever held.
+// LedgerSnapshot is one coherent reading of the ledger, TAKEN UNDER ONE LOCK,
+// because the fields only mean something together.
 type LedgerSnapshot struct {
-	// Configured is the operator's number.
+	// Configured is the operator's number: the pool's max_conns.
 	Configured int
-	// OrdinaryLimit is what ordinary work may actually take: one short of
-	// Configured, because the last permit is the control lane's.
-	OrdinaryLimit int
-	// Ordinary (O) and Control (K) are the two occupancies, reported
-	// separately because the ceiling is stated in terms of O alone.
-	Ordinary int
-	Control  int
-	// Outstanding is O + K: every socket this instance holds.
-	//
-	// It may EXCEED Configured while a lowered budget drains. That is
-	// not an error and must not be rendered as one: nothing is killed to make
-	// the number true, so it becomes true by attrition.
+	// FrontDoorLimit and OrdinaryLimit are the two shares; the control lane
+	// is the one socket left.
+	FrontDoorLimit int
+	OrdinaryLimit  int
+	// FrontDoor, Ordinary and Control are the three occupancies.
+	FrontDoor int
+	Ordinary  int
+	Control   int
+	// FrontDoorWaiting and OrdinaryWaiting are each share's line.
+	FrontDoorWaiting int
+	OrdinaryWaiting  int
+	// Outstanding is every socket the pool holds. It may EXCEED Configured
+	// while a lowered budget drains; that is not an error.
 	Outstanding int
-	// Effective is the immediately exercisable ceiling: max(Configured, O+1).
-	//
-	// O+1, not Outstanding. The reserved slot counts whether or not a cancel
-	// is in flight, because one may arrive at any moment -- and counting it
-	// only while occupied made this number rise and fall INSIDE one drain
-	// generation, contradicting monotonic convergence.
+	// Effective is the immediately exercisable ceiling: max(Configured,
+	// FrontDoor+Ordinary+1). The +1 is the control lane, counted whether or
+	// not a cancel is in flight, so the number can't oscillate in a drain.
 	Effective int
-	// Generation increments on every accepted update, so a reader can tell
-	// whether two snapshots describe the same policy.
+	// Generation increments on every accepted update.
 	Generation uint64
-	// Draining reports the state above plainly, so a caller does not have to
-	// re-derive it and get the comparison backwards.
+	// Draining reports that a share holds more than its current limit.
 	Draining bool
 }
 
@@ -304,61 +235,93 @@ type LedgerSnapshot struct {
 func (l *permitLedger) Snapshot() LedgerSnapshot {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.snapshotLocked()
-}
-
-func (l *permitLedger) snapshotLocked() LedgerSnapshot {
 	return LedgerSnapshot{
-		Configured:    l.budget,
-		OrdinaryLimit: l.ordinaryLimitLocked(),
-		Ordinary:      l.ordinary,
-		Control:       l.control,
-		Outstanding:   l.ordinary + l.control,
-		Effective:     l.effectiveLocked(),
-		Generation:    l.generation,
-		Draining:      l.ordinary > l.ordinaryLimitLocked(),
+		Configured:       l.budget,
+		FrontDoorLimit:   l.frontDoorShareLocked(),
+		OrdinaryLimit:    l.ordinaryLimitLocked(),
+		FrontDoor:        l.frontDoor,
+		Ordinary:         l.ordinary,
+		Control:          l.control,
+		FrontDoorWaiting: len(l.waiting[DialFrontDoor]),
+		OrdinaryWaiting:  len(l.waiting[DialOrdinary]),
+		Outstanding:      l.frontDoor + l.ordinary + l.control,
+		Effective:        l.effectiveLocked(),
+		Generation:       l.generation,
+		Draining:         l.frontDoor > l.frontDoorShareLocked() || l.ordinary > l.ordinaryLimitLocked(),
 	}
 }
 
-// Acquire takes one permit, or reports that the budget is spent.
-//
-// The returned release is IDEMPOTENT. A permit released twice would hand out a
-// slot that does not exist; one never released is a slot lost for the life of
-// the process. Both are silent, so the safe shape is a release that can be
-// called from every unwind path — dial failure, cancellation, close — without
-// the caller tracking whether it already ran.
-func (l *permitLedger) Acquire() (*Permit, error) {
-	return l.acquire(DialOrdinary)
+// FrontDoorShare is how many front-door sessions the pool's line may admit:
+// each holds one backend for life, drawn from this share.
+func (l *permitLedger) FrontDoorShare() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.frontDoorShareLocked()
 }
 
-// AcquireControl takes the RESERVED slot: the one an ordinary dial can never
-// have.
+// acquire takes a permit of the mark's class, or joins that share's line and
+// waits as long as the acquirer does. Not for the control lane: AcquireControl.
+func (l *permitLedger) acquire(m dialMark) (*Permit, error) {
+	class := m.class()
+	ctx, cancel := m.waitContext()
+	defer cancel()
+
+	l.mu.Lock()
+	// NOBODY STEPS AROUND THE LINE. A free slot goes to an arrival only when
+	// nobody of its class is already waiting for one.
+	if len(l.waiting[class]) == 0 {
+		if p, ok := l.grantLocked(class); ok {
+			l.mu.Unlock()
+			return p, nil
+		}
+	}
+	w := &shareWaiter{granted: make(chan *Permit, 1)}
+	l.waiting[class] = append(l.waiting[class], w)
+	l.mu.Unlock()
+
+	select {
+	case p := <-w.granted:
+		return p, nil
+	case <-ctx.Done():
+		if !l.leaveLine(class, w) {
+			// Granted in the same instant: the slot is ours, and nobody wants
+			// it any more, so it goes straight back (and on to the next waiter).
+			(<-w.granted).Release()
+		}
+		return nil, ErrTargetBudgetExhausted
+	}
+}
+
+// leaveLine removes w from its share's line, reporting whether it was still
+// there (false: it was granted first).
+func (l *permitLedger) leaveLine(class DialClass, w *shareWaiter) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	line := l.waiting[class]
+	for i, x := range line {
+		if x == w {
+			l.waiting[class] = append(line[:i:i], line[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// AcquireControl takes the RESERVED slot: the one no share can have.
 //
-// A cancellation is a second, short-lived socket to the same server, and it is
-// needed exactly when every ordinary slot is spent — a developer cancels a
-// query because the system is busy, not because it is idle. Letting ordinary
-// traffic consume the whole budget therefore removes cancellation at the only
-// moment anyone reaches for it.
-//
-// Serialized to one at a time: a cancel is connect, write sixteen bytes,
-// close, so one lane is enough, and more would be a second budget nobody
-// configured.
-// It WAITS for the lane rather than refusing it. Two statements cancelled at
-// once is ordinary, and an immediate refusal would silently lose the second
-// cancel — the caller has already given up on their query and has no way to
-// learn the cancel never went. The wait is bounded by the caller's own
-// context, which pgx already gives a deadline.
+// A cancellation is a second, short-lived socket to the same server, needed
+// exactly when every other slot is spent. It WAITS for the lane rather than
+// refusing it, bounded by the caller's own context, because an immediate
+// refusal would silently lose a second concurrent cancel.
 func (l *permitLedger) AcquireControl(ctx context.Context) (*Permit, error) {
 	select {
 	case l.controlLane <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	p, err := l.acquire(DialControl)
-	if err != nil {
-		<-l.controlLane
-		return nil, err
-	}
+	l.mu.Lock()
+	p, _ := l.grantLocked(DialControl) // the lane is its bound: grantLocked never refuses it
+	l.mu.Unlock()
 	inner := p.release
 	p.release = func() {
 		inner()
@@ -367,103 +330,100 @@ func (l *permitLedger) AcquireControl(ctx context.Context) (*Permit, error) {
 	return p, nil
 }
 
-func (l *permitLedger) acquire(class DialClass) (*Permit, error) {
-	control := class == DialControl
-	l.mu.Lock()
-	// ORDINARY DIALS STOP ONE SHORT. The last permit is the control lane's,
-	// so a cancellation can always be delivered.
-	//
-	// THE CONTROL LANE DOES NOT RE-TEST AGAINST outstanding, and that is
-	// deliberate. Its bound is the semaphore above — one holder, short-lived —
-	// and re-testing here would break it in the one state where cancelling
-	// matters most: while a LOWERED budget drains, outstanding is above the
-	// new number by definition, so a cancel would be refused precisely because
-	// too much work is already running. The reserved slot is a fixed +1 the
-	// operator's number accounts for, stated here rather than hidden.
-	if !control {
-		limit := l.ordinaryLimitLocked()
-		if l.ordinary >= limit {
-			l.mu.Unlock()
-			return nil, ErrTargetBudgetExhausted
-		}
+// grantLocked counts one permit of class if its share has room, and builds it.
+// THE ONE GRANT PATH: an arrival, a hand-off to a waiter and the control lane
+// all come through here. Caller holds the lock.
+//
+// THE CONTROL LANE DOES NOT TEST A LIMIT HERE. Its bound is the lane semaphore,
+// and testing outstanding would refuse a cancel in the one state it matters
+// most: while a lowered budget drains.
+func (l *permitLedger) grantLocked(class DialClass) (*Permit, bool) {
+	held := l.heldLocked(class)
+	if class != DialControl && *held >= l.limitForLocked(class) {
+		return nil, false
 	}
-	if control {
-		l.control++
-	} else {
-		l.ordinary++
-	}
-	granted := Permit{
+	*held++
+	p := &Permit{
 		Generation:       l.generation,
 		Class:            class,
 		ConfiguredTotal:  l.budget,
 		EffectiveCeiling: l.effectiveLocked(),
 		Limit:            l.limitForLocked(class),
 	}
-	l.mu.Unlock()
-
-	granted.release = func() {
+	p.release = func() {
 		l.mu.Lock()
-		if control {
-			if l.control > 0 {
-				l.control--
-			}
-		} else if l.ordinary > 0 {
-			l.ordinary--
+		defer l.mu.Unlock()
+		if *held > 0 {
+			*held--
 		}
-		l.mu.Unlock()
-		// THE FREED SLOT GOES TO WHOEVER ASKED FIRST, HERE, NOT ON A TIMER.
-		//
-		// A queue drained by polling adds its poll interval to every grant and
-		// hides the moment capacity actually appeared. Handing the slot over
-		// at the release point is what makes "oldest waiter served as soon as
-		// a connection is physically free" the literal behaviour rather than
-		// an approximation of it. Only ordinary permits feed the queue: the
-		// control lane is a reserved single slot for cancellation and must
-		// never be handed to queued data-plane work.
+		// THE FREED SLOT GOES TO WHOEVER ASKED FIRST, HERE, NOT ON A TIMER,
+		// and only within the class that freed it: a share's slot is never
+		// handed to another share, and the control lane feeds no line.
+		if class != DialControl {
+			l.serveLocked(class)
+		}
 	}
-	return &granted, nil
+	return p, true
 }
 
-// ordinaryLimitLocked is what ordinary work may take: one short of the budget,
-// because the last slot is the control lane's. Caller holds the lock.
+// serveLocked hands free slots of a share to its oldest waiters, looping while
+// the share has room and its line isn't empty. A share's release calls it for
+// its share; a budget publication calls it for both. Caller holds the lock.
+func (l *permitLedger) serveLocked(class DialClass) {
+	for len(l.waiting[class]) > 0 {
+		p, ok := l.grantLocked(class)
+		if !ok {
+			return
+		}
+		w := l.waiting[class][0]
+		l.waiting[class] = l.waiting[class][1:]
+		w.granted <- p
+	}
+}
+
+func (l *permitLedger) heldLocked(class DialClass) *int {
+	switch class {
+	case DialControl:
+		return &l.control
+	case DialFrontDoor:
+		return &l.frontDoor
+	}
+	return &l.ordinary
+}
+
+// frontDoorShareLocked is the budget less the control lane and the headroom:
+// 25 → 20, 3 → 1. Caller holds the lock.
+func (l *permitLedger) frontDoorShareLocked() int {
+	return max(l.budget-1-poolHeadroom(l.budget), 0)
+}
+
+// ordinaryLimitLocked is the headroom share. Caller holds the lock.
 func (l *permitLedger) ordinaryLimitLocked() int {
-	// max(C-1, 0). At C=1 the single slot belongs to the control lane and
-	// ordinary work gets nothing -- which is what C=1 MEANS, rather than
-	// something to round away.
-	if l.budget < 1 {
-		return 0
-	}
-	return l.budget - 1
-}
-
-// effectiveLocked is the immediately exercisable ceiling: max(Configured,
-// O+1).
-//
-// O+1 RATHER THAN Outstanding, and the +1 applies whether or not the lane is
-// occupied. The reserved slot is part of the ceiling at all times -- a cancel
-// may arrive at any moment -- so counting it only while a cancel is in flight
-// made the number oscillate within one drain generation and contradicted the
-// monotonic-convergence rule. Caller holds the lock.
-func (l *permitLedger) effectiveLocked() int {
-	if l.ordinary+1 > l.budget {
-		return l.ordinary + 1
-	}
-	return l.budget
+	return poolHeadroom(l.budget)
 }
 
 // limitForLocked is the allowance in force for a class at grant time.
 func (l *permitLedger) limitForLocked(class DialClass) int {
-	if class == DialControl {
+	switch class {
+	case DialControl:
 		return 1 // the lane is one holder, whatever the budget is
+	case DialFrontDoor:
+		return l.frontDoorShareLocked()
 	}
 	return l.ordinaryLimitLocked()
 }
 
-// Outstanding is every permit held right now: O + K.
+// effectiveLocked is the immediately exercisable ceiling: max(Configured,
+// shares held + 1). Caller holds the lock.
+func (l *permitLedger) effectiveLocked() int {
+	return max(l.frontDoor+l.ordinary+1, l.budget)
+}
+
+// Outstanding is every permit held right now.
 func (l *permitLedger) Outstanding() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.ordinary + l.control
+	return l.frontDoor + l.ordinary + l.control
 }
 
 // Budget reports the current budget and the generation it belongs to.
@@ -473,40 +433,14 @@ func (l *permitLedger) Budget() (budget int, generation uint64) {
 	return l.budget, l.generation
 }
 
-// dialClass marks a dial as a control socket rather than ordinary work.
-//
-// A PRIVATE KEY TYPE, so nothing outside this package can set it. The marker
-// decides which side of the budget a socket is charged to, and a value any
-// caller could plant would let ordinary traffic help itself to the reserved
-// lane.
-type dialClassKey struct{}
-
-// withControlDial marks a context as belonging to a control socket — today,
-// a cancellation request.
-func withControlDial(ctx context.Context) context.Context {
-	return context.WithValue(ctx, dialClassKey{}, true)
-}
-
-func isControlDial(ctx context.Context) bool {
-	v, _ := ctx.Value(dialClassKey{}).(bool)
-	return v
-}
-
-// permitDialer wraps a dial function so every socket to a target takes a
+// permitDialer wraps a dial function so every socket to a pooled target takes a
 // permit before it is opened and releases it when it closes.
 //
-// THE DIALER IS THE ONLY SEAM THAT SATISFIES the connection-budget policy, and the pool's own
-// hooks do not. BeforeConnect can take a permit but has no handle on the
-// connection it produced, and BeforeClose has the connection but no way back
-// to the permit, so pairing them needs a correlation key the pool does not
-// offer. Worse, neither fires when the DIAL ITSELF FAILS — and the ADR is
-// explicit that "a dial that fails, races or is cancelled must release its
-// permit", because a leaked permit is a slot lost until restart.
-//
-// Here the acquire, the failure path and the release are the same closure
-// over the same release function, so none of them can be forgotten. It also
-// gets the ADR's "every socket" rule for free: health checks, control queries
-// and replacements all dial, so all of them are counted.
+// THE DIALER IS THE ONLY SEAM THAT SATISFIES the connection-budget policy, and
+// the pool's own hooks do not: neither BeforeConnect nor BeforeClose fires when
+// the DIAL ITSELF FAILS, and a permit leaked there is a slot lost until restart.
+// Here the acquire, the failure path and the release are one closure, and every
+// socket dials, health checks and replacements included, so all are counted.
 func permitDialer(l *permitLedger, dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	if l == nil {
 		return dial
@@ -516,24 +450,22 @@ func permitDialer(l *permitLedger, dial func(ctx context.Context, network, addr 
 		dial = d.DialContext
 	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// A CANCELLATION IS A SECOND SOCKET, dialled through this same
-		// function (pgconn.CancelRequest), and it is needed exactly when every
-		// ordinary slot is spent. Charging it to the ordinary allowance would
-		// remove cancellation at the only moment anyone reaches for it, so it
-		// takes the reserved lane instead. The marker is set by autodb's own
-		// cancellation path and cannot be forged from outside this package.
+		m := dialMarkOf(ctx)
 		var (
 			permit *Permit
 			err    error
 		)
-		if isControlDial(ctx) {
-			permit, err = l.AcquireControl(ctx)
+		// A CANCELLATION IS A SECOND SOCKET, needed exactly when every share
+		// is spent, so it takes the reserved lane under its own deadline.
+		if m.class() == DialControl {
+			permit, err = l.AcquireControl(m.acquirer)
 		} else {
-			permit, err = l.Acquire()
+			permit, err = l.acquire(m)
 		}
 		if err != nil {
 			return nil, err
 		}
+		m.noteGranted()
 		conn, err := dial(ctx, network, addr)
 		if err != nil {
 			// The dial failed, raced or was cancelled. The permit goes back

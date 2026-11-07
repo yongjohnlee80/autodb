@@ -427,8 +427,8 @@ const closeQuiesceTimeout = 15 * time.Second
 // closeSessionsFor closes every session on a connection. It is the first step
 // of deleting or closing a connection: the pool must not go away underneath a
 // session that still believes it can run.
-func (e *Engine) closeSessionsFor(ctx context.Context, connID int64, ip, reason string) {
-	drained, pool := e.beginDraining(connID)
+func (e *Engine) closeSessionsFor(ctx context.Context, connID int64, ip, reason string, why drainCause) {
+	drained, pool := e.beginDraining(connID, why)
 	for _, s := range drained {
 		e.closeSession(ctx, s, ip, reason)
 	}

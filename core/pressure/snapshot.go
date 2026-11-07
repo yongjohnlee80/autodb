@@ -122,8 +122,8 @@ func (t *Tracker) Assemble(in ViewInput) Snapshot {
 	for user, n := range in.Caps.PerUser {
 		s.PerUser = append(s.PerUser, t.row(SessionsUser, itoa(user), n, in.Caps.PerUserCap))
 	}
-	for target, n := range in.Caps.Leases {
-		s.Leases = append(s.Leases, t.row(LeasesTarget, itoa(target), n, in.Caps.LeaseCap))
+	for _, l := range in.Caps.Leases {
+		s.Leases = append(s.Leases, t.row(LeasesPool, l.Subject, l.Held, l.Limit))
 	}
 	s.PerUser, s.PerUserOmitted = rank(s.PerUser)
 	s.Leases, s.LeasesOmitted = rank(s.Leases)

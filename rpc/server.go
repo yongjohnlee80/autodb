@@ -279,7 +279,8 @@ type FrontDoorInfo struct {
 	// zero, which reads as "you may open none".
 	MaxSessionsPerUser int
 	MaxSessionsGlobal  int
-	MaxTargetConns     int
+	// was: MaxTargetConns. Socket budgets are per pool, reported per
+	// connection by conn.list.
 }
 
 // Option configures a Server.

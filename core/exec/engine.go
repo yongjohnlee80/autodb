@@ -167,9 +167,8 @@ type Engine struct {
 	maxRows int
 	now     func() time.Time
 
-	// pendingLeaseCap and pendingResidentCap hold the registry-scoped caps
-	// until every option has run. See WithLeaseCap.
-	pendingLeaseCap    int
+	// pendingResidentCap holds the registry-scoped memory cap until every
+	// option has run. See WithResidentBudget.
 	pendingResidentCap int64
 
 	// profile is the capability profile admission runs against
@@ -219,15 +218,11 @@ type Engine struct {
 	// Target-pool bounds. Defaults are set in New; a
 	// connection row may lower poolMaxConns for itself but never raise it.
 	poolMaxConns int
-	// targetPermits bounds the AGGREGATE number of sockets open to targets,
-	// across every pool (see docs/front-door/connection-holding-policy.md). poolMaxConns is a per-pool ceiling and
-	// cannot express that: two pools of 8 against a budget of 10 are each
-	// individually legal and together are not.
-	//
-	// Nil means unbounded, which is what an install without the front door
-	// gets — the key is required only where production connections are
-	// actually spent.
-	targetPermits       *permitLedger
+	// pools owns the connection pools: which connection is in which, and each
+	// pool's socket ledger (pools.go). It replaces the one instance-wide
+	// budget, which couldn't say "these targets share a server, that one has
+	// its own". poolMaxConns now sizes only connections outside every pool.
+	pools               *poolSet
 	poolMaxConnIdleTime time.Duration
 	poolMaxConnLifetime time.Duration
 }
@@ -285,26 +280,13 @@ func WithSessionLimits(perUser, global int) Option {
 	}
 }
 
-// WithLeaseCap bounds concurrent WIRE sessions per target pool
-// (`[frontdoor] max_leases`, derived from pool_max_conns - reserved_headroom).
-//
-// APPLIED AFTER EVERY OPTION HAS RUN, not here, and that is deliberate:
-// WithSessionLimits REPLACES the registry, so a caller who passed the two in
-// the other order would have this silently discarded. An option whose effect
-// depends on its position among the others is a guard that disappears the day
-// somebody tidies the list.
-func WithLeaseCap(n int) Option {
-	return func(e *Engine) {
-		if n > 0 {
-			e.pendingLeaseCap = n
-		}
-	}
-}
-
 // WithResidentBudget bounds the total memory reserved by open wire sessions
 // (default 1 GiB).
 //
-// Same deferral as WithLeaseCap, for the same reason.
+// APPLIED AFTER EVERY OPTION HAS RUN, not here, and that is deliberate:
+// WithSessionLimits REPLACES the registry, so a caller who passed the two in
+// the other order would have this silently discarded. (was: WithLeaseCap
+// beside it; the front-door lease limit is each pool's front-door share.)
 func WithResidentBudget(bytes int64) Option {
 	return func(e *Engine) {
 		if bytes > 0 {
@@ -350,28 +332,6 @@ func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
 	}
 }
 
-// WithLogger receives operational problems that have no caller to return to.
-// WithTargetConnBudget sets this instance's total production-connection
-// budget: the aggregate cap across every target pool (see docs/front-door/connection-holding-policy.md).
-//
-// Zero or negative leaves it unbounded. The REQUIREMENT that an operator
-// choose a value lives in config validation, under the front door, because
-// that is the surface which spends the budget — an engine embedded without a
-// listener is not asked for a number it will never use.
-func WithTargetConnBudget(n int) Option {
-	return func(e *Engine) {
-		if n > 0 {
-			e.targetPermits = newPermitLedger(n)
-			// THE QUEUE IS PART OF THE BUDGET, NOT AN ADD-ON. A ledger without
-			// one answers "exhausted" and leaves the caller to retry, which is
-			// the lottery this replaced: whoever retries at the right instant
-			// wins, regardless of who asked first.
-			// And the ledger asks the registry which slots cannot be reclaimed,
-			// because only the registry knows. See allCapacityInTransaction.
-		}
-	}
-}
-
 // WithPoolLimits bounds each TARGET pool.
 //
 // maxConns is the install-wide ceiling: a connection row may ask for fewer,
@@ -402,6 +362,7 @@ func WithPoolLimits(maxConns int, idle, lifetime time.Duration) Option {
 	}
 }
 
+// WithLogger receives operational problems that have no caller to return to.
 func WithLogger(fn func(string)) Option { return func(e *Engine) { e.onLog = fn } }
 
 func WithMaxStatementBytes(n int) Option {
@@ -445,15 +406,13 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 	// builds a fresh registry, so a reclaimer installed before it would be
 	// silently dropped and demand reclamation would never fire.
 	e.sessions.onDemand = e.demandReclaim
-	// The registry-scoped caps are stamped LAST, because WithSessionLimits
-	// builds a fresh registry and would otherwise drop whichever of these
-	// ran before it. Order-independence is the point: these two are the
-	// front door's lease and memory bounds, and until this ran they were set
-	// only by tests — in a running daemon both were zero, which means
-	// disabled.
-	if e.pendingLeaseCap > 0 {
-		e.sessions.leaseCap = e.pendingLeaseCap
-	}
+	// The pools are built after the options, because exec.pool_max_conns
+	// (WithPoolLimits) sizes connections outside every pool, and handed to the
+	// registry here for the same reason as onDemand above.
+	e.pools = newPoolSet(e.poolMaxConns)
+	e.sessions.pools = e.pools
+	// The registry-scoped memory cap is stamped LAST, because
+	// WithSessionLimits builds a fresh registry and would otherwise drop it.
 	if e.pendingResidentCap > 0 {
 		e.sessions.residentCap = e.pendingResidentCap
 	}

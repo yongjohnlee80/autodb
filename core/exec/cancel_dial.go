@@ -61,7 +61,7 @@ func (h *controlCancelHandler) HandleCancel(context.Context) {
 		defer cancel()
 		// THE MARKER. Without it this dial is charged to the ordinary
 		// allowance and refused at saturation.
-		_ = h.conn.CancelRequest(withControlDial(ctx))
+		_ = h.conn.CancelRequest(withDialIntent(ctx, &dialIntent{class: DialControl}))
 	}()
 }
 

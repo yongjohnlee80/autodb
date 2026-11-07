@@ -32,10 +32,8 @@ type PolicySpec struct {
 	IdleInTxTimeout      time.Duration
 	MaxTxDuration        time.Duration
 	MaxTxDurationCeiling time.Duration
-	// MaxTargetConns is the aggregate production-connection budget. Ignored
-	// when this engine has no ledger (an embedded engine with no front door);
-	// required otherwise.
-	MaxTargetConns int
+	// was: MaxTargetConns. Socket budgets are per pool now, changed through
+	// pool admin (pools_admin.go), never through a policy reload.
 }
 
 // enginePolicy is what the running engine reads. Published as ONE immutable
@@ -66,14 +64,15 @@ const policyStoreKey = "exec.policy"
 // their address, which belongs in the audit row where access to it is
 // governed.
 type storedPolicy struct {
-	SessionIdleMS  int64  `json:"session_idle_ms"`
-	IdleInTxMS     int64  `json:"idle_in_tx_ms"`
-	MaxTxMS        int64  `json:"max_tx_ms"`
-	MaxTxCeilingMS int64  `json:"max_tx_ceiling_ms"`
-	MaxTargetConns int    `json:"max_target_conns"`
-	Generation     uint64 `json:"generation"`
-	UpdatedAt      int64  `json:"updated_at"`
-	UpdatedBy      int64  `json:"updated_by"`
+	SessionIdleMS  int64 `json:"session_idle_ms"`
+	IdleInTxMS     int64 `json:"idle_in_tx_ms"`
+	MaxTxMS        int64 `json:"max_tx_ms"`
+	MaxTxCeilingMS int64 `json:"max_tx_ceiling_ms"`
+	// A blob written before pools still carries max_target_conns;
+	// json.Unmarshal ignores it.
+	Generation uint64 `json:"generation"`
+	UpdatedAt  int64  `json:"updated_at"`
+	UpdatedBy  int64  `json:"updated_by"`
 }
 
 func (s PolicySpec) stored(generation uint64, at, by int64) storedPolicy {
@@ -82,7 +81,6 @@ func (s PolicySpec) stored(generation uint64, at, by int64) storedPolicy {
 		IdleInTxMS:     s.IdleInTxTimeout.Milliseconds(),
 		MaxTxMS:        s.MaxTxDuration.Milliseconds(),
 		MaxTxCeilingMS: s.MaxTxDurationCeiling.Milliseconds(),
-		MaxTargetConns: s.MaxTargetConns,
 		Generation:     generation,
 		UpdatedAt:      at,
 		UpdatedBy:      by,
@@ -95,7 +93,6 @@ func (p storedPolicy) spec() PolicySpec {
 		IdleInTxTimeout:      time.Duration(p.IdleInTxMS) * time.Millisecond,
 		MaxTxDuration:        time.Duration(p.MaxTxMS) * time.Millisecond,
 		MaxTxDurationCeiling: time.Duration(p.MaxTxCeilingMS) * time.Millisecond,
-		MaxTargetConns:       p.MaxTargetConns,
 	}
 }
 
@@ -168,11 +165,6 @@ func (e *Engine) validatePolicy(s PolicySpec) error {
 			"so a transaction could sit well past its deadline before anything looked",
 			ErrPolicyInvalid, s.IdleInTxTimeout, every)
 	}
-	if e.targetPermits != nil && s.MaxTargetConns < 2 {
-		return fmt.Errorf("%w: max_target_conns is %d, which leaves nothing for ordinary work — "+
-			"one permit is reserved so a cancellation can still be delivered when every other "+
-			"slot is spent. Use at least 2", ErrPolicyInvalid, s.MaxTargetConns)
-	}
 	return nil
 }
 
@@ -180,10 +172,8 @@ func (e *Engine) validatePolicy(s PolicySpec) error {
 //
 // Admin only, audited, validated before anything moves, written to the meta
 // store in the same transaction as its audit row, and published to the running
-// engine as one generation. What it does NOT do is close anything: lowering the
-// budget below what is outstanding leaves every live session alone and stops
-// granting new permits, so the number becomes true by attrition rather than by
-// an outage in the middle of the working day.
+// engine as one generation. It touches no socket budget: those are per pool,
+// changed through pool admin (UpdatePool).
 func (e *Engine) ReloadPolicy(ctx context.Context, token string, spec PolicySpec, ip string) (Settings, error) {
 	ident, err := e.auth.ValidateToken(ctx, token)
 	if err != nil {
@@ -237,49 +227,27 @@ func (e *Engine) ReloadPolicy(ctx context.Context, token string, spec PolicySpec
 		}
 		// In the SAME transaction as the change it describes, so the trail
 		// cannot record a reload that did not happen or miss one that did.
-		return e.auth.AuditTx(tx, ident.UserID(), ip, "policy_reloaded", policyAuditDetail(cur, next, spec))
+		return e.auth.AuditTx(tx, ident.UserID(), ip, "policy_reloaded", policyAuditDetail(cur, next))
 	}); err != nil {
 		return Settings{}, err
 	}
 
-	e.publishPolicy(next, spec.MaxTargetConns)
+	e.policy.Store(next)
 	return e.Settings(), nil
-}
-
-// publishPolicy makes the new bounds live.
-//
-// When there is a ledger the pointer swap happens INSIDE its lock, so the
-// budget and the timeouts become visible in the same instant to anyone taking
-// a snapshot. Without a ledger there is only the pointer, and a single atomic
-// store is already indivisible.
-func (e *Engine) publishPolicy(next *enginePolicy, budget int) {
-	if e.targetPermits == nil {
-		e.policy.Store(next)
-		return
-	}
-	// ONE GENERATION, CHOSEN ONCE AND GIVEN TO BOTH SIDES. The policy owns the
-	// number; the ledger is told it rather than keeping a count of its own.
-	// The only way this errors is a budget below two, and validatePolicy has
-	// already refused that for every engine that HAS a ledger -- which is the
-	// only way to reach this line. Returning an error here would be a second
-	// path for a refusal that must happen before anything is written, and a
-	// caller reaching it would already have a durable record of the change.
-	_ = e.targetPermits.setBudgetWith(budget, next.generation, func() { e.policy.Store(next) })
 }
 
 // policyAuditDetail renders the change. Numbers only: no token, no spec
 // struct dumped wholesale, and the before as well as the after, because "set
 // to 8h" does not tell a reader whether anything changed.
-func policyAuditDetail(from, to *enginePolicy, spec PolicySpec) string {
+func policyAuditDetail(from, to *enginePolicy) string {
 	return fmt.Sprintf(
 		"generation %d -> %d: session_idle %v -> %v, idle_in_tx %v -> %v, max_tx %v -> %v, "+
-			"max_tx_ceiling %v -> %v, max_target_conns -> %d",
+			"max_tx_ceiling %v -> %v",
 		from.generation, to.generation,
 		from.sessionIdle, to.sessionIdle,
 		from.tx.idleInTx, to.tx.idleInTx,
 		from.tx.maxTx, to.tx.maxTx,
-		from.maxTxCeiling, to.maxTxCeiling,
-		spec.MaxTargetConns)
+		from.maxTxCeiling, to.maxTxCeiling)
 }
 
 // LoadDurablePolicy applies a previously reloaded policy over the
@@ -314,7 +282,7 @@ func (e *Engine) LoadDurablePolicy(ctx context.Context) error {
 		return fmt.Errorf("exec: the stored policy is no longer valid: %w", verr)
 	}
 	cur := e.currentPolicy()
-	e.publishPolicy(&enginePolicy{
+	e.policy.Store(&enginePolicy{
 		sessionIdle: spec.SessionIdleTimeout,
 		tx: txLimits{
 			idleInTx:         spec.IdleInTxTimeout,
@@ -324,7 +292,7 @@ func (e *Engine) LoadDurablePolicy(ctx context.Context) error {
 		debugIdle:    spec.IdleInTxTimeout,
 		maxTxCeiling: spec.MaxTxDurationCeiling,
 		generation:   stored.Generation,
-	}, spec.MaxTargetConns)
+	})
 	return nil
 }
 
@@ -356,12 +324,7 @@ func PolicyView(s Settings) map[string]any {
 		"idle_in_tx_ms":     s.IdleInTxTimeout.Milliseconds(),
 		"max_tx_ms":         s.MaxTxDuration.Milliseconds(),
 		"max_tx_ceiling_ms": s.MaxTxDurationCeiling.Milliseconds(),
-		// The ledger's own reading, so a caller sees what the budget IS as
-		// well as what it was set to -- during a drain those differ, and the
-		// difference is the whole reason an operator is looking.
-		"max_target_conns":         s.TargetConns.Configured,
-		"target_conns_effective":   s.TargetConns.Effective,
-		"target_conns_outstanding": s.TargetConns.Outstanding,
-		"ledger_generation":        s.TargetConns.Generation,
+		// was: max_target_conns and the instance ledger's readings. Socket
+		// budgets are per pool: ListPools reads them.
 	}
 }

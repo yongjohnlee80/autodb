@@ -1069,6 +1069,14 @@ func startEngine(
 	// when it was written, so if it is not valid now something underneath it
 	// changed -- and starting on a silently discarded policy would run bounds
 	// nobody chose while the operator surface reported the ones they did.
+	// The connection pools load first: every socket the engine opens is
+	// charged to its connection's pool, so they must be in place before
+	// anything can dial.
+	if err := eng.LoadPools(serveCtx); err != nil {
+		_ = eng.Close()
+		stopServing()
+		return nil, nil, nil, nil, err
+	}
 	if err := eng.LoadDurablePolicy(serveCtx); err != nil {
 		// Torn down HERE. The caller registers its Close and stop defers only
 		// after a successful return, so an error from this point on leaks the
@@ -1137,19 +1145,11 @@ func execOptions(cfg config.Config, onLog func(string)) []coreexec.Option {
 		coreexec.WithSessionIdleTimeout(cfg.Exec.SessionIdleTimeout.Duration()),
 		coreexec.WithTxLimits(cfg.Exec.IdleInTxTimeout.Duration(), cfg.Exec.MaxTxDuration.Duration()),
 		coreexec.WithDebugTxLimits(cfg.Exec.DebugIdleInTxTimeout.Duration(), cfg.Exec.MaxTxDurationCeiling.Duration()),
-		// The AGGREGATE production-connection budget (see docs/front-door/connection-holding-policy.md). Distinct
-		// from WithPoolLimits below, which bounds one target pool: this bounds
-		// every pool together, and config validation requires it whenever the
-		// front door is enabled.
-		coreexec.WithTargetConnBudget(cfg.Exec.MaxTargetConns),
 		coreexec.WithPoolLimits(cfg.Exec.PoolMaxConns,
 			cfg.Exec.PoolMaxConnIdleTime.Duration(), cfg.Exec.PoolMaxConnLifetime.Duration()),
 		coreexec.WithLogger(onLog),
-		// The front door's two registry-scoped bounds. Both existed and
-		// neither was ever set outside a test, so in a running daemon the
-		// lease cap and the resident budget were zero — which is to say
-		// absent. A guard nobody wires is documentation.
-		coreexec.WithLeaseCap(cfg.FrontDoor.EffectiveMaxLeases(cfg.Exec.PoolMaxConns)),
+		// The front door's memory bound. (was: WithLeaseCap beside it; the
+		// front-door lease limit is each connection pool's front-door share.)
 		coreexec.WithResidentBudget(cfg.FrontDoor.EffectiveResidentBudget()),
 	}
 }
@@ -1910,9 +1910,9 @@ var errNoFrontDoor = errors.New("the front door is not enabled on this instance"
 // It is a named function rather than three lines inside the closure so the
 // reload case has something to test; the closure itself is not reachable from
 // a cell.
-func frontDoorCeilings(eng *coreexec.Engine) (maxSessionsPerUser, maxSessionsGlobal, maxTargetConns int) {
+func frontDoorCeilings(eng *coreexec.Engine) (maxSessionsPerUser, maxSessionsGlobal int) {
 	s := eng.Settings()
-	return s.MaxSessionsPerUser, s.MaxSessionsGlobal, s.TargetConns.Configured
+	return s.MaxSessionsPerUser, s.MaxSessionsGlobal
 }
 
 // newFrontDoorState builds the front-door projection the RPC surface publishes.
@@ -1960,7 +1960,7 @@ func newFrontDoorState(cfg config.Config, eng *coreexec.Engine, fd *frontdoor.Li
 		// PER CALL, not captured once: the whole point is that a reload moves
 		// these, so a value read at wiring time would be the startup config
 		// wearing a different name.
-		perUser, global, targetConns := frontDoorCeilings(eng)
+		perUser, global := frontDoorCeilings(eng)
 		info := rpc.FrontDoorInfo{
 			Enabled:    cfg.FrontDoor.Enabled,
 			HostNames:  cfg.FrontDoor.TLSHostNames,
@@ -1980,7 +1980,6 @@ func newFrontDoorState(cfg config.Config, eng *coreexec.Engine, fd *frontdoor.Li
 			// these three cannot come from two different generations.
 			MaxSessionsPerUser: perUser,
 			MaxSessionsGlobal:  global,
-			MaxTargetConns:     targetConns,
 		}
 		if fd != nil {
 			info.Listening = true
