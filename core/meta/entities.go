@@ -141,6 +141,11 @@ type Connection struct {
 	// sealed inside the DSN, so it is VERIFIED against the decrypted DSN when a
 	// session pins its target rather than trusted.
 	TargetDB string
+	// PoolID is the connection pool (db_pool_connections) whose socket budget
+	// this connection draws on. Every row starts in DefaultPoolID. MySQL and
+	// SQLite connections are outside every pool whatever it says: core/exec
+	// decides membership from the engine, not from this column.
+	PoolID int64
 	// ArchivedAt is when the connection was archived, unix seconds; 0 for a
 	// live one. An archived connection keeps its row for the history that
 	// names it and is otherwise gone: no DSN, no grants, no workspace, no
@@ -185,6 +190,7 @@ const (
 	ConnUpdatedAt        ConnField = "updated_at"
 	ConnTargetDB         ConnField = "target_db"
 	ConnArchivedAt       ConnField = "archived_at"
+	ConnPoolID           ConnField = "pool_id"
 )
 
 func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort, int64] {
@@ -202,6 +208,60 @@ func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort,
 		ConnUpdatedAt:        {Column: "updated_at", Scan: func(r *Connection) any { return &r.UpdatedAt }, Value: func(r *Connection) any { return r.UpdatedAt }},
 		ConnTargetDB:         {Column: "target_db", Scan: func(r *Connection) any { return &r.TargetDB }, Value: func(r *Connection) any { return r.TargetDB }},
 		ConnArchivedAt:       {Column: "archived_at", Scan: func(r *Connection) any { return &r.ArchivedAt }, Value: func(r *Connection) any { return r.ArchivedAt }},
+		ConnPoolID:           {Column: "pool_id", Scan: func(r *Connection) any { return &r.PoolID }, Value: func(r *Connection) any { return r.PoolID }},
+	})
+}
+
+// --- connection pools ------------------------------------------------------------
+
+// ConnectionPool is a budget of sockets a group of connections shares
+// (schema script 000005). Admins match pools to database servers: autodb never
+// infers that two connections share one.
+type ConnectionPool struct {
+	ID int64
+	// Name is unique. "default" (DefaultPoolID) can't be deleted, and no pool
+	// that still has a connection, archived or not, can be.
+	Name string
+	// MaxConns is how many sockets autodb may hold to every connection in the
+	// pool together, between MinPoolConns and MaxPoolConns. It is never
+	// checked against the server's max_connections, which autodb can't read.
+	MaxConns  int64
+	CreatedBy int64
+	CreatedAt int64
+	UpdatedAt int64
+}
+
+const (
+	// DefaultPoolID is the seeded pool every connection starts in.
+	DefaultPoolID int64 = 1
+	// MinPoolConns and MaxPoolConns are max_conns' bounds, the schema's CHECK
+	// (sql/deployments/*/000005_update_connection_pools.sql); a test ties the
+	// two. The floor is one socket for each of the ledger's three parts
+	// (control lane, headroom share, front-door share). The ceiling is also
+	// every pooled target pgxpool's MaxConns, which therefore never binds.
+	MinPoolConns int64 = 3
+	MaxPoolConns int64 = 10000
+)
+
+type PoolField string
+
+const (
+	PoolID        PoolField = "id"
+	PoolName      PoolField = "name"
+	PoolMaxConns  PoolField = "max_conns"
+	PoolCreatedBy PoolField = "created_by"
+	PoolCreatedAt PoolField = "created_at"
+	PoolUpdatedAt PoolField = "updated_at"
+)
+
+func newConnectionPools(conn dao.DataConn) *dao.Schema[*ConnectionPool, PoolField, Sort, int64] {
+	return schema(conn, "db_pool_connections", PoolID, map[PoolField]dao.Field[*ConnectionPool]{
+		PoolID:        {Column: "id", Scan: func(r *ConnectionPool) any { return &r.ID }},
+		PoolName:      {Column: "name", Scan: func(r *ConnectionPool) any { return &r.Name }, Value: func(r *ConnectionPool) any { return r.Name }},
+		PoolMaxConns:  {Column: "max_conns", Scan: func(r *ConnectionPool) any { return &r.MaxConns }, Value: func(r *ConnectionPool) any { return r.MaxConns }},
+		PoolCreatedBy: {Column: "created_by", Scan: func(r *ConnectionPool) any { return &r.CreatedBy }, Value: func(r *ConnectionPool) any { return r.CreatedBy }},
+		PoolCreatedAt: {Column: "created_at", Scan: func(r *ConnectionPool) any { return &r.CreatedAt }, Value: func(r *ConnectionPool) any { return r.CreatedAt }},
+		PoolUpdatedAt: {Column: "updated_at", Scan: func(r *ConnectionPool) any { return &r.UpdatedAt }, Value: func(r *ConnectionPool) any { return r.UpdatedAt }},
 	})
 }
 

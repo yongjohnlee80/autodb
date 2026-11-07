@@ -51,6 +51,14 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 	if err := ensureEmpty(ctx, dst); err != nil {
 		return err
 	}
+	// The destination's own seed pool goes before the copy: the source carries
+	// pool 1 too, and the copy keeps ids. ensureEmpty has just proved it is the
+	// only row. MigrateToPostgres has no transaction, so a copy that fails after
+	// this leaves a destination without pool 1, which ensureEmpty then refuses:
+	// it is discarded and recreated, as any failed migration is.
+	if err := dst.Pools.OnCtx(ctx).With(PoolID, DefaultPoolID).Delete(); err != nil {
+		return fmt.Errorf("meta: clearing the destination's seed pool: %w", err)
+	}
 	// The destination's partitions must span the SOURCE's history before a
 	// single row is copied (Johno, 2026-09-01).
 	if err := prepartitionForSource(ctx, src, dst); err != nil {
@@ -70,6 +78,13 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					UserCreatedAt: r.CreatedAt, UserUpdatedAt: r.UpdatedAt, UserOptions: r.Options}
 			})
 		}},
+		// Pools before connections: connections.pool_id references them.
+		{"db_pool_connections", func() (int64, error) {
+			return copyAll(ctx, src.Pools, dst.Pools, func(r *ConnectionPool) map[PoolField]any {
+				return map[PoolField]any{PoolID: r.ID, PoolName: r.Name, PoolMaxConns: r.MaxConns,
+					PoolCreatedBy: r.CreatedBy, PoolCreatedAt: r.CreatedAt, PoolUpdatedAt: r.UpdatedAt}
+			})
+		}},
 		{"connections", func() (int64, error) {
 			return copyAll(ctx, src.Connections, dst.Connections, func(r *Connection) map[ConnField]any {
 				// EVERY column. profile, debug and pool_max_conns were added
@@ -83,7 +98,8 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					ConnDSNEnc: nb(r.DSNEnc), ConnCreatedBy: r.CreatedBy,
 					ConnCreatedAt: r.CreatedAt, ConnUpdatedAt: r.UpdatedAt,
 					ConnProfile: r.Profile, ConnFrontDoorExposed: r.FrontDoorExposed, ConnDebug: r.Debug,
-					ConnPoolMaxConns: r.PoolMaxConns, ConnTargetDB: r.TargetDB, ConnArchivedAt: r.ArchivedAt}
+					ConnPoolMaxConns: r.PoolMaxConns, ConnTargetDB: r.TargetDB, ConnArchivedAt: r.ArchivedAt,
+					ConnPoolID: r.PoolID}
 			})
 		}},
 		{"workspaces", func() (int64, error) {
@@ -317,6 +333,9 @@ func copyAll[R any, C ~string, ID any](ctx context.Context,
 type countableTable struct {
 	name  string
 	count func() (uint64, error)
+	// seedOnly, when set, reports whether the table holds only the row its
+	// schema script seeds. ensureEmpty accepts that row and nothing else.
+	seedOnly func() (bool, error)
 }
 
 // countableTables is the ONE list of migrated tables.
@@ -328,26 +347,27 @@ type countableTable struct {
 // branch's history (tx_id columns, then the tx_pending queue).
 func countableTables(ctx context.Context, s *Store) []countableTable {
 	return []countableTable{
-		{"users", s.Users.OnCtx(ctx).Count},
-		{"connections", s.Connections.OnCtx(ctx).Count},
-		{"workspaces", s.Workspaces.OnCtx(ctx).Count},
-		{"workspace_connections", s.WorkspaceConns.OnCtx(ctx).Count},
-		{"grants", s.Grants.OnCtx(ctx).Count},
-		{"sessions", s.Sessions.OnCtx(ctx).Count},
-		{"script_history", s.History.OnCtx(ctx).Count},
-		{"audit_log", s.Audit.OnCtx(ctx).Count},
-		{"tx_outcomes", s.TxOutcomes.OnCtx(ctx).Count},
-		{"tx_pending", s.TxPending.OnCtx(ctx).Count},
-		{"ip_allowlist", s.AllowedIPs.OnCtx(ctx).Count},
-		{"user_ip_allowlist", s.UserIPs.OnCtx(ctx).Count},
-		{"pats", s.PATs.OnCtx(ctx).Count},
-		{"store_meta", s.KV.OnCtx(ctx).Count},
-		{"keyslots", s.Keyslots.OnCtx(ctx).Count},
-		{"user_ssh_keys", s.SSHKeys.OnCtx(ctx).Count},
-		{"remote_devices", s.RemoteDevices.OnCtx(ctx).Count},
-		{"remote_device_ips", s.RemoteDeviceIPs.OnCtx(ctx).Count},
-		{"remote_ip_blocks", s.RemoteIPBlocks.OnCtx(ctx).Count},
-		{"remote_denial_events", s.RemoteDenials.OnCtx(ctx).Count},
+		{"users", s.Users.OnCtx(ctx).Count, nil},
+		{name: "db_pool_connections", count: s.Pools.OnCtx(ctx).Count, seedOnly: func() (bool, error) { return seedPoolOnly(ctx, s) }},
+		{"connections", s.Connections.OnCtx(ctx).Count, nil},
+		{"workspaces", s.Workspaces.OnCtx(ctx).Count, nil},
+		{"workspace_connections", s.WorkspaceConns.OnCtx(ctx).Count, nil},
+		{"grants", s.Grants.OnCtx(ctx).Count, nil},
+		{"sessions", s.Sessions.OnCtx(ctx).Count, nil},
+		{"script_history", s.History.OnCtx(ctx).Count, nil},
+		{"audit_log", s.Audit.OnCtx(ctx).Count, nil},
+		{"tx_outcomes", s.TxOutcomes.OnCtx(ctx).Count, nil},
+		{"tx_pending", s.TxPending.OnCtx(ctx).Count, nil},
+		{"ip_allowlist", s.AllowedIPs.OnCtx(ctx).Count, nil},
+		{"user_ip_allowlist", s.UserIPs.OnCtx(ctx).Count, nil},
+		{"pats", s.PATs.OnCtx(ctx).Count, nil},
+		{"store_meta", s.KV.OnCtx(ctx).Count, nil},
+		{"keyslots", s.Keyslots.OnCtx(ctx).Count, nil},
+		{"user_ssh_keys", s.SSHKeys.OnCtx(ctx).Count, nil},
+		{"remote_devices", s.RemoteDevices.OnCtx(ctx).Count, nil},
+		{"remote_device_ips", s.RemoteDeviceIPs.OnCtx(ctx).Count, nil},
+		{"remote_ip_blocks", s.RemoteIPBlocks.OnCtx(ctx).Count, nil},
+		{"remote_denial_events", s.RemoteDenials.OnCtx(ctx).Count, nil},
 	}
 }
 
@@ -357,11 +377,33 @@ func ensureEmpty(ctx context.Context, dst *Store) error {
 		if err != nil {
 			return fmt.Errorf("meta: checking %s emptiness: %w", c.name, err)
 		}
+		if n == 1 && c.seedOnly != nil {
+			only, serr := c.seedOnly()
+			if serr != nil {
+				return fmt.Errorf("meta: checking %s emptiness: %w", c.name, serr)
+			}
+			if only {
+				continue
+			}
+		}
 		if n > 0 {
 			return fmt.Errorf("%w: destination table %s holds %d row(s) — the destination must be empty", ErrMigrate, c.name, n)
 		}
 	}
 	return nil
+}
+
+// seedPoolOnly reports whether a store's one pool row is the seed 000005
+// writes: DefaultPoolID, named "default". Any other single row is data.
+func seedPoolOnly(ctx context.Context, s *Store) (bool, error) {
+	p, err := s.Pools.OnCtx(ctx).With(PoolID, DefaultPoolID).Get()
+	if errors.Is(err, dao.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return p.Name == "default", nil
 }
 
 // verifyCounts re-counts every copied table on the destination.
@@ -390,7 +432,7 @@ func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error 
 // remote_denial_events have natural keys — a string `key`, `kind`, `prefix`
 // and `event_id` — so none is listed and none has a sequence to advance).
 var serialTables = []string{
-	"users", "connections", "workspaces", "workspace_connections",
+	"users", "db_pool_connections", "connections", "workspaces", "workspace_connections",
 	"grants", "sessions", "script_history", "audit_log", "tx_outcomes",
 	"tx_pending", "ip_allowlist", "user_ip_allowlist", "pats",
 	"user_ssh_keys", "remote_devices", "remote_device_ips",
