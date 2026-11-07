@@ -386,6 +386,14 @@ func (r *sessionRegistry) clearDemandClaimLocked(w *admitWaiter) {
 // blocking that would make the queue worse than the refusal it replaced. So it
 // is skipped and KEEPS ITS PLACE: it is not moved to the back, and the next
 // release still finds it ahead of everyone who arrived later.
+// serve runs the line under the registry's lock, for a change made outside it
+// that can admit waiters: a pool's max raised.
+func (r *sessionRegistry) serve() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.serveLine()
+}
+
 func (r *sessionRegistry) serveLine() {
 	for served := true; served; {
 		served = false

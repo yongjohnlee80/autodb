@@ -1128,6 +1128,80 @@ func (b *Bound) SetConnectionProfile(ctx context.Context, connID int64, profile 
 	return err
 }
 
+// PoolInfo is one connection pool and its live ledger (pool.list).
+type PoolInfo struct {
+	ID          int64
+	Name        string
+	Connections []int64
+	// MaxConns is the pool's socket budget: FrontDoorShare for front-door
+	// sessions, HeadroomShare for exec, TUI and internal work, and one for
+	// cancels.
+	MaxConns, FrontDoorShare, HeadroomShare int
+	// FrontDoor, Headroom and Control are the sockets held now, and the two
+	// Waiting counts each share's line.
+	FrontDoor, Headroom, Control      int
+	FrontDoorWaiting, HeadroomWaiting int
+	Outstanding                       int
+	Draining                          bool
+}
+
+// Pools lists every connection pool with its live ledger.
+func (b *Bound) Pools(ctx context.Context) ([]PoolInfo, error) {
+	res, err := b.authed(ctx, "pool.list")
+	if err != nil {
+		return nil, err
+	}
+	var out []PoolInfo
+	for _, item := range asList(res) {
+		m, _ := item.(map[string]any)
+		p := PoolInfo{
+			ID: mI(m, "id"), Name: mS(m, "name"),
+			MaxConns: int(mI(m, "max_conns")), FrontDoorShare: int(mI(m, "front_door_share")),
+			HeadroomShare: int(mI(m, "headroom_share")),
+			FrontDoor:     int(mI(m, "front_door")), Headroom: int(mI(m, "headroom")),
+			Control: int(mI(m, "control")), FrontDoorWaiting: int(mI(m, "front_door_waiting")),
+			HeadroomWaiting: int(mI(m, "headroom_waiting")), Outstanding: int(mI(m, "outstanding")),
+			Draining: mB(m, "draining"),
+		}
+		for _, c := range asList(m["connections"]) {
+			if n, ok := c.(int64); ok {
+				p.Connections = append(p.Connections, n)
+			}
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// CreatePool adds a connection pool. Admin only.
+func (b *Bound) CreatePool(ctx context.Context, name string, maxConns int) (int64, error) {
+	res, err := b.authed(ctx, "pool.create", name, maxConns)
+	if err != nil {
+		return 0, err
+	}
+	m, _ := res.(map[string]any)
+	return mI(m, "id"), nil
+}
+
+// UpdatePool changes a pool's socket budget. Admin only.
+func (b *Bound) UpdatePool(ctx context.Context, poolID int64, maxConns int) error {
+	_, err := b.authed(ctx, "pool.update", poolID, maxConns)
+	return err
+}
+
+// DeletePool removes a pool no connection belongs to. Admin only.
+func (b *Bound) DeletePool(ctx context.Context, poolID int64) error {
+	_, err := b.authed(ctx, "pool.delete", poolID)
+	return err
+}
+
+// SetConnectionPool moves a connection to another pool, ending its sessions.
+// Admin only.
+func (b *Bound) SetConnectionPool(ctx context.Context, connID, poolID int64) error {
+	_, err := b.authed(ctx, "conn.set_pool", connID, poolID)
+	return err
+}
+
 // SetConnectionExposure changes whether the front door may reach a connection.
 // The server requires administrative authority.
 func (b *Bound) SetConnectionExposure(ctx context.Context, connID int64, exposed bool) error {

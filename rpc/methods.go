@@ -214,6 +214,10 @@ var publicErrs = []struct {
 	// Workspace not-found is admin-only reachable (Manage authz runs
 	// BEFORE the lookup, so R13 ordering holds) and carries no internals.
 	{exec.ErrWorkspaceNotFound, golibrpc.CodeInvalidParams},
+	// Pool admin is admin-only, and both texts are constant: neither names a
+	// pool or a connection the caller didn't.
+	{exec.ErrInvalidPool, golibrpc.CodeInvalidParams},
+	{exec.ErrPoolInUse, golibrpc.CodeInvalidParams},
 
 	// The session/transaction surface (protocol 5). Each of these is a
 	// condition the CALLER can do something about, which is why they are
@@ -1727,6 +1731,117 @@ func (s *Server) register() {
 
 	// conn.set_profile is an audited capability change, independent of network
 	// exposure.
+	// CONNECTION POOLS. Every socket budget lives here now: pool.update is what
+	// replaced policy.reload's max_target_conns.
+	s.handle("pool.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		pools, err := s.eng.ListPools(ctx, token)
+		if err != nil {
+			return nil, s.wireErrFor(req, err)
+		}
+		out := make([]any, 0, len(pools))
+		for _, p := range pools {
+			conns := make([]any, 0, len(p.Connections))
+			for _, c := range p.Connections {
+				conns = append(conns, c)
+			}
+			l := p.Ledger
+			out = append(out, map[string]any{
+				"id": p.ID, "name": p.Name, "connections": conns,
+				"max_conns":          int64(l.Configured),
+				"front_door_share":   int64(l.FrontDoorLimit),
+				"headroom_share":     int64(l.OrdinaryLimit),
+				"front_door":         int64(l.FrontDoor),
+				"headroom":           int64(l.Ordinary),
+				"control":            int64(l.Control),
+				"front_door_waiting": int64(l.FrontDoorWaiting),
+				"headroom_waiting":   int64(l.OrdinaryWaiting),
+				"outstanding":        int64(l.Outstanding),
+				"draining":           l.Draining,
+				"generation":         int64(l.Generation),
+			})
+		}
+		return out, nil
+	})
+	s.handle("pool.create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		name, err := argStr(req.Params, 1, "name")
+		if err != nil {
+			return nil, err
+		}
+		maxConns, err := argInt(req.Params, 2, "max_conns")
+		if err != nil {
+			return nil, err
+		}
+		id, cerr := s.eng.CreatePool(ctx, token, name, int(maxConns), peerIP(req))
+		if cerr != nil {
+			return nil, s.wireErrFor(req, cerr)
+		}
+		return map[string]any{"id": id}, nil
+	})
+	s.handle("pool.update", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		poolID, err := argInt(req.Params, 1, "pool_id")
+		if err != nil {
+			return nil, err
+		}
+		maxConns, err := argInt(req.Params, 2, "max_conns")
+		if err != nil {
+			return nil, err
+		}
+		return nil, s.wireErrFor(req, s.eng.UpdatePool(ctx, token, poolID, int(maxConns), peerIP(req)))
+	})
+	s.handle("pool.delete", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		poolID, err := argInt(req.Params, 1, "pool_id")
+		if err != nil {
+			return nil, err
+		}
+		return nil, s.wireErrFor(req, s.eng.DeletePool(ctx, token, poolID, peerIP(req)))
+	})
+	// conn.set_pool moves a connection to another pool, ending its sessions.
+	s.handle("conn.set_pool", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		poolID, err := argInt(req.Params, 2, "pool_id")
+		if err != nil {
+			return nil, err
+		}
+		return nil, s.wireErrFor(req, s.eng.SetConnectionPool(ctx, token, connID, poolID, peerIP(req)))
+	})
 	s.handle("conn.set_profile", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
