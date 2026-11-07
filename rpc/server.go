@@ -53,6 +53,9 @@ import (
 // interrupted, for an update to take effect).
 // Protocol 8 added sys.inflight -- what a restart would interrupt, which the
 // restart confirmation has to name before it asks.
+// Protocol 15 added the connection pool verbs — pool.list, pool.create,
+// pool.update, pool.delete and conn.set_pool — and policy.reload lost its
+// fifth value, max_target_conns, which pool.update replaces.
 // Protocol 14 added the session cursor verbs — exec.session_query,
 // exec.session_fetch and exec.session_cursor_close — a read paged across
 // calls in a read-only transaction of the cursor's own.
@@ -62,7 +65,7 @@ import (
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 14
+const Protocol int64 = 15
 
 // Session keys the gate and the hello handler share.
 //

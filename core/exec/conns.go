@@ -463,6 +463,8 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 	if err != nil {
 		return 0, err
 	}
+	// The new connection starts in the default pool (the column's default).
+	e.pools.setPoolOf(&meta.Connection{ID: id, Engine: engineName, PoolID: meta.DefaultPoolID})
 	return id, nil
 }
 
