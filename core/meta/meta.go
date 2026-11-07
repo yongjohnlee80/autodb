@@ -26,6 +26,7 @@ type Store struct {
 
 	Users          *dao.Schema[*User, UserField, Sort, int64]
 	Connections    *dao.Schema[*Connection, ConnField, Sort, int64]
+	Pools          *dao.Schema[*ConnectionPool, PoolField, Sort, int64] // schema script 000005
 	Workspaces     *dao.Schema[*Workspace, WorkspaceField, Sort, int64]
 	WorkspaceConns *dao.Schema[*WorkspaceConn, WsConnField, Sort, int64]
 	Grants         *dao.Schema[*Grant, GrantField, Sort, int64]
@@ -150,6 +151,7 @@ func OpenNoMigrate(ctx context.Context, mcfg StoreConfig) (*Store, error) {
 		sqlitePath:     sqlitePath,
 		Users:          newUsers(conn),
 		Connections:    newConnections(conn),
+		Pools:          newConnectionPools(conn),
 		Workspaces:     newWorkspaces(conn),
 		WorkspaceConns: newWorkspaceConns(conn),
 		Grants:         newGrants(conn),
