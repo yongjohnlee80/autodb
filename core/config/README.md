@@ -92,33 +92,22 @@ On a shared server hosting `autodb` as a system daemon, an unprivileged user run
 
 ---
 
-### 2. Frontdoor Sizing & Headroom Derivation
+### 2. Connection Pools & Shares
 
-The PostgreSQL wire listener (`[frontdoor]`) shares target database connection pools with internal control queries and interactive TUI sessions. Sizing parameters are derived to guarantee that frontdoor wire leases never starve interactive operators:
+The PostgreSQL wire listener (`[frontdoor]`) shares each connection pool with internal control queries and interactive TUI sessions. Each pool is split into shares so that neither side can starve the other:
 
 ```
-  [Host Hardware]
-         │
-         ▼
-  [Exec.PoolMaxConns] ──────────────────────┐
-  • Default: 2 × CPU cores                  │
-  • Bounds per-target connections           │
-                                            ▼
-                             [DefaultReservedHeadroom(pool)]
-                             • Calculated as: min(4, pool / 2)
-                             • Holds connections back for TUI / control queries
-                             • Never inflates the pool to satisfy reservation
-                                            │
-                                            ▼
-                             [FrontDoor.EffectiveMaxLeases]
-                             • Derived: PoolMaxConns - ReservedHeadroom
-                             • Explicit max_leases may only be lower
-                                            │
-                                            ▼
-                             [Capacity Validation]
-                             • PoolMaxConns - ReservedHeadroom >= 1
-                             • Refuses configurations leaving 0 capacity
+  [Exec.PoolMaxConns]  • Default: 2 × CPU cores
+                       • Bounds each MySQL / SQLite connection only
+
+  [Connection pool, in the meta store]   (not configured here)
+  max_conns  ─┬─ front-door share  = max − 1 − min(4, max/2)
+              ├─ headroom share    = min(4, max/2)   (TUI, exec, internal)
+              └─ control lane      = 1               (cancels)
 ```
+
+`exec.max_target_conns`, `frontdoor.max_leases` and `frontdoor.reserved_headroom`
+are retired: a file that still sets them loads with a warning.
 
 #### Memory Budget Hierarchy
 
@@ -303,7 +292,6 @@ Configures the SQL execution engine and connection pool boundaries.
 | Key | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `max_statement_bytes` | integer | `65536` | Maximum SQL statement size permitted for execution (64 KiB). |
-| `max_target_conns` | integer | `0` (None) | Global ceiling for target connections. Required when frontdoor is enabled. |
 | `max_sessions_per_user`| integer | `8` | Maximum concurrent execution sessions per user identity. |
 | `max_sessions_global` | integer | `256` | Maximum concurrent execution sessions across all users. |
 | `session_idle_timeout` | duration | `"10m"` | Inactivity duration before an idle execution session is reaped. |
@@ -331,8 +319,6 @@ Configures the PostgreSQL wire-protocol server.
 | `tls_key_file` | string | `""` | Path to server TLS private key file (PEM format). |
 | `tls_host_names` | string list | `[]` | Hostnames expected in client connections; verified against certificate SANs. |
 | `tls_root_ca_file` | string | `""` | Optional CA certificate file used to verify custom internal certificates. |
-| `reserved_headroom` | integer | `min(4, pool/2)` | Connections withheld from wire clients for internal/interactive use. |
-| `max_leases` | integer | `Derived` | Maximum concurrent target connections leased to wire clients. |
 | `resident_budget_bytes`| integer | `1073741824` | Total memory reserved for active wire session tracking (Default: 1 GiB). |
 | `general_lane_bytes` | integer | `1073741824` | Total memory allocated for queries, portals, and wire output buffers. |
 | `control_lane_bytes` | integer | `Derived` | Memory allocated for wire frame handling (`max_conns × 64 KiB`). |
@@ -346,8 +332,8 @@ Configures the PostgreSQL wire-protocol server.
 
 ## Architectural Decisions & Security Invariants
 
-1. **No Default for `max_target_conns`**:
-   Target database limits cannot be probed safely from the client side. Defaulting to an arbitrary number risks overrunning database capacity. The operator must specify this limit explicitly when enabling the frontdoor.
+1. **Socket budgets live in connection pools, not here**:
+   Target database limits cannot be probed safely from the client side, and autodb never assumes two connections share a server. Each pool's max is set by an admin to match a server, and every connection starts in the `default` pool of 25.
 2. **Explicit Cleartext Acknowledgment**:
    Setting `insecure_disable_tls` requires typing the exact sentence `"i-accept-that-every-pat-crosses-in-cleartext"`. This prevents accidental deployment of cleartext authentication where access tokens could be sniffed.
 3. **Decoupled Structural Interface (`core/meta.StoreConfig`)**:

@@ -111,24 +111,17 @@ allow_insecure_dsn = false
 # lifetime, so a pool of 1 leaves nothing for the work beside it.
 pool_max_conns = 0
 
-# exec.max_target_conns -- THIS INSTANCE'S TOTAL PRODUCTION-CONNECTION BUDGET,
-# the number of sockets autodb may hold open to target databases at once,
-# across every target.
+# SOCKET BUDGETS ARE NOT SET IN THIS FILE. Every PostgreSQL connection belongs
+# to a CONNECTION POOL, kept in the meta store: the sockets autodb holds to all
+# of a pool's connections together never exceed the pool's max_conns. Every
+# connection starts in "default" (25). An admin creates pools to match the
+# database servers -- autodb never guesses that two connections share one --
+# and moves connections into them (pool.create, pool.update, conn.set_pool).
+# Each pool keeps one socket for cancels and up to 4 for the TUI, exec and
+# autodb's own queries; the rest are for front-door sessions.
 #
-# NO DEFAULT, and REQUIRED when the front door is enabled (ADR 0181 D3). A
-# default would have autodb quietly claim a number nobody chose against a
-# database whose max_connections it cannot see, so it refuses to start instead
-# and asks you to decide once, visibly.
-#
-# CHOOSE AT MOST HALF THE TARGET SERVER'S max_connections. Guidance, not
-# validation: autodb cannot measure that limit. Summing across several autodb
-# instances against one server is yours to do.
-#
-# Distinct from pool_max_conns above, which is a technical ceiling on ONE
-# pool. This bounds the aggregate, so two targets may each be allowed more
-# than this -- the runtime permit ledger is what keeps the total true. Every
-# socket counts: query, health check, control, and one still being dialled.
-# max_target_conns = 50
+# exec.max_target_conns, frontdoor.max_leases and frontdoor.reserved_headroom
+# are retired: a file that still sets them loads with a warning.
 
 # sqlite only. Empty means $XDG_DATA_HOME/autodb/meta.db
 # (~/.local/share/autodb/meta.db). The -wal and -shm files beside it are
@@ -425,13 +418,6 @@ outcome_retention_interval = "1h"
 #
 # OFF unless you turn it on. This surface speaks a protocol every client in
 # the world already knows how to dial, so switching it on is the decision.
-#
-# TURNING IT ON MAKES exec.max_target_conns MANDATORY. It has no default --
-# it is this instance's TOTAL production-connection budget and autodb cannot
-# see a target's max_connections to guess it -- so a config with the front
-# door enabled and no budget REFUSES TO START, and every command that loads
-# config says so rather than the one you ran. Set it above before you set
-# this.
 enabled = false
 
 # TCP only. The unix-socket LocalPeer exemption does NOT apply here -- a
@@ -579,12 +565,6 @@ bind = "127.0.0.1:5432"
 # secret. The KEY never leaves the host: anyone holding it can impersonate this
 # front door and collect other people's tokens.
 
-# How many connections of each target pool are held back from wire leases,
-# for the interactive surfaces and the engine's own control queries. Without
-# it the front door can take the whole pool and the TUI stops working, with
-# the front door looking healthy -- because from its side nothing failed.
-reserved_headroom = 4
-
 # ---------------------------------------------------------------------------
 # HOW LONG AN IDLE FRONT-DOOR SESSION LIVES — set in [exec], not here.
 #
@@ -599,9 +579,9 @@ reserved_headroom = 4
 # trade in three directions at once, all the wrong way for a deployment where
 # autodb is the only path to production:
 #
-#   - every parked session holds a target lease, and reserved_headroom above is
-#     what stops the front door starving the TUI and the engine's own control
-#     queries. A longer idle window means more sessions parked at once,
+#   - every parked session holds a socket of its connection pool's front-door
+#     share; the pool's headroom share is what keeps the TUI and the engine's
+#     own control queries going. A longer idle window means more sessions parked at once,
 #     competing with the path an admin uses to FIX things.
 #   - an access token works from anywhere it is admitted until revoked, so an
 #     idle session is a live authenticated channel sitting open. 30m bounds
@@ -618,13 +598,6 @@ reserved_headroom = 4
 # idle_in_tx_timeout = "2h" and max_tx_duration = "8h". Those are not tuning
 # knobs — a transaction abandoned between BEGIN and COMMIT holds locks on the
 # target until something ends it, and nothing else will.
-
-# Concurrent wire sessions per target pool. Unset derives
-# pool_max_conns - reserved_headroom, which is what you almost always want.
-# An explicit value may only be LOWER: a higher one promises leases the pool
-# cannot supply, and that failure lands on whichever session asked last
-# rather than on the person who set the number.
-# max_leases = 6
 
 # --- front-door budgets (ADR-0075 §4 and the protocol matrix §9) ---
 #

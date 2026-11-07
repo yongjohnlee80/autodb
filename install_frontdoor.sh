@@ -164,7 +164,6 @@ STATE_OK="yes"
 STARTED="no"
 CAP_OVERRIDE=""
 LANE_OVERRIDE=""
-MAX_TARGET_CONNS_OVERRIDE=""
 
 # Matrix figures. These MIRROR THE CODE and must stay in step with it:
 #   WATERMARK_MIB      frontdoor.pendingOutputWatermark  (4 MiB)
@@ -301,14 +300,10 @@ OPTIONS:
   --sessions <n>       Override the computed max_sessions_global
   --lane <MiB>         Override the computed general lane
   --max-target-conns <n>
-                       REQUIRED for --apply and --print-config unless answered
-                       interactively. The TOTAL connections this instance may
-                       hold open to target databases, across every target. It
-                       has NO DEFAULT: choose at most half the target server's
-                       max_connections, and divide it yourself if several
-                       autodb instances share one server. Minimum 2, because
-                       one is reserved so a cancellation can always be
-                       delivered.
+                       RETIRED, accepted and ignored. Socket budgets are per
+                       connection pool now: every connection starts in the
+                       "default" pool (25); set a pool's max with autodb's
+                       pool admin (pool.update), not in the config.
   -h, --help           Show this help
 
 The preflight NEVER changes anything, so run it first and read the
@@ -378,7 +373,7 @@ while [ $# -gt 0 ]; do
     --meta-dsn) META_DSN="${2:?--meta-dsn needs a DSN}"; shift; mark META_DSN ;;
     --sessions) CAP_OVERRIDE="${2:?--sessions needs a number}"; shift ;;
     --lane)   LANE_OVERRIDE="${2:?--lane needs a number of MiB}"; shift ;;
-    --max-target-conns) MAX_TARGET_CONNS_OVERRIDE="${2:?--max-target-conns needs a number}"; shift ;;
+    --max-target-conns) shift; warn "--max-target-conns is retired and ignored: socket budgets are per connection pool (pool.update)" ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
@@ -440,49 +435,6 @@ case "$INTERACTIVE" in
     [ "$MODE" = "apply" ] || TTY_OK=0
     ;;
 esac
-
-# A POSITIVE INTEGER, OR NOTHING. No default, by design.
-valid_budget() {
-  case "$1" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  [ "$1" -ge 2 ]
-}
-
-# require_target_budget resolves exec.max_target_conns, or refuses.
-#
-# IT IS CALLED ONLY BY THE MODES THAT EMIT A SERVER CONFIG. --print-client-config
-# describes how a CLIENT connects and has no business knowing the server's
-# share of a database, so making it answer this question would be a second
-# defect wearing the first one's clothes.
-#
-# There is deliberately no fallback value. autodb cannot see the target
-# server's max_connections, so any number chosen here would be a guess wearing
-# the authority of a default -- which is the exact failure the no-default rule
-# exists to prevent. Interactively we ask until the answer is usable;
-# non-interactively the flag is required and its absence stops the run BEFORE
-# anything is printed or written.
-require_target_budget() {
-  if valid_budget "$MAX_TARGET_CONNS"; then return 0; fi
-  if [ -n "$MAX_TARGET_CONNS" ]; then
-    die "--max-target-conns must be a whole number of at least 2 (got: $MAX_TARGET_CONNS). One connection is reserved so a cancellation can always be delivered."
-  fi
-  if [ "$TTY_OK" -eq 0 ]; then
-    die "exec.max_target_conns is required and has no default. Pass --max-target-conns <n>: the total connections this instance may hold to target databases, across every target. Choose at most half the target server's max_connections -- autodb cannot see that limit and will not guess it."
-  fi
-  while :; do
-    say ""
-    say "exec.max_target_conns -- the TOTAL connections this instance may hold open to"
-    say "target databases, across every target. There is no default: choose at most half"
-    say "the target server's max_connections, and divide it yourself if several autodb"
-    say "instances share one server. Minimum 2, because one is reserved so a cancellation"
-    say "can always be delivered."
-    printf '  max_target_conns: ' > /dev/tty
-    IFS= read -r _ans < /dev/tty || _ans=""
-    if valid_budget "$_ans"; then MAX_TARGET_CONNS="$_ans"; return 0; fi
-    say "  Not usable: a whole number of at least 2."
-  done
-}
 
 ask() {
   _var="$1"; _prompt="$2"; _def="$3"
@@ -800,24 +752,11 @@ compute_sizing() {
   [ -n "$CAP_OVERRIDE" ] && CAP="$CAP_OVERRIDE"
   [ -n "$LANE_OVERRIDE" ] && LANE_MIB="$LANE_OVERRIDE"
 
-  # Must exceed reserved_headroom (4) with room to serve, and the shipped
-  # 2 x CPU default does not on a small host. Eight is the smallest value that
-  # leaves a usable lease budget at one core; a bigger box keeps its own.
+  # Sizes MySQL and SQLite connections only: PostgreSQL ones are bounded by
+  # their connection pool. Eight at the least, so a one-core host still gives
+  # each such connection a usable number; a bigger box keeps 2 x CPU.
   POOL_MAX_CONNS=$(( 2 * NCPU ))
   [ "$POOL_MAX_CONNS" -lt 8 ] && POOL_MAX_CONNS=8
-
-  # exec.max_target_conns has NO DEFAULT on purpose, and the installer does not
-  # invent one. It is the share of a production database this instance may
-  # claim, and autodb cannot see that server's max_connections -- so a number
-  # chosen here would be a guess wearing the authority of a default, which is
-  # the exact failure the no-default rule exists to prevent.
-  #
-  # Interactively we ASK, with guidance and no pre-filled number.
-  # Non-interactively --max-target-conns is required. If neither supplies a
-  # value the key is NOT WRITTEN, and the daemon refuses to start with a
-  # message naming it -- a better outcome than starting against a budget
-  # nobody chose.
-  MAX_TARGET_CONNS="$MAX_TARGET_CONNS_OVERRIDE"
 
   GOMEMLIMIT_MIB=$(( MEM_MIB * 75 / 100 ))
   MEMORYMAX_MIB=$(( MEM_MIB * 90 / 100 ))
@@ -930,36 +869,12 @@ ip_allowlist = $IP_ALLOWLIST
 service_keyfile = "$KEY_DIR/service.key"
 
 [exec]
-# SET EXPLICITLY, because the shipped default is 2 x CPU COUNT and
-# reserved_headroom is 4 -- so on a 1 or 2 vCPU host the defaults contradict
-# each other and the config will not load at all:
-#
-#   1 vCPU -> pool_max_conns 2, headroom 4, leaves -2  INVALID
-#   2 vCPU -> pool_max_conns 4, headroom 4, leaves  0  INVALID
-#
-# That is not hypothetical: it stopped a real provisioning run on a 1 vCPU
-# droplet, and it stopped it inside --create-cert, which loads the config --
-# so the failure surfaced as "certificate generation failed" rather than as
-# "your config is invalid".
+# Sizes MySQL and SQLite connections only. A PostgreSQL connection's sockets
+# are bounded by its CONNECTION POOL, kept in the meta store: every connection
+# starts in "default" (25 sockets), and an admin creates pools to match the
+# database servers and moves connections into them. Socket budgets are not set
+# in this file.
 pool_max_conns = $POOL_MAX_CONNS
-
-# THIS INSTANCE'S TOTAL PRODUCTION-CONNECTION BUDGET, across every target.
-#
-# It has NO DEFAULT and is REQUIRED when the front door is enabled (ADR 0181
-# D3): a default would have autodb quietly claim a number nobody chose against
-# a database whose max_connections it cannot see. The installer must therefore
-# emit one, or a fresh install will not start.
-#
-# CHOOSE AT MOST HALF THE TARGET SERVER'S max_connections. That is guidance,
-# not validation -- autodb cannot measure the server's limit and will not
-# pretend to. The value below assumes a PostgreSQL default of 100; change it
-# if your target says otherwise, and remember that summing across autodb
-# instances is yours to do.
-#
-# Distinct from pool_max_conns above, which is a technical ceiling on ONE
-# target pool. This bounds the aggregate, so two targets may each be allowed
-# more than this and the runtime permit ledger keeps the total true.
-max_target_conns = $MAX_TARGET_CONNS
 
 # Sized for this host. The general lane's floor is this number x ${WATERMARK_MIB} MiB, so
 # these two move TOGETHER -- raising the cap without raising the lane fails
@@ -1294,9 +1209,6 @@ if [ "$NCPU" -lt 2 ]; then
 fi
 
 if [ "$MODE" = "print" ]; then
-  # BEFORE emit_config, so a missing budget stops the run rather than printing
-  # a config that cannot start.
-  require_target_budget
   emit_config
   exit 0
 fi
@@ -1550,25 +1462,6 @@ ask_yn CONFIRM "proceed?" "yes"
 say ""
 
 # ---------------------------------------------------------------------- apply
-
-# NOTHING BELOW THIS LINE IS REVERSIBLE BY THIS SCRIPT, so the last mandatory
-# answer is resolved HERE -- before the first side effect of any kind.
-#
-# An earlier fix moved this to just before the config write, which was not far
-# enough: by then the run had already created a system account, made and
-# chowned directories, and installed, enabled and started PostgreSQL with a
-# role and a database. Refusing at that point still leaves a host that has been
-# extensively changed by a run which was never going to succeed. "Refuse before
-# writing anything" means anything.
-#
-# --keep-config with an existing file is the one bypass, and it is READ-ONLY:
-# that run does not write a config, so it does not need the budget the config
-# would have carried. The existing file keeps whatever it already says.
-if [ -e "$CONFIG" ] && [ "$KEEP_CONFIG" = "yes" ]; then
-  :
-else
-  require_target_budget
-fi
 
 id "$RUN_USER" >/dev/null 2>&1 || {
   say "creating service account $RUN_USER"
