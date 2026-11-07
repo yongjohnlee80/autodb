@@ -25,7 +25,7 @@ func TestDemandFinalisation_ManyCallersPresentingOneNoticeYieldOneOwner(t *testi
 	r := demandRegistry(t, s)
 	e := &Engine{sessions: r, now: func() time.Time { return now }}
 
-	if _, ok := r.reserveDemandVictim(7, now); !ok {
+	if _, ok := r.reserveDemandVictim(connKey(7), now); !ok {
 		t.Fatal("the holder was not reserved, so there is no finalisation to contend for")
 	}
 

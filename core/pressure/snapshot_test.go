@@ -8,7 +8,17 @@ import (
 
 func caps(sessions, sessionCap, perUserCap, leaseCap int, users, leases map[int64]int) Caps {
 	return Caps{Sessions: sessions, SessionCap: sessionCap,
-		PerUser: users, PerUserCap: perUserCap, Leases: leases, LeaseCap: leaseCap}
+		PerUser: users, PerUserCap: perUserCap, Leases: leaseRows(leases, leaseCap)}
+}
+
+// leaseRows builds one lease row per key, all at one limit, named by the key's
+// number as the cells assert.
+func leaseRows(leases map[int64]int, limit int) []LeaseRow {
+	var out []LeaseRow
+	for id, n := range leases {
+		out = append(out, LeaseRow{Subject: itoa(id), Held: n, Limit: limit})
+	}
+	return out
 }
 
 // PER-USER ROWS ARE LOAD-BEARING, AND THEY ATTRIBUTE TO THE RIGHT USER.

@@ -23,7 +23,7 @@ import (
 func schedRegistry(t *testing.T, leaseCap int) *sessionRegistry {
 	t.Helper()
 	r := newSessionRegistry(64, 64)
-	r.leaseCap = leaseCap
+	r.pools = fixedLeases(leaseCap)
 	return r
 }
 
@@ -470,7 +470,7 @@ func TestScheduler_AllCapacityInTransactionRefusesBeforeQueueing(t *testing.T) {
 	r := schedRegistry(t, 1)
 	holder := schedSession("in-transaction", 1, 7)
 	mustAdmit(t, r, holder, 7)
-	r.noteTxOpened(7, holder.id, time.Now().Add(time.Hour))
+	r.noteTxOpened(connKey(7), holder.id, time.Now().Add(time.Hour))
 
 	start := time.Now()
 	err := r.admitWithLeaseOrWait(context.Background(), schedSession("refused", 2, 7), 7, 0)
@@ -531,7 +531,7 @@ func TestScheduler_RemovingATargetAnswersOnlyItsOwnWaiters(t *testing.T) {
 	go func() { spared <- r.admitWithLeaseOrWait(context.Background(), schedSession("w2", 4, 2), 2, 0) }()
 	awaitSeq(t, seen)
 
-	dropped, on := r.beginDrainingTarget(1)
+	dropped, on := r.beginDrainingTarget(1, drainRemoved)
 	if dropped != 1 {
 		t.Fatalf("answered %d waiters for the removed connection, want 1", dropped)
 	}
@@ -660,7 +660,7 @@ func TestScheduler_AnExpiredTransactionIsNotAReasonToRefuse(t *testing.T) {
 	holder := schedSession("holds-an-expired-transaction", 1, 7)
 	mustAdmit(t, r, holder, 7)
 	// Open, and already past its outer bound.
-	r.noteTxOpened(7, holder.id, time.Now().Add(-time.Second))
+	r.noteTxOpened(connKey(7), holder.id, time.Now().Add(-time.Second))
 
 	done := make(chan error, 1)
 	go func() { done <- r.admitWithLeaseOrWait(context.Background(), schedSession("waits", 2, 7), 7, 0) }()
@@ -716,7 +716,7 @@ func TestScheduler_TheBoundEdgeDecidesWhoOwnsTheLease(t *testing.T) {
 			r.now = func() time.Time { return at }
 			holder := schedSession("holder", 1, 7)
 			mustAdmit(t, r, holder, 7)
-			r.noteTxOpened(7, holder.id, tc.until)
+			r.noteTxOpened(connKey(7), holder.id, tc.until)
 
 			r.mu.Lock()
 			got := r.allLeasesInTransactionLocked(7)
@@ -728,87 +728,55 @@ func TestScheduler_TheBoundEdgeDecidesWhoOwnsTheLease(t *testing.T) {
 	}
 }
 
-// EXACTLY ONE BOUND OWNS EACH WAIT, AND WHICH ONE IS NOT A COIN TOSS.
+// THE SERVER'S BOUND ALWAYS OWNS THE WAIT, AND LEAVES THE ANSWER ITS TIME.
 //
-// When both deadlines coincide, a select among ready cases picks at random, so
-// the answer a client received depended on scheduling rather than on policy.
-// Ownership is now decided once, from the two absolute deadlines, before
-// anything is armed. Repeated because a race that resolves correctly once
-// proves nothing.
-func TestScheduler_OneBoundOwnsTheWaitDeterministically(t *testing.T) {
-	// EVERY ROW HAS TO LAND IN MILLISECONDS, INCLUDING THE ONES THE SERVER
-	// TIMER IS NOT ARMED FOR.
-	//
-	// The first version of this cell set the scheduler's clock to now, so the
-	// caller-owned rows put their deadline ninety seconds out in REAL time --
-	// and because those rows deliberately leave the server's timer unarmed,
-	// the injected fast timer never applied to them. Each iteration waited out
-	// the better part of a real ninety seconds, and the cell as a whole would
-	// have run for over an hour. A gate nobody can afford to run is a gate
-	// nobody runs.
-	//
-	// So the scheduler's clock is set BACK by the server wait, which puts the
-	// server's deadline a few milliseconds from real now; the caller's
-	// deadlines are then placed either side of it by a small delta, and
-	// whichever bound owns the wait resolves in milliseconds.
-	const delta = 25 * time.Millisecond
-	start := time.Now()
-
+// A front-door wait runs inside the credential phase, whose deadline closes
+// the socket. If the caller's deadline ended the wait, the client was told its
+// credentials failed (the uniform denial), not that the instance was busy. So
+// the server's bound is the caller's deadline less what the pin and the reply
+// still need (answerBy), it always fires first, and the answer is the queue
+// timeout. A caller with no deadline waits the full queueWait.
+func TestScheduler_TheServerBoundOwnsTheWaitAndKeepsTheAnswersTime(t *testing.T) {
+	keep := pinAllowance + handshakeReserve
 	for _, tc := range []struct {
-		name  string
-		lead  time.Duration // the caller's deadline, relative to the server's
-		wants func(error) bool
-		desc  string
+		name     string
+		deadline time.Duration // the caller's, from now; 0 = none
+		want     time.Duration // the server bound armed
 	}{
-		{
-			name:  "the caller runs out first",
-			lead:  -delta,
-			wants: func(err error) bool { return errors.Is(err, context.DeadlineExceeded) },
-			desc:  "the caller's own deadline",
-		},
-		{
-			name:  "the deadlines coincide exactly",
-			lead:  0,
-			wants: func(err error) bool { return errors.Is(err, context.DeadlineExceeded) },
-			desc:  "the caller's own deadline, which owns an exact tie",
-		},
-		{
-			name:  "the server runs out first",
-			lead:  time.Hour,
-			wants: func(err error) bool { return errors.Is(err, ErrQueueTimeout) },
-			desc:  "the server's wait",
-		},
+		{"a caller with time to spare", 10 * time.Second, 10*time.Second - keep},
+		{"a caller with less than the reply needs", keep / 2, 0},
+		{"a caller with no deadline", 0, queueWait},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for i := range 25 {
-				r := schedRegistry(t, 1)
-				// serverDeadline = fake-now + queueWait, which is one delta
-				// from REAL now.
-				fakeNow := time.Now().Add(-queueWait).Add(2 * delta)
-				r.now = func() time.Time { return fakeNow }
-				// When the server's timer IS armed, it fires on the same
-				// millisecond scale rather than after ninety real seconds.
-				r.newTimer = func(time.Duration) *time.Timer { return time.NewTimer(2 * delta) }
+			r := schedRegistry(t, 1)
+			now := time.Now()
+			r.now = func() time.Time { return now }
+			armed := make(chan time.Duration, 1)
+			r.newTimer = func(d time.Duration) *time.Timer {
+				armed <- d
+				return time.NewTimer(time.Millisecond)
+			}
+			mustAdmit(t, r, schedSession("holder", 1, 7), 7)
 
-				holder := schedSession("holder", 1, 7)
-				mustAdmit(t, r, holder, 7)
-				ctx, cancel := context.WithDeadline(context.Background(), fakeNow.Add(queueWait).Add(tc.lead))
-				err := r.admitWithLeaseOrWait(ctx, schedSession("waits", 2, 7), 7, 0)
-				cancel()
-				if !tc.wants(err) {
-					t.Fatalf("run %d: got %v, want %s — which bound owns the wait must not "+
-						"depend on which channel the runtime happens to see first", i, err, tc.desc)
-				}
+			ctx := context.Background()
+			if tc.deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, now.Add(tc.deadline))
+				defer cancel()
+			}
+			err := r.admitWithLeaseOrWait(ctx, schedSession("waits", 2, 7), 7, 0)
+			if !errors.Is(err, ErrQueueTimeout) {
+				t.Fatalf("got %v, want the queue timeout: the server's bound must end the wait, "+
+					"never the caller's deadline", err)
+			}
+			if got := <-armed; got != tc.want {
+				t.Errorf("the server bound was armed for %v, want %v", got, tc.want)
+			}
+			var qt *QueueTimeoutError
+			if errors.As(err, &qt) && qt.Waited() != tc.want {
+				t.Errorf("the refusal reports waiting %v, want %v", qt.Waited(), tc.want)
 			}
 		})
-	}
-
-	// THE CEILING IS PART OF THE ASSERTION. Without it, a future change that
-	// stops the injected timer applying would still pass -- slowly -- and the
-	// only symptom would be a gate that quietly became unaffordable.
-	if elapsed := time.Since(start); elapsed > 30*time.Second {
-		t.Errorf("the cell took %s, which means at least one row is waiting out a real "+
-			"server bound rather than the injected one", elapsed)
 	}
 }
 
@@ -859,7 +827,7 @@ func TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting(t *testing.T) {
 		for _, w := range r.line {
 			// Asked without committing: a waiter that COULD be admitted right
 			// now is one the release should already have served.
-			if r.leases[w.leaseConn] < r.leaseCap {
+			if key, limit := r.leaseScope(w.leaseConn); r.leases[key] < limit {
 				admittable = append(admittable, w.s.id)
 			}
 		}

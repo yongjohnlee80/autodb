@@ -46,7 +46,7 @@ func TestPressureLoop_TheIncidentReachesTheJournal(t *testing.T) {
 	}
 	l.emitPressure(fixedCaps{exec.CapacitySnapshot{
 		Sessions: 1, SessionCap: 100,
-		Leases: map[int64]int{7: 10}, LeaseCap: 10,
+		Leases: []exec.LeaseOccupancy{{Pool: 7, Held: 10, Limit: 10}},
 	}})
 
 	if len(*got) != 2 {
@@ -66,7 +66,7 @@ func TestPressureLoop_TheIncidentReachesTheJournal(t *testing.T) {
 		}
 		seen[d.Signal]++
 	}
-	for _, want := range []string{pressure.DenialsRate, pressure.LeasesTarget} {
+	for _, want := range []string{pressure.DenialsRate, pressure.LeasesPool} {
 		if seen[want] != 1 {
 			t.Errorf("signal %q appeared %d times, want exactly 1; emitted set was %v",
 				want, seen[want], seen)
@@ -136,14 +136,14 @@ func TestPressureLoop_AThrottledSourceReachesTheJournalAsCredential(t *testing.T
 func TestPressureLoop_TheClearIsEmittedToo(t *testing.T) {
 	at := time.Unix(0, 0)
 	l, got := pressListener(t, &at)
-	full := fixedCaps{exec.CapacitySnapshot{Leases: map[int64]int{7: 10}, LeaseCap: 10}}
+	full := fixedCaps{exec.CapacitySnapshot{Leases: []exec.LeaseOccupancy{{Pool: 7, Held: 10, Limit: 10}}}}
 	l.emitPressure(full)
 	if len(*got) != 1 {
 		t.Fatalf("got %v, want the raise", *got)
 	}
 
 	*got = nil
-	l.emitPressure(fixedCaps{exec.CapacitySnapshot{Leases: map[int64]int{7: 3}, LeaseCap: 10}})
+	l.emitPressure(fixedCaps{exec.CapacitySnapshot{Leases: []exec.LeaseOccupancy{{Pool: 7, Held: 3, Limit: 10}}}})
 	if len(*got) != 1 {
 		t.Fatalf("got %v, want exactly one clear", *got)
 	}
@@ -158,7 +158,7 @@ func TestPressureLoop_TheClearIsEmittedToo(t *testing.T) {
 	// AND IT DOES NOT KEEP SAYING SO. A cleared signal that re-emits on every
 	// tick is the event storm the hysteresis exists to prevent.
 	*got = nil
-	l.emitPressure(fixedCaps{exec.CapacitySnapshot{Leases: map[int64]int{7: 3}, LeaseCap: 10}})
+	l.emitPressure(fixedCaps{exec.CapacitySnapshot{Leases: []exec.LeaseOccupancy{{Pool: 7, Held: 3, Limit: 10}}}})
 	if len(*got) != 0 {
 		t.Errorf("a settled signal emitted %v on the next tick", *got)
 	}
@@ -277,7 +277,7 @@ func TestPressureLoop_ATickArrivingAtShutdownDoesNotDispatch(t *testing.T) {
 		once.Do(func() { close(l.closed) })
 	}
 
-	l.runPressure(fixedCaps{exec.CapacitySnapshot{Leases: map[int64]int{7: 10}, LeaseCap: 10}})
+	l.runPressure(fixedCaps{exec.CapacitySnapshot{Leases: []exec.LeaseOccupancy{{Pool: 7, Held: 10, Limit: 10}}}})
 
 	waited := make(chan struct{})
 	go func() { l.wg.Wait(); close(waited) }()
@@ -301,7 +301,7 @@ func TestPressureLoop_ATickArrivingAtShutdownDoesNotDispatch(t *testing.T) {
 func TestPressureSnapshot_ItAgreesWithWhatWasEmitted(t *testing.T) {
 	at := time.Unix(0, 0)
 	l, got := pressListener(t, &at)
-	caps := fixedCaps{exec.CapacitySnapshot{Leases: map[int64]int{7: 10}, LeaseCap: 10}}
+	caps := fixedCaps{exec.CapacitySnapshot{Leases: []exec.LeaseOccupancy{{Pool: 7, Held: 10, Limit: 10}}}}
 
 	l.emitPressure(caps)
 	if len(*got) != 1 || !strings.Contains((*got)[0].Detail, `"state":"entered"`) {
@@ -326,7 +326,7 @@ func TestPressureSnapshot_ItAgreesWithWhatWasEmitted(t *testing.T) {
 func TestPressureSnapshot_ReadingItRaisesNothing(t *testing.T) {
 	at := time.Unix(0, 0)
 	l, got := pressListener(t, &at)
-	caps := fixedCaps{exec.CapacitySnapshot{Leases: map[int64]int{7: 10}, LeaseCap: 10}}
+	caps := fixedCaps{exec.CapacitySnapshot{Leases: []exec.LeaseOccupancy{{Pool: 7, Held: 10, Limit: 10}}}}
 
 	for range 5 {
 		if _, err := l.PressureSnapshot(caps); err != nil {

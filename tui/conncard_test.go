@@ -6,16 +6,17 @@ import (
 )
 
 func cardFixture() (ConnInfo, FrontDoorEndpoint) {
-	return ConnInfo{Name: "bravo", TargetDB: "main", PoolMaxConns: 4}, FrontDoorEndpoint{
-		Enabled: true, Listening: true, Addr: "127.0.0.1:5432",
-		MaxSessionsPerUser: 8, MaxSessionsGlobal: 32, MaxTargetConns: 64,
-	}
+	return ConnInfo{Name: "bravo", TargetDB: "main", PoolID: 2, PoolName: "prod", PoolMaxConns: 25, FrontDoorShare: 20},
+		FrontDoorEndpoint{
+			Enabled: true, Listening: true, Addr: "127.0.0.1:5432",
+			MaxSessionsPerUser: 8, MaxSessionsGlobal: 32,
+		}
 }
 
 func TestCardBudget_TheCeilingsCarryTheirScope(t *testing.T) {
 	c, ep := cardFixture()
 	text := buildCardText("fake-token", c, ep, "root", "admin", "")
-	for _, want := range []string{"this connection        4", "sessions per user      8", "sessions, instance     32", "backend connections    64"} {
+	for _, want := range []string{"pool prod              25", "front-door sessions    20", "sessions, instance     32"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("scope missing its own figure %q", want)
 		}
@@ -24,10 +25,10 @@ func TestCardBudget_TheCeilingsCarryTheirScope(t *testing.T) {
 
 func TestCardBudget_AnUnreportedCeilingSaysSoRatherThanSayingZero(t *testing.T) {
 	c, ep := cardFixture()
-	ep.MaxSessionsPerUser, ep.MaxSessionsGlobal, ep.MaxTargetConns = 0, 0, 0
+	c.FrontDoorShare, ep.MaxSessionsGlobal = 0, 0
 	text := buildCardText("fake-token", c, ep, "root", "admin", "")
 	for _, line := range strings.Split(text, "\n") {
-		if strings.Contains(line, "sessions per user") || strings.Contains(line, "sessions, instance") || strings.Contains(line, "backend connections") {
+		if strings.Contains(line, "front-door sessions") || strings.Contains(line, "sessions, instance") {
 			if !strings.Contains(line, "not reported") {
 				t.Errorf("an absent ceiling claimed a number: %q", line)
 			}

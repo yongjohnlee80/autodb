@@ -167,10 +167,7 @@ func TestLoad_ResidentBudgetCeiling(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// exec.max_target_conns has no default and is required under the front
-	// door (the no-default rule), so every enabled-front-door fixture must choose one.
-	base := "[exec]\nmax_target_conns = 25\n\n" +
-		"[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
+	base := "[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
 		"tls_cert_file = \"" + cert + "\"\ntls_key_file = \"" + key + "\"\n" +
 		"tls_host_names = [\"autodb.example.com\"]\n"
 
@@ -229,10 +226,7 @@ func TestLoad_GeneralLaneBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// exec.max_target_conns has no default and is required under the front
-	// door (the no-default rule), so every enabled-front-door fixture must choose one.
-	base := "[exec]\nmax_target_conns = 25\n\n" +
-		"[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
+	base := "[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
 		"tls_cert_file = \"" + cert + "\"\ntls_key_file = \"" + key + "\"\n" +
 		"tls_host_names = [\"autodb.example.com\"]\n"
 
@@ -293,7 +287,7 @@ func TestLoad_GeneralLaneBytesIsReadFromTheFile(t *testing.T) {
 		}
 	}
 	const want = 1_500_000_000 // not the default, and not a round power of two
-	body := "[exec]\nmax_target_conns = 25\n\n[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
+	body := "[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
 		"tls_cert_file = \"" + cert + "\"\ntls_key_file = \"" + key + "\"\n" +
 		"tls_host_names = [\"autodb.example.com\"]\n" +
 		"general_lane_bytes = " + itoa(want) + "\n"

@@ -10,33 +10,39 @@ import "testing"
 // range over them while an admission writes, which is a data race the caller
 // cannot see and cannot fix.
 func TestCapacitySnapshot_ItReadsTheLiveCapsAndCopiesTheMaps(t *testing.T) {
-	r := newSessionRegistry(4, 10)
-	r.leaseCap = 2
+	r := newSessionRegistry(4, 64)
+	r.pools = fixedLeases(2)
 	e := &Engine{sessions: r}
 
-	s := &session{id: "holder", userID: 7, connID: 3}
-	if err := r.admitWithLease(s, 3, 0); err != nil {
+	// One front-door session (it takes a lease, and is not counted per user)
+	// and one exec session (no lease, counted per user).
+	wire := &session{id: "wire", userID: 7, connID: 3}
+	if err := r.admitWithLease(wire, 3, 0); err != nil {
+		t.Fatal(err)
+	}
+	execS := &session{id: "exec", userID: 7, connID: 3}
+	if err := r.admitWithLease(execS, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 
 	snap := e.CapacitySnapshot()
-	if snap.SessionCap != 10 || snap.PerUserCap != 4 || snap.LeaseCap != 2 {
-		t.Errorf("caps read as global=%d peruser=%d lease=%d, want 10/4/2 — the view must "+
-			"describe the same instance that is refusing people",
-			snap.SessionCap, snap.PerUserCap, snap.LeaseCap)
+	if snap.SessionCap != 64 || snap.PerUserCap != 4 {
+		t.Errorf("caps read as global=%d peruser=%d, want 64/4 — the view must describe the "+
+			"same instance that is refusing people", snap.SessionCap, snap.PerUserCap)
 	}
-	if snap.Sessions != 1 || snap.PerUser[7] != 1 || snap.Leases[3] != 1 {
-		t.Errorf("occupancy read as sessions=%d user7=%d target3=%d, want 1/1/1",
-			snap.Sessions, snap.PerUser[7], snap.Leases[3])
+	want := []LeaseOccupancy{{Conn: 3, Held: 1, Limit: 2}}
+	if snap.Sessions != 2 || snap.PerUser[7] != 1 || len(snap.Leases) != 1 || snap.Leases[0] != want[0] {
+		t.Errorf("occupancy read as sessions=%d user7=%d leases=%+v, want 2/1/%+v: the front-door "+
+			"session holds a lease and isn't counted per user", snap.Sessions, snap.PerUser[7], snap.Leases, want)
 	}
 
 	// MUTATING WHAT WE WERE GIVEN MUST NOT REACH THE REGISTRY.
 	snap.PerUser[7] = 999
-	snap.Leases[3] = 999
+	snap.Leases[0].Held = 999
 	again := e.CapacitySnapshot()
-	if again.PerUser[7] != 1 || again.Leases[3] != 1 {
-		t.Error("the snapshot handed out the registry's own maps; a reader ranging over " +
-			"them while an admission writes is a race the caller cannot see")
+	if again.PerUser[7] != 1 || again.Leases[0].Held != 1 {
+		t.Error("the snapshot handed out the registry's own state; a reader ranging over " +
+			"it while an admission writes is a race the caller cannot see")
 	}
 }
 

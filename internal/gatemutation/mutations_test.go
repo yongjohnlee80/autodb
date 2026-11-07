@@ -247,7 +247,7 @@ func expectedControls() map[string][3]string {
 		"line-skips-the-ineligible":                    {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_AFullTargetDoesNotBlockTheRestOfTheLine"},
 		"timeout-unwraps-alone":                        {"core/exec/scheduler.go", "./core/exec/", "TestAdmissionWait_TheBlockingCapIsDiagnosisAndNotAnIdentity"},
 		"server-wait-uses-its-seam":                    {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_TheServerWaitExpiresWithItsOwnIdentity"},
-		"the-caller-owns-an-exact-tie":                 {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_OneBoundOwnsTheWaitDeterministically"},
+		"the-line-keeps-the-answers-time":              {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_TheServerBoundOwnsTheWaitAndKeepsTheAnswersTime"},
 		"release-serves-the-line":                      {"core/exec/session.go", "./core/exec/", "TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting"},
 		"expired-wait-names-its-blocker":               {"core/exec/wire_session.go", "./core/exec/", "TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal"},
 		"the-wait-arm-comes-first":                     {"core/exec/wire_session.go", "./core/exec/", "TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn"},

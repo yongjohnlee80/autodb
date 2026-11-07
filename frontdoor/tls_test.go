@@ -134,7 +134,7 @@ func fdWith(certPath, keyPath, caPath string, hosts ...string) config.FrontDoor 
 	return config.FrontDoor{
 		Enabled: true, Bind: "127.0.0.1:5432",
 		TLSCertFile: certPath, TLSKeyFile: keyPath, TLSRootCAFile: caPath,
-		TLSHostNames: hosts, ReservedHeadroom: 4,
+		TLSHostNames: hosts,
 	}
 }
 

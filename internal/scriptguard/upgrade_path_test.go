@@ -186,12 +186,15 @@ func runInstallerAt(script string, args ...string) (stdout, stderr string, err e
 	return string(out), errBuf.String(), err
 }
 
-// A HOST PROVISIONED BEFORE THE REQUIREMENT, MEETING TODAY'S LOADER.
+// THE HAZARD IS GONE, AND THIS CELL SAYS SO.
 //
-// This is the cell a fresh-install gate cannot substitute for. Both halves are
-// real: the config is what that tag's installer actually writes, and the
-// verdict is from core/config itself rather than a stub that agrees with it.
-func TestUpgradePath_AnOldConfigIsRefusedWithTheSettingNamed(t *testing.T) {
+// It used to assert that today's loader REFUSED every old tag's config, naming
+// exec.max_target_conns. Socket budgets moved to connection pools in the meta
+// store and the key was retired, so an old config meeting a new binary now
+// LOADS: the transition that took a host down on 2026-09-18 no longer exists.
+// Each qualifying tag is still checked, because each is a version some host is
+// still running.
+func TestUpgradePath_AnOldConfigLoads(t *testing.T) {
 	requireCapability(t, capGitTags, gitTagsProbe(),
 		"the release history is unreachable, so no host provisioned at an older tag "+
 			"can be constructed and the upgrade transition is UNCOVERED in this run")
@@ -199,110 +202,23 @@ func TestUpgradePath_AnOldConfigIsRefusedWithTheSettingNamed(t *testing.T) {
 	old := tagsPredatingTheBudget(t)
 	t.Logf("tags whose provisioner predates the budget, newest first: %s", strings.Join(old, " "))
 
-	// EVERY QUALIFYING TAG, not just the newest. Each one is a version some
-	// host is still running, and they are not interchangeable: the installer
-	// changed repeatedly across this range, so "the newest old tag refuses"
-	// says nothing about a host four releases further back. The cost is one
-	// shell invocation per tag.
 	for _, tag := range old {
 		t.Run(tag, func(t *testing.T) {
 			body, route := configFromTag(t, tag)
 			t.Logf("provisioned via %s", route)
-
-			// THE PREMISE, asserted rather than assumed. If either of these
-			// stops holding, the check below would pass for the wrong reason.
 			if !strings.Contains(body, "enabled = true") {
-				t.Fatalf("the config from %s does not enable the front door, so the "+
-					"requirement would not apply and this case would prove nothing:\n%s", tag, body)
+				t.Fatalf("the config from %s does not enable the front door, so this case "+
+					"would prove nothing:\n%s", tag, body)
 			}
-			if strings.Contains(body, "max_target_conns") {
-				t.Fatalf("the config from %s already carries max_target_conns; this tag "+
-					"does not predate the requirement after all", tag)
-			}
-
 			path := filepath.Join(t.TempDir(), "config.toml")
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-
-			_, err := config.Load(path)
-			if err == nil {
-				t.Fatalf("today's loader ACCEPTS the config %s writes. Either the "+
-					"requirement was relaxed -- in which case the upgrade hazard is gone "+
-					"and this cell should say so -- or the budget acquired a default, "+
-					"which is the thing it must not have", tag)
-			}
-			if !strings.Contains(err.Error(), "exec.max_target_conns") {
-				t.Errorf("the refusal does not NAME the setting, so an operator upgrading "+
-					"from %s is told only that something is wrong:\n%v", tag, err)
+			if _, err := config.Load(path); err != nil {
+				t.Fatalf("today's loader refuses the config %s writes; an upgrade from it "+
+					"would stop the daemon:\n%v", tag, err)
 			}
 		})
-	}
-}
-
-// AND THE OPERATOR IS LEFT HOLDING THAT NAME, not a pointer to it.
-//
-// The daemon diagnosing itself perfectly is worth nothing if the updater throws
-// the diagnosis away, which is exactly what happened on 2026-09-18: the run
-// rolled back correctly and said "See the journal above" having printed nothing
-// from it.
-//
-// The journal this drives the stub with is NOT hand-written. It is the message
-// core/config produces for the real old config, read at run time, so the cell
-// cannot drift from the text the daemon would actually write -- and if the
-// loader stops naming the setting, this cell fails with the one above rather
-// than agreeing with a copy of the old wording.
-func TestUpgradePath_TheUpdateLeavesTheOperatorWithTheNamedCause(t *testing.T) {
-	requireCapability(t, capGitTags, gitTagsProbe(),
-		"the release history is unreachable, so the refusal an old host would actually "+
-			"produce cannot be obtained and this cell cannot check that it reaches the operator")
-
-	old := tagsPredatingTheBudget(t)
-
-	body, _ := configFromTag(t, old[0])
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, loadErr := config.Load(path)
-	if loadErr == nil {
-		t.Fatalf("the config from %s now loads, so the refusal this cell carries to the "+
-			"operator does not exist; the cell above owns that change", old[0])
-	}
-
-	// What the unit would have written on its way out, verbatim.
-	journal := "autodb[1234]: autodb: the configuration is invalid\n" +
-		"autodb[1234]: " + loadErr.Error() + "\n" +
-		"systemd[1]: autodb-frontdoor.service: Main process exited, code=exited, status=78/CONFIG"
-
-	// active once, then failed -- the new binary came up and died on its
-	// config, which is what an upgrade across this requirement looks like.
-	r := newUpdateRun(t, "active:901,failed,active:902,active:902,active:902",
-		"UPD_JOURNAL="+strings.ReplaceAll(journal, "\n", "\\n"),
-		// 78/EX_CONFIG, reported as an ORDINARY EXIT (CLD_EXITED) rather than a
-		// signal -- the two are read differently and reading 78 as a signal
-		// number would name something else entirely.
-		"UPD_EXIT_STATUS=78",
-		"UPD_EXIT_CODE=1")
-
-	out, err := r.run()
-	if err == nil {
-		t.Fatalf("a binary that refused its configuration was reported as a successful "+
-			"update:\n%s", out)
-	}
-	if !strings.Contains(out, "exec.max_target_conns") {
-		t.Errorf("THE OPERATOR IS NOT TOLD WHAT TO FIX. The update failed and rolled back, "+
-			"and the one line naming the setting never reached them -- which is the whole "+
-			"defect this path exists to prevent:\n%s", out)
-	}
-	if !strings.Contains(out, "status 78") {
-		t.Errorf("the run does not report the exit status, so the operator cannot tell a "+
-			"configuration refusal from a crash:\n%s", out)
-	}
-	// And the binary really was rolled back: a named cause is not a consolation
-	// prize for leaving the host on a daemon that will not start.
-	if got := r.installedVersion(); got != oldVersion {
-		t.Errorf("installed %s: the host was left on the binary that refused its config", got)
 	}
 }
 

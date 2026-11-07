@@ -141,21 +141,21 @@ func All() []Mutation {
 		},
 		{
 			Name: "server-wait-uses-its-seam", Package: "./core/exec/", File: "core/exec/scheduler.go",
-			Anchor:      "\t\ttimer := r.serverTimer(queueWait)",
-			Replacement: "\t\ttimer := time.NewTimer(queueWait)",
+			Anchor:      "\ttimer := r.serverTimer(max(wait, 0))",
+			Replacement: "\ttimer := time.NewTimer(max(wait, 0))",
 			Test:        "TestScheduler_TheServerWaitExpiresWithItsOwnIdentity",
 			Fails:       "never armed through the injected timer",
 			Guarantee: "that the server's wait is armed through the injectable seam, without " +
 				"which a gate silently becomes a multi-minute one and eventually reads as a hang",
 		},
 		{
-			Name: "the-caller-owns-an-exact-tie", Package: "./core/exec/", File: "core/exec/scheduler.go",
-			Anchor:      "\tif d, ok := ctx.Deadline(); !ok || d.After(serverDeadline) {",
-			Replacement: "\tif d, ok := ctx.Deadline(); !ok || !d.Before(serverDeadline) {",
-			Test:        "TestScheduler_OneBoundOwnsTheWaitDeterministically",
-			Fails:       "which bound owns the wait must not",
-			Guarantee: "that which bound owns a wait is decided by policy rather than by which " +
-				"channel the runtime happens to see first",
+			Name: "the-line-keeps-the-answers-time", Package: "./core/exec/", File: "core/exec/scheduler.go",
+			Anchor:      "\twait := answerBy(ctx, now, pinAllowance+handshakeReserve).Sub(now)",
+			Replacement: "\twait := answerBy(ctx, now, 0).Sub(now)",
+			Test:        "TestScheduler_TheServerBoundOwnsTheWaitAndKeepsTheAnswersTime",
+			Fails:       "the server bound was armed for",
+			Guarantee: "that a front-door wait ends early enough for the pin and the reply, so a " +
+				"capacity refusal reaches the client as 53300 rather than as a credential failure",
 		},
 		{
 			Name: "release-serves-the-line", Package: "./core/exec/", File: "core/exec/session.go",
@@ -545,7 +545,7 @@ func All() []Mutation {
 		{
 			Name: "a-departed-request-leaves-no-demand", Package: "./core/exec/",
 			File:        "core/exec/scheduler.go",
-			Anchor:      "\tw.wantsDemand = false\n\tr.dropDemand(w.leaseConn)",
+			Anchor:      "\tw.wantsDemand = false\n\tr.dropDemand(w.claim)",
 			Replacement: "\tw.wantsDemand = false",
 			Test:        "TestDemandRetry_ACancelledRequestLeavesNoDemandBehind",
 			Fails:       "still reports unanswered demand",
@@ -588,7 +588,7 @@ func All() []Mutation {
 		{
 			Name: "a-demand-unit-is-spent-where-it-is-checked", Package: "./core/exec/",
 			File:   "core/exec/demand_reclaim.go",
-			Anchor: "\tif r.demandWanted[leaseConn] <= len(r.demandPromised[leaseConn]) {\n\t\treturn false\n\t}\n",
+			Anchor: "\tif r.demandWanted[key] <= len(r.demandPromised[key]) {\n\t\treturn false\n\t}\n",
 			// Unconditional promise: exactly the shape the defect had, and it
 			// compiles, which a bare deletion of the whole function would not.
 			Replacement: "",
@@ -936,7 +936,7 @@ func All() []Mutation {
 		},
 		{
 			Name: "card-a-ceiling-shows-its-figure", Package: "./tui/",
-			File: "tui/conncard.go", Anchor: `cardCap(ep.MaxSessionsPerUser)`, Replacement: `""`,
+			File: "tui/conncard.go", Anchor: `cardCap(conn.FrontDoorShare)`, Replacement: `""`,
 			Test: "TestCardBudget_TheCeilingsCarryTheirScope", Fails: "scope missing its own figure",
 			Guarantee: "that each ceiling is printed beside its own scope and figure",
 		},
@@ -1041,8 +1041,8 @@ func All() []Mutation {
 		{
 			Name: "pressure-the-protocol-bump-is-not-optional", Package: "./rpc/",
 			File:        "rpc/server.go",
-			Anchor:      "const Protocol int64 = 14",
-			Replacement: "const Protocol int64 = 13",
+			Anchor:      "const Protocol int64 = 15",
+			Replacement: "const Protocol int64 = 14",
 			Test:        "TestProtocol_TheVerbSurfaceIsPinned",
 			Fails:       "does not record",
 			Guarantee:   "that a verb cannot be added on an unchanged protocol number, which is exactly what happened to sys.pressure while a cell pinning the number to 5 stayed green",

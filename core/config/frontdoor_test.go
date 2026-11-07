@@ -14,11 +14,6 @@ func fdCfg(mut func(*Config)) Config {
 	c.FrontDoor.TLSKeyFile = "/etc/autodb/key.pem"
 	c.FrontDoor.TLSHostNames = []string{"autodb.example.com"}
 	c.Exec.PoolMaxConns = 10
-	c.FrontDoor.ReservedHeadroom = 4
-	// the budget has no default and is REQUIRED when the front
-	// door is enabled, so every front-door fixture must choose one — the same
-	// decision the operator is now forced to make.
-	c.Exec.MaxTargetConns = 25
 	if mut != nil {
 		mut(&c)
 	}
@@ -35,14 +30,8 @@ func TestFrontDoor_DisabledIsNotValidated(t *testing.T) {
 	if err := c.validate(); err != nil {
 		t.Fatalf("a default config with the front door off failed validation: %v", err)
 	}
-	// And the defaults are still the ADR's, so enabling it is one keystroke
-	// rather than a research exercise.
-	// DERIVED FROM THIS MACHINE'S POOL, not a flat constant: the two were
-	// independent and contradicted each other below 3 vCPU.
-	if want := DefaultReservedHeadroom(c.Exec.PoolMaxConns); c.FrontDoor.ReservedHeadroom != want {
-		t.Errorf("reserved_headroom default = %d, want %d for a pool of %d",
-			c.FrontDoor.ReservedHeadroom, want, c.Exec.PoolMaxConns)
-	}
+	// Enabling it is one keystroke rather than a research exercise: the
+	// socket budget comes from connection pools, not from this file.
 	if c.FrontDoor.Bind == "" {
 		t.Error("bind has no default; enabling the front door would need two decisions, not one")
 	}
@@ -67,11 +56,9 @@ enabled = true
 tls_cert_file = "/etc/autodb/cert.pem"
 tls_key_file = "/etc/autodb/key.pem"
 tls_host_names = ["autodb.example.com"]
-reserved_headroom = 4
 
 [exec]
 pool_max_conns = 10
-max_target_conns = 25
 `)
 
 	msg := loadInvalid(t, "[frontdoor]\nenabled = true\n")
@@ -101,7 +88,6 @@ func TestFrontDoor_Validation(t *testing.T) {
 			"tls_cert_file and tls_key_file"},
 		{"an empty bind", func(c *Config) { c.FrontDoor.Bind = "" }, "has no address"},
 		{"a bind that is not host:port", func(c *Config) { c.FrontDoor.Bind = "5432" }, "host:port"},
-		{"negative headroom", func(c *Config) { c.FrontDoor.ReservedHeadroom = -1 }, "cannot be negative"},
 
 		// Without this the SAN check was skippable by OMISSION: an
 		// enabled front door with no names configured ran zero name checks,
@@ -113,17 +99,6 @@ func TestFrontDoor_Validation(t *testing.T) {
 		{"a blank host name", func(c *Config) {
 			c.FrontDoor.TLSHostNames = []string{"autodb.example.com", "  "}
 		}, "is blank"},
-		{"negative max_leases", func(c *Config) { c.FrontDoor.MaxLeases = -1 }, "cannot be negative"},
-
-		// The two that matter most, because both are configurations that
-		// LOOK fine and fail later, on someone else's connection.
-		{"headroom that leaves nothing to lease", func(c *Config) {
-			c.Exec.PoolMaxConns = 4
-			c.FrontDoor.ReservedHeadroom = 4
-		}, "no capacity to serve anyone"},
-		{"max_leases above what the pool can supply", func(c *Config) {
-			c.FrontDoor.MaxLeases = 9 // pool 10 - headroom 4 = 6
-		}, "does not create capacity"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -141,66 +116,40 @@ func TestFrontDoor_Validation(t *testing.T) {
 	}
 }
 
-// The lease cap is DERIVED unless set, and derived in exactly one place.
-// Two call sites computing it separately is how a validator and an admission
-// gate come to disagree — and the disagreement surfaces as leases refused by
-// a cap no configuration file mentions.
-func TestFrontDoor_EffectiveMaxLeases(t *testing.T) {
-	t.Parallel()
-
-	fd := FrontDoor{ReservedHeadroom: 4}
-	if got := fd.EffectiveMaxLeases(10); got != 6 {
-		t.Errorf("unset max_leases with pool 10 and headroom 4 = %d, want the derived 6", got)
-	}
-	fd.MaxLeases = 2
-	if got := fd.EffectiveMaxLeases(10); got != 2 {
-		t.Errorf("an explicit lower max_leases = %d, want 2", got)
-	}
-	// A larger explicit value cannot reach here — validation refuses it —
-	// but if it ever did, the derivation must not silently raise the cap.
-	fd.MaxLeases = 0
-	fd.ReservedHeadroom = 0
-	if got := fd.EffectiveMaxLeases(10); got != 10 {
-		t.Errorf("no headroom = %d, want the whole pool", got)
-	}
-}
-
-// no default, and required under the front door.
+// THE RETIRED BUDGET KEYS LOAD, WITH A WARNING THAT NAMES WHAT REPLACED THEM.
 //
-// A default would have autodb claim a number nobody chose against a
-// production database whose max_connections it cannot see. Refusing to start
-// is the point: the operator makes the decision once, visibly, instead of
-// discovering it from a saturated server.
-func TestFrontDoor_TargetBudgetIsRequiredAndHasNoDefault(t *testing.T) {
+// Socket budgets moved to connection pools in the meta store. A file written
+// for an earlier release still sets these, and refusing it would stop an
+// upgrade over a number that now does nothing.
+func TestFrontDoor_RetiredBudgetKeysLoadWithAWarning(t *testing.T) {
 	t.Parallel()
 
-	if got := Default().Exec.MaxTargetConns; got != 0 {
-		t.Errorf("exec.max_target_conns must have NO default, got %d", got)
-	}
+	c := mustLoad(t, `
+[frontdoor]
+enabled = true
+tls_cert_file = "/etc/autodb/cert.pem"
+tls_key_file = "/etc/autodb/key.pem"
+tls_host_names = ["autodb.example.com"]
+reserved_headroom = 4
+max_leases = 6
 
-	c := fdCfg(func(c *Config) { c.Exec.MaxTargetConns = 0 })
-	if err := c.validate(); err == nil {
-		t.Fatal("an enabled front door with no target budget must not validate")
-	}
-
-	// A disabled front door is not asked for a budget it will never spend.
-	d := Default()
-	d.Exec.MaxTargetConns = 0
-	if err := d.validate(); err != nil {
-		t.Errorf("a disabled front door must not require the budget: %v", err)
-	}
-}
-
-// A budget of 1 leaves nothing for ordinary work once the control lane is
-// reserved.
-func TestFrontDoor_TargetBudgetOfOneIsRefused(t *testing.T) {
-	t.Parallel()
-
-	if err := fdCfg(func(c *Config) { c.Exec.MaxTargetConns = 1 }).validate(); err == nil {
-		t.Error("a budget of 1 must be refused: the reserved cancel lane would consume it")
-	}
-	if err := fdCfg(func(c *Config) { c.Exec.MaxTargetConns = 2 }).validate(); err != nil {
-		t.Errorf("a budget of 2 is the viable minimum, got: %v", err)
+[exec]
+max_target_conns = 25
+`)
+	for _, key := range []string{"exec.max_target_conns", "frontdoor.max_leases", "frontdoor.reserved_headroom"} {
+		var said string
+		for _, w := range c.Warnings() {
+			if strings.Contains(w, key) {
+				said = w
+			}
+		}
+		if said == "" {
+			t.Errorf("%s loaded silently; it has no effect now, and the operator must be told", key)
+			continue
+		}
+		if !strings.Contains(said, "connection pool") {
+			t.Errorf("the warning for %s doesn't say what replaced it: %q", key, said)
+		}
 	}
 }
 

@@ -64,11 +64,11 @@ func TestPressure_TheOccupancyBoundaryIsExact(t *testing.T) {
 		{capacity: 1, enterAt: 1, clearAt: 0},
 	} {
 		tr := NewTracker(fixed(time.Now()))
-		if ev := tr.Observe([]Reading{occ("leases.target", "7", tc.enterAt-1, tc.capacity)}); len(ev) != 0 {
+		if ev := tr.Observe([]Reading{occ("leases.pool", "7", tc.enterAt-1, tc.capacity)}); len(ev) != 0 {
 			t.Errorf("cap %d raised at %d, one below the stated entry %d",
 				tc.capacity, tc.enterAt-1, tc.enterAt)
 		}
-		ev := tr.Observe([]Reading{occ("leases.target", "7", tc.enterAt, tc.capacity)})
+		ev := tr.Observe([]Reading{occ("leases.pool", "7", tc.enterAt, tc.capacity)})
 		if len(ev) != 1 || !ev[0].Entered {
 			t.Fatalf("cap %d did not raise at %d", tc.capacity, tc.enterAt)
 		}
@@ -76,11 +76,11 @@ func TestPressure_TheOccupancyBoundaryIsExact(t *testing.T) {
 			t.Errorf("cap %d reported threshold %d, want %d — an operator reads this to "+
 				"know how much room is left", tc.capacity, ev[0].Threshold, tc.enterAt)
 		}
-		if ev := tr.Observe([]Reading{occ("leases.target", "7", tc.clearAt+1, tc.capacity)}); len(ev) != 0 {
+		if ev := tr.Observe([]Reading{occ("leases.pool", "7", tc.clearAt+1, tc.capacity)}); len(ev) != 0 {
 			t.Errorf("cap %d cleared at %d, one above the stated clear %d",
 				tc.capacity, tc.clearAt+1, tc.clearAt)
 		}
-		ev = tr.Observe([]Reading{occ("leases.target", "7", tc.clearAt, tc.capacity)})
+		ev = tr.Observe([]Reading{occ("leases.pool", "7", tc.clearAt, tc.capacity)})
 		if len(ev) != 1 || ev[0].Entered {
 			t.Fatalf("cap %d did not clear at %d", tc.capacity, tc.clearAt)
 		}
@@ -105,7 +105,7 @@ func TestPressure_TheOccupancyBoundaryIsExact(t *testing.T) {
 // never the problem. Neither class may suppress or clear the other.
 func TestPressure_TheTwoClassesRaiseAndClearIndependently(t *testing.T) {
 	tr := NewTracker(fixed(time.Now()))
-	cap9 := occ("leases.target", "9", 9, 10)
+	cap9 := occ("leases.pool", "9", 9, 10)
 	throttled := Reading{
 		Signal: Signal{ID: ID{Name: "sources.throttled", Subject: "10.0.0.5"},
 			Class: Credential, Kind: Count},
@@ -131,7 +131,7 @@ func TestPressure_TheTwoClassesRaiseAndClearIndependently(t *testing.T) {
 	}
 
 	// The capacity signal clears; the credential one must be untouched.
-	ev = tr.Observe([]Reading{occ("leases.target", "9", 7, 10), throttled})
+	ev = tr.Observe([]Reading{occ("leases.pool", "9", 7, 10), throttled})
 	if len(ev) != 1 || ev[0].Class != Capacity || ev[0].Entered {
 		t.Fatalf("clearing capacity produced %v, want exactly one capacity clear", ev)
 	}
@@ -161,7 +161,7 @@ func TestPressure_TheIncidentRaisesCapacityWithoutAnyCharge(t *testing.T) {
 	}
 
 	ev := tr.Observe([]Reading{
-		occ("leases.target", "7", 10, 10),
+		occ("leases.pool", "7", 10, 10),
 		{Signal: Signal{ID: ID{Name: "denials.rate", Subject: "capacity"},
 			Class: Capacity, Kind: Rate}, Value: denials.total(now)},
 	})
@@ -192,7 +192,7 @@ func TestPressure_TheIncidentRaisesCapacityWithoutAnyCharge(t *testing.T) {
 // source nobody has seen for an hour, and the operator learns the view lies.
 func TestPressure_ASignalWhoseSubjectIsGoneIsCleared(t *testing.T) {
 	tr := NewTracker(fixed(time.Now()))
-	if ev := tr.Observe([]Reading{occ("sessions.user", "alice", 9, 10)}); len(ev) != 1 {
+	if ev := tr.Observe([]Reading{occ("sessions.user.exec", "alice", 9, 10)}); len(ev) != 1 {
 		t.Fatalf("alice's signal did not raise: %v", ev)
 	}
 	ev := tr.Observe(nil) // alice has gone

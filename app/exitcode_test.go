@@ -41,18 +41,18 @@ func buildAutodb(t *testing.T) string {
 	return bin
 }
 
-// invalidConfig writes a config whose two SIZING numbers cannot both hold — the
-// droplet's failure, expressed as a file.
+// invalidConfig writes a config the daemon refuses on its sizing: a global
+// session cap that leaves the front door nothing once exec's slots are held.
+// (The droplet's own failure was two sizing keys that have since been retired.)
 func invalidConfig(t *testing.T) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.toml")
 	body := `
 [exec]
-pool_max_conns = 2
+max_sessions_global = 16
 
 [frontdoor]
 enabled = true
-reserved_headroom = 4
 tls_cert_file = "/etc/autodb/cert.pem"
 tls_key_file = "/etc/autodb/key.pem"
 tls_host_names = ["autodb.example.com"]
@@ -100,7 +100,7 @@ func TestExit_EveryEntryPointReportsAConfigFailureAsOne(t *testing.T) {
 			}
 			// And it still names the offending key, or the operator has a
 			// category and nothing to act on.
-			if !strings.Contains(body, "reserved_headroom") {
+			if !strings.Contains(body, "max_sessions_global") {
 				t.Errorf("%s does not name the setting at fault:\n%s", flag, body)
 			}
 		})
