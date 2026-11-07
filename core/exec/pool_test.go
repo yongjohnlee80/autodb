@@ -205,6 +205,10 @@ func TestOpenTarget_EveryDriverBranchAppliesThePoolBounds(t *testing.T) {
 				t.Fatalf("reading the connection row: %v", err)
 			}
 			row.Engine = eng
+			// The engine is changed in place, which production never does, so
+			// membership is recorded as a store write would (setPoolOf); the
+			// open path only registers a connection it doesn't know yet.
+			f.eng.pools.setPoolOf(row)
 			// A DSN THIS ENGINE'S OWN PARSER ACCEPTS, because openTarget now
 			// validates before it constructs anything. Reusing one engine's
 			// DSN for all three used to reach the driver seam anyway -- the

@@ -122,6 +122,8 @@ func (p *poolSet) dropPool(poolID int64) {
 
 // setPoolOf records the pool a connection is in, from its row: its pool_id for
 // a pgx connection (the default pool if that id isn't loaded), 0 otherwise.
+// AUTHORITATIVE: only the store's own writes call it (LoadPools,
+// CreateConnection, SetConnectionPool), each with a row it just wrote or read.
 func (p *poolSet) setPoolOf(row *meta.Connection) {
 	if p == nil {
 		return
@@ -129,6 +131,21 @@ func (p *poolSet) setPoolOf(row *meta.Connection) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.setPoolOfLocked(row)
+}
+
+// ensurePoolOf records a connection's pool only if it isn't known yet. The
+// session open and the pgxpool build call it with a row they read earlier,
+// which a move may have overtaken since: re-recording that stale row would undo
+// the move, so a known connection is left as it is.
+func (p *poolSet) ensurePoolOf(row *meta.Connection) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, known := p.poolOf[row.ID]; !known {
+		p.setPoolOfLocked(row)
+	}
 }
 
 func (p *poolSet) setPoolOfLocked(row *meta.Connection) {
