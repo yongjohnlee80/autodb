@@ -55,6 +55,8 @@ const (
 type admitWaiter struct {
 	s         *session
 	leaseConn int64
+	// waited is the server bound this wait was given (answerBy).
+	waited time.Duration
 	// claim is the lease key this waiter's demand claim was recorded under.
 	claim    leaseKey
 	overhead int64
@@ -122,6 +124,18 @@ func (r *sessionRegistry) noteWaitOutcome(o WaitOutcome) {
 	// not this function's to reach for.
 	defer func() { _ = recover() }()
 	obs(o)
+}
+
+// answerBy is THE ONE place a stage of opening a front-door session turns the
+// caller's deadline into its own bound: queueWait from now, or the caller's
+// deadline less what the later stages need (keep), whichever is sooner. The
+// line keeps pinAllowance+handshakeReserve; the pin keeps handshakeReserve.
+func answerBy(ctx context.Context, now time.Time, keep time.Duration) time.Time {
+	until := now.Add(queueWait)
+	if d, ok := ctx.Deadline(); ok && d.Add(-keep).Before(until) {
+		until = d.Add(-keep)
+	}
+	return until
 }
 
 // admitWithLeaseOrWait admits a front-door session, or waits its turn.
@@ -213,28 +227,18 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 		hook(w.seq)
 	}
 
-	// WHICH BOUND OWNS THIS WAIT IS DECIDED HERE, ONCE, FROM THE TWO ABSOLUTE
-	// DEADLINES -- not by racing two channels and reporting whichever wins.
-	//
-	// Both bounds apply: a client with five seconds left does not get ninety.
-	// But a select among cases that are ALREADY READY picks at random, so when
-	// the two deadlines coincide -- exactly what happens when the caller's is
-	// the earlier one and the server timer is armed to it -- the answer was a
-	// coin toss, and half the time a client that had run out of its own time
-	// was told the SERVER's wait had expired.
-	//
-	// So exactly one bound is armed. If the caller's deadline arrives no later
-	// than the server's, the caller's context owns the wait ALONE and the
-	// server's expiry channel stays nil, which blocks forever in a select. At
-	// exact equality the caller owns it, because "you ran out of time" is the
-	// more specific and more useful answer. Cancellation stays live either way.
-	serverDeadline := r.clock().Add(queueWait)
-	var serverExpiry <-chan time.Time
-	if d, ok := ctx.Deadline(); !ok || d.After(serverDeadline) {
-		timer := r.serverTimer(queueWait)
-		defer timer.Stop()
-		serverExpiry = timer.C
-	}
+	// THE SERVER'S BOUND ALWAYS OWNS THE WAIT, and ends it early enough that
+	// the answer can still be delivered: answerBy keeps back what the pin and
+	// the reply need from the caller's deadline. So the server's expiry fires
+	// first and the client is told the instance was busy (53300), never that
+	// its credentials failed because the credential deadline ran out
+	// underneath the wait. ctx.Done still answers a caller that cancels.
+	now := r.clock()
+	wait := answerBy(ctx, now, pinAllowance+handshakeReserve).Sub(now)
+	timer := r.serverTimer(max(wait, 0))
+	defer timer.Stop()
+	serverExpiry := timer.C
+	w.waited = max(wait, 0)
 
 	select {
 	case res := <-w.done:
@@ -303,7 +307,11 @@ func (r *sessionRegistry) giveUp(w *admitWaiter, own error) error {
 // differs from one for a full session cap -- so it is reachable through
 // BlockedBy, which the audit projection asks for deliberately and no ordered
 // errors.Is switch can select by accident.
-type QueueTimeoutError struct{ blockedBy error }
+type QueueTimeoutError struct {
+	blockedBy error
+	// waited is the bound the wait ran to, for the operator-facing detail.
+	waited time.Duration
+}
 
 func (e *QueueTimeoutError) Error() string {
 	if e.blockedBy == nil {
@@ -315,6 +323,9 @@ func (e *QueueTimeoutError) Error() string {
 // Unwrap yields the timeout ALONE. See the type's comment.
 func (e *QueueTimeoutError) Unwrap() error { return ErrQueueTimeout }
 
+// Waited is how long the request waited before the server's bound ended it.
+func (e *QueueTimeoutError) Waited() time.Duration { return e.waited }
+
 // BlockedBy is the cap that held this request, for the operator-facing record.
 // Nil when the wait expired without any cap having passed the request over.
 func (e *QueueTimeoutError) BlockedBy() error { return e.blockedBy }
@@ -324,7 +335,7 @@ func (r *sessionRegistry) expiredWaitReason(w *admitWaiter) error {
 	r.mu.Lock()
 	blocked := w.blockedBy
 	r.mu.Unlock()
-	return &QueueTimeoutError{blockedBy: blocked}
+	return &QueueTimeoutError{blockedBy: blocked, waited: w.waited}
 }
 
 // leaveLine takes a waiter out of the line, reporting whether it was still

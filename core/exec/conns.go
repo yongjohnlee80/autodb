@@ -227,14 +227,14 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	return conn, nil
 }
 
-// pgPoolLimits applies the target-pool bounds.
+// poolLimitsFor is a target's own pooled-connection bounds. The cap applies to
+// connections outside every pool (MySQL, SQLite); a pgx target is bounded by
+// its pool's ledger instead (pgPoolLimits), and takes only the lifetime here.
 //
 // A pinned transaction holds a physical connection for as long as its session
 // keeps it open, so an unbounded pool lets a few callers with open
 // transactions consume a production database's entire connection budget —
-// and the first thing to fail is somebody else's application. The bound is
-// the point; the retirement settings are what keep a server-side change from
-// requiring a daemon restart.
+// and the first thing to fail is somebody else's application.
 //
 // The per-connection value is a REQUEST, capped here rather than at the point
 // it was stored. That ordering matters: lowering the install-wide ceiling
@@ -270,8 +270,8 @@ func (e *Engine) sqlPoolLimits(row *meta.Connection) func(*sql.DB) {
 	}
 }
 
-//
-// A pgx target's sockets are bounded by its connection pool's ledger, and by
+// pgPoolLimits applies a pgx target's bounds. Its sockets are bounded by its
+// connection pool's ledger, and by
 // nothing of pgxpool's own: every hook that ties the pgxpool to the ledger is
 // installed here, in one place.
 func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {

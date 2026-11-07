@@ -17,6 +17,12 @@ import (
 // ChargeCapacity and the charge-class policy.
 var ErrTargetBudgetExhausted = errors.New("exec: target connection budget exhausted")
 
+// ErrBackendOpenTimeout means a pin got its permit but the target didn't finish
+// opening the backend in time: the target is slow or unreachable, which is an
+// outage, not pool pressure (owner ruling, 2026-11-07). The front door answers
+// it as startup-unavailable (57P03), never as a capacity refusal.
+var ErrBackendOpenTimeout = errors.New("exec: the target did not finish opening a connection in time")
+
 // ErrInvalidBudget means a live budget update was refused.
 var ErrInvalidBudget = errors.New("exec: invalid target connection budget")
 

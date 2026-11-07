@@ -134,7 +134,8 @@ const (
 	// the numbers an operator watches for target health.
 	EventConnectionUnusable = "fd.connection_unusable"
 	// OutcomeStartupConnectionUnavailable is a wire session that could not
-	// START because the secret store would not answer.
+	// START because the secret store would not answer, or because the target
+	// did not finish opening a backend within the pin's allowance.
 	//
 	// NAMED FOR WHAT THE CALLER IS ENTITLED TO KNOW, not for what happened.
 	// The identity travels in the frame's DETAIL as the stable rule id, so an

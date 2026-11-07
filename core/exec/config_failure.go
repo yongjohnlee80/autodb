@@ -101,6 +101,10 @@ const (
 	// DetailStoreUnavailable: the secret store would not answer. Raised in the
 	// front door rather than here, and declared here so the set stays closed.
 	DetailStoreUnavailable ConfigDetail = "the secret store for this connection would not answer"
+	// DetailBackendOpenTimeout: the target took the pin's permit and did not
+	// finish opening a backend within its allowance. Raised in the front door,
+	// like DetailStoreUnavailable, and declared here so the set stays closed.
+	DetailBackendOpenTimeout ConfigDetail = "the target did not finish opening a connection in time"
 	// DetailUnclassified is what an unrecognised detail normalizes to.
 	DetailUnclassified ConfigDetail = "this connection could not be used, and the reason was not classified"
 )
@@ -109,7 +113,8 @@ const (
 // raise site invents one.
 func configDetails() []ConfigDetail {
 	return []ConfigDetail{DetailUnknownEngine, DetailDSNUnusable, DetailDSNRefused, DetailPoolRefused,
-		DetailGrammarUnproved, DetailNoDestroy, DetailStoreUnavailable, DetailUnclassified}
+		DetailGrammarUnproved, DetailNoDestroy, DetailStoreUnavailable, DetailBackendOpenTimeout,
+		DetailUnclassified}
 }
 
 // ErrConnectionUnusable is the sentinel every configuration failure carries,

@@ -766,8 +766,25 @@ func (e *Engine) pinTargetBackend(ctx context.Context, s *session, target dao.Da
 	if pc := s.pinnedConn(); pc != nil {
 		return pc, nil
 	}
-	pc, err := pinSessionConn(ctx, target)
+	// A FRONT-DOOR SESSION'S PIN DRAWS THE POOL'S FRONT-DOOR SHARE, and it is
+	// marked here, from the session, so no caller can pin one unmarked.
+	intent := &dialIntent{class: DialOrdinary}
+	if s.isWire() {
+		intent.class = DialFrontDoor
+	}
+	pc, err := pinSessionConn(withDialIntent(ctx, intent), target)
 	if err != nil {
+		// THE DEADLINE IS CLASSIFIED HERE, WHERE IT IS KNOWN WHETHER A PERMIT
+		// WAS EVER GRANTED. puddle's acquirer returns the bare deadline before
+		// the ledger's own refusal can reach it, so the error alone can't say
+		// which: no permit means the share stayed full (capacity); a permit
+		// means the target was slow to open (unavailable).
+		if errors.Is(err, context.DeadlineExceeded) {
+			if intent.granted.Load() {
+				return nil, fmt.Errorf("%w: %w", ErrBackendOpenTimeout, err)
+			}
+			return nil, fmt.Errorf("%w: %w", ErrTargetBudgetExhausted, err)
+		}
 		return nil, err
 	}
 	// THE CAPABILITY IS MANDATORY HERE, THOUGH IT IS OPTIONAL IN THE DRIVER.
@@ -834,6 +851,14 @@ func (e *Engine) pinTargetBackend(ctx context.Context, s *session, target dao.Da
 	s.pc = pc
 	s.mu.Unlock()
 	return pc, nil
+}
+
+// isWire reads, under mu, whether this is a front-door session. It is set
+// before the pin (OpenWireSessionWith), so the pin can mark its dial from it.
+func (s *session) isWire() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wire
 }
 
 // pinnedConn reads the session's pinned handle under mu.
