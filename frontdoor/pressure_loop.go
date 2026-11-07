@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/yongjohnlee80/autodb/core/exec"
@@ -16,6 +17,24 @@ import (
 // no business touching, and nobody would notice until it did.
 type CapacityReader interface {
 	CapacitySnapshot() exec.CapacitySnapshot
+}
+
+// pressureCaps is the ONE conversion from the engine's capacity reading to the
+// pressure tick's input, for the tick and the snapshot alike.
+func pressureCaps(snap exec.CapacitySnapshot) pressure.Caps {
+	leases := make([]pressure.LeaseRow, 0, len(snap.Leases))
+	for _, l := range snap.Leases {
+		subject := "pool:" + strconv.FormatInt(l.Pool, 10)
+		if l.Pool == 0 {
+			subject = "conn:" + strconv.FormatInt(l.Conn, 10)
+		}
+		leases = append(leases, pressure.LeaseRow{Subject: subject, Held: l.Held, Limit: l.Limit})
+	}
+	return pressure.Caps{
+		Sessions: snap.Sessions, SessionCap: snap.SessionCap,
+		PerUser: snap.PerUser, PerUserCap: snap.PerUserCap,
+		Leases: leases,
+	}
 }
 
 // EventPressure is the journal identity of a threshold crossing.
@@ -135,11 +154,7 @@ func (l *Listener) emitPressure(caps CapacityReader) {
 	snap := caps.CapacitySnapshot()
 	throttled := l.admit.throttledSources(l.meter.now())
 
-	for _, ev := range l.meter.tick(pressure.Caps{
-		Sessions: snap.Sessions, SessionCap: snap.SessionCap,
-		PerUser: snap.PerUser, PerUserCap: snap.PerUserCap,
-		Leases: snap.Leases, LeaseCap: snap.LeaseCap,
-	}, throttled) {
+	for _, ev := range l.meter.tick(pressureCaps(snap), throttled) {
 		state := "cleared"
 		if ev.Entered {
 			state = "entered"
@@ -197,11 +212,7 @@ func (l *Listener) PressureSnapshot(caps CapacityReader) (pressure.Snapshot, err
 	omitted := l.meter.breakdown.Omitted()
 
 	return l.meter.tracker.Assemble(pressure.ViewInput{
-		Caps: pressure.Caps{
-			Sessions: snap.Sessions, SessionCap: snap.SessionCap,
-			PerUser: snap.PerUser, PerUserCap: snap.PerUserCap,
-			Leases: snap.Leases, LeaseCap: snap.LeaseCap,
-		},
+		Caps: pressureCaps(snap),
 		Conns: lanes.Conns, MaxConns: lanes.MaxConns,
 		PreAuth: lanes.PreAuth, MaxPreAuth: lanes.MaxPreAuth,
 		Denials: denials, DenialsOmitted: omitted,

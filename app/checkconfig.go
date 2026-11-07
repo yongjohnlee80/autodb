@@ -92,13 +92,11 @@ func checkConfiguration(w io.Writer, configPath string) error {
 	return nil
 }
 
-// frontDoorNote says whether the surface the update is about is even on, and
-// with what budget. The budget is named because it is the setting that has
-// actually taken a host down on upgrade.
+// frontDoorNote says whether the surface the update is about is even on. Its
+// socket budgets are per connection pool, in the meta store, not in this file.
 func frontDoorNote(cfg config.Config) string {
 	if !cfg.FrontDoor.Enabled {
 		return "disabled"
 	}
-	return fmt.Sprintf("enabled on %s, exec.max_target_conns = %d",
-		cfg.FrontDoor.Bind, cfg.Exec.MaxTargetConns)
+	return fmt.Sprintf("enabled on %s; socket budgets are per connection pool", cfg.FrontDoor.Bind)
 }

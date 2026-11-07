@@ -151,12 +151,13 @@ func writeCardBudget(line func(string, ...any), conn ConnInfo, ep FrontDoorEndpo
 	line("  You do not size anything. autodb holds you to these whether or not your")
 	line("  client is configured for them. These ceilings are shared, not yours alone.")
 	line("")
-	if conn.PoolMaxConns > 0 {
+	if conn.PoolName != "" {
+		line("  %-22s %-9s %s", "pool "+conn.PoolName, cardCap(conn.PoolMaxConns), "backend connections, shared by every database in the pool")
+	} else if conn.PoolMaxConns > 0 {
 		line("  %-22s %-9s %s", "this connection", cardCap(conn.PoolMaxConns), "pooled connections to "+cardDatabase(conn))
 	}
-	line("  %-22s %-9s %s", "sessions per user", cardCap(ep.MaxSessionsPerUser), "you, across databases")
+	line("  %-22s %-9s %s", "front-door sessions", cardCap(conn.FrontDoorShare), "at once; more wait their turn")
 	line("  %-22s %-9s %s", "sessions, instance", cardCap(ep.MaxSessionsGlobal), "everyone using this autodb")
-	line("  %-22s %-9s %s", "backend connections", cardCap(ep.MaxTargetConns), "everyone, across target databases")
 	line("")
 	line("  For live availability or refusal reasons, open System -> Pressure.")
 }

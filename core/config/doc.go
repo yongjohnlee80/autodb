@@ -68,28 +68,12 @@
 // CONNECTION SIZING & FRONTDOOR DERIVATION PIPELINE
 // ============================================================================
 //
-// To prevent wire sessions from monopolizing database connections and starving
-// the TUI, administrative queries, or target databases, sizing parameters are
-// derived and bound as follows:
-//
-//	[Host Hardware]
-//	       │
-//	       ▼
-//	[PoolMaxConns = 2 × NumCPU()] ─────────────┐
-//	(Default target pool bound)                │
-//	                                           ▼
-//	                           [DefaultReservedHeadroom(pool)]
-//	                           • min(4, pool / 2)
-//	                           • Ensures interactive/control queries survive
-//	                                           │
-//	                                           ▼
-//	                           [FrontDoor.EffectiveMaxLeases]
-//	                           • Derived: PoolMaxConns - ReservedHeadroom
-//	                           • Explicit max_leases may only be lower
-//
-// Key invariant: A reservation may shrink to fit a small pool, but the pool is
-// NEVER automatically inflated to satisfy a reservation — doing so would over-claim
-// connection limits on target databases that autodb does not own.
+// Socket budgets are NOT in this file. Each connection pool in the meta store
+// (db_pool_connections) has one, and core/exec splits it into a front-door
+// share and a headroom share for the TUI, administrative and internal queries
+// (permits.go). exec.pool_max_conns sizes only MySQL and SQLite connections,
+// which are outside every pool. The retired keys max_target_conns, max_leases
+// and reserved_headroom load with a warning.
 //
 // ============================================================================
 // TRANSPORT SECURITY CONTRACTS

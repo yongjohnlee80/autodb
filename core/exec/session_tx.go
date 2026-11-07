@@ -285,7 +285,7 @@ func (e *Engine) beginTx(
 	// The OUTER bound, not the idle bound: it is the latest instant this
 	// transaction can still be holding the lease, which is what decides
 	// whether capacity is coming. Safe under s.mu -- txMu is a leaf.
-	s.reg.noteTxOpened(s.reservation.LeaseConn, s.id, now.Add(limits.maxTx))
+	s.reg.noteTxOpened(s.reservation.Key, s.id, now.Add(limits.maxTx))
 	s.tx = tx
 	s.txPhase = txActive
 	s.txID = txID

@@ -143,7 +143,21 @@ const (
 	releaseLimbReset       = "reset"
 	releaseLimbIdle        = "idle status"
 	releaseLimbHandback    = "pool handback"
+	// releaseLimbNotReused is not a refusal: a backend charged to a pool's
+	// ledger is never reused (reusesBackend), so it is closed whatever state
+	// it is in.
+	releaseLimbNotReused = "not reused"
 )
+
+// reusesBackend is THE ONE RULE for whether a target's backends go back to its
+// pgxpool. A backend charged to a pool's ledger never does: an idle socket
+// would hold a pool permit no other target could use, and the front door's
+// share would be refused at dial. Both release seams (releaseBackend for a
+// session's backend, pgAfterReleaseReset for a one-shot's) and the checkout
+// proof read it. Connections outside every pool keep reuse.
+func (e *Engine) reusesBackend(connID int64) bool {
+	return e.pools.ledgerFor(connID) == nil
+}
 
 // releaseVerdict is what the gate decided about one backend, and why.
 type releaseVerdict struct {
@@ -177,6 +191,10 @@ func (v releaseVerdict) reason() string {
 // physical connection is closed. There is no path out of this function that
 // leaves the lease held.
 func (e *Engine) releaseBackend(ctx context.Context, s *session, pc golibpg.PinnedConn, txResidue error) releaseVerdict {
+	if !e.reusesBackend(s.connID) {
+		e.destroyBackend(ctx, pc)
+		return releaseVerdict{limb: releaseLimbNotReused, detail: "a backend in a connection pool is closed, never reused"}
+	}
 	v := e.proveBackendClean(ctx, s, pc, txResidue)
 	if !v.pooled {
 		e.destroyBackend(ctx, pc)
@@ -436,12 +454,16 @@ func (e *Engine) drainWire(ctx context.Context, s *session, pc golibpg.PinnedCon
 // this target keep reconnecting" needs to be able to read the limb that refused.
 func (e *Engine) noteBackendFate(ctx context.Context, s *session, ip string, v releaseVerdict) {
 	action := "backend_discarded"
-	if v.pooled {
+	switch {
+	case v.pooled:
 		action = "backend_pooled"
+	case v.limb == releaseLimbNotReused:
+		// The ordinary end of a pooled backend, not an anomaly: no log line.
+		action = "backend_closed"
 	}
 	e.auditBounded(ctx, s.userID, ip, action,
 		fmt.Sprintf("conn %d: session %s: %s", s.connID, s.id, v.reason()))
-	if !v.pooled {
+	if !v.pooled && v.limb != releaseLimbNotReused {
 		e.logf("session %s: backend not returned to the pool (%s)", s.id, v.reason())
 	}
 }
@@ -484,7 +506,13 @@ func resetPlanWithout(carries string) []resetStep {
 // came from. Failing the proof fails the pin: the client is told the target
 // could not give it a usable session, which is true, and is a far better answer
 // than a session quietly running under somebody else's settings.
-func (e *Engine) proveCheckoutClean(ctx context.Context, pc golibpg.PinnedConn) error {
+//
+// A backend in a connection pool is always fresh (reusesBackend): nothing has
+// run on it to prove away, so it skips the reset's round trips.
+func (e *Engine) proveCheckoutClean(ctx context.Context, connID int64, pc golibpg.PinnedConn) error {
+	if !e.reusesBackend(connID) {
+		return nil
+	}
 	v := e.runBackendReset(ctx, pc)
 	if v.pooled {
 		return nil

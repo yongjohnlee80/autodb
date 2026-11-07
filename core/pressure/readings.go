@@ -7,8 +7,12 @@ import "strconv"
 // the morning.
 const (
 	SessionsGlobal   = "sessions.global"
-	SessionsUser     = "sessions.user"
-	LeasesTarget     = "leases.target"
+	// SessionsUser is exec and TUI sessions per user: front-door sessions
+	// are not counted per user. was: "sessions.user".
+	SessionsUser = "sessions.user.exec"
+	// LeasesPool is front-door sessions per connection pool (and per
+	// connection outside every pool). was: "leases.target".
+	LeasesPool       = "leases.pool"
 	DenialsRate      = "denials.rate"
 	SourcesThrottled = "sources.throttled"
 )
@@ -19,8 +23,16 @@ type Caps struct {
 	Sessions, SessionCap int
 	PerUser              map[int64]int
 	PerUserCap           int
-	Leases               map[int64]int
-	LeaseCap             int
+	// Leases is one row per lease key: a pool, or a connection outside every
+	// pool. was: a count per target against one LeaseCap.
+	Leases []LeaseRow
+}
+
+// LeaseRow is one lease key's front-door sessions against its own limit.
+// Subject names the key ("pool:3", "conn:7").
+type LeaseRow struct {
+	Subject     string
+	Held, Limit int
 }
 
 // Readings converts one tick's observed state into the readings a Tracker
@@ -46,7 +58,7 @@ type Caps struct {
 //	              │
 //	              ├─ SessionCap > 0 ───> Signal{sessions.global, Capacity, Occupancy}
 //	              ├─ PerUserCap > 0 ───> Signal{sessions.user{id}, Capacity, Occupancy}
-//	              ├─ LeaseCap > 0   ───> Signal{leases.target{id}, Capacity, Occupancy}
+//	              ├─ Lease Limit > 0 ──> Signal{leases.pool{key}, Capacity, Occupancy}
 //	              ├─ Denials        ───> Signal{denials.rate{capacity}, Capacity, Rate}
 //	              └─ Throttled      ───> Signal{sources.throttled{src}, Credential, Count}
 func Readings(c Caps, denials int, throttled []string) []Reading {
@@ -69,16 +81,17 @@ func Readings(c Caps, denials int, throttled []string) []Reading {
 			})
 		}
 	}
-	if c.LeaseCap > 0 {
-		for target, n := range c.Leases {
-			out = append(out, Reading{
-				Signal: Signal{
-					ID:    ID{Name: LeasesTarget, Subject: strconv.FormatInt(target, 10)},
-					Class: Capacity, Kind: Occupancy,
-				},
-				Value: n, Cap: c.LeaseCap,
-			})
+	for _, l := range c.Leases {
+		if l.Limit <= 0 {
+			continue
 		}
+		out = append(out, Reading{
+			Signal: Signal{
+				ID:    ID{Name: LeasesPool, Subject: l.Subject},
+				Class: Capacity, Kind: Occupancy,
+			},
+			Value: l.Held, Cap: l.Limit,
+		})
 	}
 
 	// The denial signal is emitted at zero as well as above it.

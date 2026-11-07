@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -62,7 +63,7 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 	// the result is published. A delete arriving during the open loses the
 	// pool rather than inheriting it.
 	//
-	// Lock order is engine.mu → registry.mu → session.mu. isDraining takes
+	// Lock order is engine.mu → registry.mu → session.mu. drainErr takes
 	// the registry's lock, and no registry method reaches back for e.mu.
 	//
 	// AN ARCHIVED CONNECTION HAS NO POOL, EVER. Every use of a connection
@@ -73,9 +74,9 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 	}
 	for {
 		e.mu.Lock()
-		if e.sessions.isDraining(connID) {
+		if derr := e.sessions.drainErr(connID); derr != nil {
 			e.mu.Unlock()
-			return nil, fmt.Errorf("%w: connection %d", ErrConnectionDraining, connID)
+			return nil, derr
 		}
 		if h := e.hookAfterDrainCheck; h != nil {
 			// Inside the window: the drain has been checked and no pool has
@@ -117,10 +118,10 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 		// The re-check is the whole point of the reservation: a delete that
 		// began while the driver was connecting must win, and the pool it
 		// did not know about must be closed rather than published.
-		if e.sessions.isDraining(connID) {
+		if derr := e.sessions.drainErr(connID); derr != nil {
 			e.mu.Unlock()
 			_ = conn.Close()
-			return nil, fmt.Errorf("%w: connection %d", ErrConnectionDraining, connID)
+			return nil, derr
 		}
 		e.conns[connID] = conn
 		e.mu.Unlock()
@@ -180,7 +181,7 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 		// session state to the next borrower. Both fail closed: a
 		// connection that cannot be proved is destroyed, not reused.
 		conn, err = openPostgres(ctx, name, string(dsn),
-			pgPrepareConnVerify(), e.pgAfterReleaseReset(connID), e.pgPoolLimits(row))
+			pgPrepareConnVerify(connID), e.pgAfterReleaseReset(connID), e.pgPoolLimits(row))
 	case engine.MySQL:
 		// its TLS files, if it names any, become a TLS config the driver has by name (mysql_tls.go)
 		var open string
@@ -269,30 +270,55 @@ func (e *Engine) sqlPoolLimits(row *meta.Connection) func(*sql.DB) {
 	}
 }
 
+//
+// A pgx target's sockets are bounded by its connection pool's ledger, and by
+// nothing of pgxpool's own: every hook that ties the pgxpool to the ledger is
+// installed here, in one place.
 func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
-	max, idle, lifetime := e.poolLimitsFor(row)
-	ledger := e.targetPermits
+	// Recorded before the ledger is read, so every pgx target that has ever
+	// been opened is known to the pools, loaded or not (pools.go).
+	e.pools.setPoolOf(row)
+	ledger := e.pools.ledgerFor(row.ID) // captured at build: a socket dies on the ledger that granted it
+	connID := row.ID
+	_, _, lifetime := e.poolLimitsFor(row)
 	return func(cfg *pgxpool.Config) {
-		if max > 0 {
-			cfg.MaxConns = int32(max)
-		}
-		if idle > 0 {
-			cfg.MaxConnIdleTime = idle
-		}
 		if lifetime > 0 {
 			cfg.MaxConnLifetime = lifetime
 		}
-		// The aggregate budget (see docs/front-door/connection-holding-policy.md). MaxConns above bounds THIS pool;
-		// this bounds every pool together, which no per-pool number can do.
-		// Wrapping the dialer rather than the pool's hooks is what makes the
-		// failed-dial release possible — see permitDialer.
-		if ledger != nil && cfg.ConnConfig != nil {
-			cfg.ConnConfig.DialFunc = permitDialer(ledger, cfg.ConnConfig.DialFunc)
-			// A cancellation dials a SECOND socket through the same DialFunc,
-			// so without this it is charged to the ordinary allowance and
-			// refused exactly when it is needed. This handler marks that dial
-			// so it takes the reserved lane instead.
-			cfg.ConnConfig.BuildContextWatcherHandler = buildControlCancelHandler
+		if ledger == nil || cfg.ConnConfig == nil {
+			return
+		}
+		// NEVER BINDS: the ledger refuses the dial first, so a raised pool max
+		// needs no rebuild. puddle's semaphore allocates nothing per slot.
+		// was: min(exec.pool_max_conns, row.pool_max_conns).
+		cfg.MaxConns = int32(meta.MaxPoolConns)
+		// A pool backend is never reused, so a member is idle only when its
+		// acquirer left while it was dialled. Reap it in about two seconds,
+		// not row 12's ten minutes. was: row 12.
+		cfg.MaxConnIdleTime = strayBackendIdle
+		cfg.HealthCheckPeriod = strayBackendIdle
+		// Every socket takes a permit of its mark's share, and the mark is
+		// set for every acquisition by the acquire tracer (dial_marks.go).
+		cfg.ConnConfig.DialFunc = permitDialer(ledger, cfg.ConnConfig.DialFunc)
+		cfg.ConnConfig.Tracer = markAcquire{}
+		// A cancellation dials a SECOND socket through the same DialFunc; this
+		// handler marks it for the control lane.
+		cfg.ConnConfig.BuildContextWatcherHandler = buildControlCancelHandler
+		// A stray member was dialled for one share and may be offered to an
+		// acquirer of the other. It is destroyed rather than used, and pgxpool
+		// dials one of the right share: at most the target's strays plus one.
+		prev := cfg.PrepareConn
+		cfg.PrepareConn = func(ctx context.Context, conn *pgx.Conn) (bool, error) {
+			if prev != nil {
+				if ok, err := prev(ctx, conn); !ok || err != nil {
+					return ok, err
+				}
+			}
+			permit, err := permitOf(conn)
+			if err != nil {
+				return false, NewConfigFailure(ConfigStageUnclassified, connID, DetailUnclassified, err)
+			}
+			return permit.Class == dialMarkOf(ctx).class(), nil
 		}
 	}
 }
@@ -327,13 +353,13 @@ func (e *Engine) closeTarget(connID int64) {
 // been torn down yet. The caller closes it after they have.
 //
 // Lock order is engine.mu → registry.mu, matching target().
-func (e *Engine) beginDraining(connID int64) ([]*session, dao.DataConn) {
+func (e *Engine) beginDraining(connID int64, why drainCause) ([]*session, dao.DataConn) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Marked, swept and snapshotted as ONE transition. Splitting them leaves a
 	// window in which a request joins the line after the sweep and before the
 	// mark, and nothing is left to tell it the connection is gone.
-	_, drained := e.sessions.beginDrainingTarget(connID)
+	_, drained := e.sessions.beginDrainingTarget(connID, why)
 	pool, ok := e.conns[connID]
 	if !ok {
 		return drained, nil
@@ -577,7 +603,7 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 	// appears to succeed. This is capability cleanup, not an exposure change:
 	// the exposure property and transition lock remain untouched.
 	if was == meta.ProfileSession && profile != meta.ProfileSession {
-		e.closeSessionsFor(ctx, connID, ip, "profile-downgraded")
+		e.closeSessionsFor(ctx, connID, ip, "profile-downgraded", drainChanged)
 		e.sessions.clearDraining(connID)
 	}
 	return nil
@@ -685,7 +711,7 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 	// closeSessionsFor now owns the whole sequence — the mark and the pool
 	// detach are one atomic step, so nothing can obtain a pool in between —
 	// and it closes the detached pool once the sessions are gone.
-	e.closeSessionsFor(ctx, connID, ip, "connection-deleted")
+	e.closeSessionsFor(ctx, connID, ip, "connection-deleted", drainRemoved)
 
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.store.Connections.On(tx).With(meta.ConnID, connID).Delete(); err != nil {

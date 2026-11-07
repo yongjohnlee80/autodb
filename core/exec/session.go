@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -326,7 +327,7 @@ func (s *session) clearTxLocked() {
 	s.cursor = nil
 	if s.tx != nil {
 		// Safe under s.mu: this takes the leaf lock only. See txMu.
-		s.reg.noteTxEnded(s.reservation.LeaseConn, s.id)
+		s.reg.noteTxEnded(s.reservation.Key, s.id)
 	}
 	s.tx = nil
 	s.txPhase = txNone
@@ -344,7 +345,7 @@ type sessionRegistry struct {
 	mu       sync.Mutex
 	byID     map[SessionID]*session
 	perUser  map[int64]int
-	draining map[int64]bool
+	draining map[int64]drainCause
 
 	// txGate admits transaction OPENINGS, and is what makes "no transaction is
 	// open" and "none can begin" one decision instead of two.
@@ -380,8 +381,11 @@ type sessionRegistry struct {
 	// caps, because matrix row 2.7 requires them acquired as one operation:
 	// two locks would reintroduce the check-then-reserve gap between them,
 	// and a cap observed free must be the cap acquired.
-	leases   map[int64]int
-	leaseCap int
+	leases map[leaseKey]int
+	// pools says which leases a connection's session counts against, and
+	// their limit (pools.go). The registry keeps no copy of the pool facts.
+	// was: leaseCap, one per-target cap from frontdoor.max_leases.
+	pools poolLookup
 
 	// line is the instance-wide order front-door requests wait in when a cap
 	// they could clear by waiting is reached. Guarded by mu, like every cap it
@@ -415,7 +419,7 @@ type sessionRegistry struct {
 	// onDemand asks an idle holder on a target to give up its lease, returning
 	// whether one was asked. Installed by the engine, which is the only thing
 	// that can reach a session's owner.
-	onDemand func(leaseConn int64) bool
+	onDemand func(key leaseKey) bool
 	// hookWaiterQueued fires once a request is in line, so a cell can act on
 	// that fact instead of polling for it.
 	hookWaiterQueued func(seq uint64)
@@ -436,7 +440,7 @@ type sessionRegistry struct {
 	// going to be released": a transaction already past its bound is going to
 	// be reclaimed, so capacity IS coming and the request must wait for it
 	// rather than be told nothing is.
-	txWithinBound map[int64]map[SessionID]time.Time
+	txWithinBound map[leaseKey]map[SessionID]time.Time
 
 	// hookAfterDemandCheck fires after pressDemand's advisory outstanding check
 	// has passed and before any candidate is selected, so a cell can hold two
@@ -452,7 +456,7 @@ type sessionRegistry struct {
 	// demandWanted counts, per target, the queued requests that need a lease
 	// reclaimed and have not been answered. ONE PER WAITER, cleared when the
 	// waiter leaves the line by any route.
-	demandWanted map[int64]int
+	demandWanted map[leaseKey]int
 	// demandPromised is, per target, the sessions already reserved for
 	// reclamation whose leases have not yet come back.
 	//
@@ -463,7 +467,7 @@ type sessionRegistry struct {
 	// offer instead would end three sessions for one waiter. The retry is
 	// allowed only while more requests are waiting than reclamations are
 	// already coming.
-	demandPromised map[int64]map[SessionID]struct{}
+	demandPromised map[leaseKey]map[SessionID]struct{}
 
 	// resident is the global weighted memory budget.
 	// The session's FIXED OVERHEAD is charged here as the fourth member of
@@ -485,11 +489,11 @@ func newSessionRegistry(perUser, global int) *sessionRegistry {
 	return &sessionRegistry{
 		byID:          map[SessionID]*session{},
 		perUser:       map[int64]int{},
-		draining:      map[int64]bool{},
+		draining:      map[int64]drainCause{},
 		perUserCap:    perUser,
 		globalCap:     global,
-		leases:        map[int64]int{},
-		txWithinBound: map[int64]map[SessionID]time.Time{},
+		leases:        map[leaseKey]int{},
+		txWithinBound: map[leaseKey]map[SessionID]time.Time{},
 	}
 }
 
@@ -526,6 +530,13 @@ type reservation struct {
 	// LeaseConn is the target connection a wire lease was taken on, 0 for a
 	// session that holds none (the interactive surfaces).
 	LeaseConn int64
+	// Key is the lease key LeaseConn counted against when admitted: its pool,
+	// or the connection itself outside every pool. Stored, so releasing the
+	// lease never re-reads a membership a move has changed since.
+	Key leaseKey
+	// CountedPerUser records whether admission charged the per-user cap: an
+	// exec or TUI session, never a front-door one.
+	CountedPerUser bool
 	// Overhead is the fixed memory charge held for this session's lifetime.
 	Overhead int64
 }
@@ -556,20 +567,34 @@ func (r *sessionRegistry) admitWithLease(s *session, leaseConn int64, overhead i
 // still holds: this is one atomic reservation, and the only change is who is
 // holding the lock when it runs.
 func (r *sessionRegistry) admitLocked(s *session, leaseConn int64, overhead int64) error {
-	if r.draining[s.connID] {
-		return fmt.Errorf("%w: connection %d", ErrConnectionDraining, s.connID)
+	if err := r.drainErrLocked(s.connID); err != nil {
+		return err
 	}
-	if len(r.byID) >= r.globalCap {
+	// A FRONT-DOOR SESSION IS ONE THAT TAKES A LEASE. It is bounded by its
+	// pool's front-door share and by the global cap less the slots kept for
+	// exec and the admin TUI, never per user: a client's own connection pool
+	// is not a person opening sessions (owner ruling, 2026-11-07).
+	frontDoor := leaseConn != 0
+	if frontDoor && len(r.byID) >= r.globalCap-execReservedSessions {
+		return fmt.Errorf("%w: the server is at its limit of %d open front-door sessions",
+			ErrSessionCapExceeded, r.globalCap-execReservedSessions)
+	}
+	if !frontDoor && len(r.byID) >= r.globalCap {
 		return fmt.Errorf("%w: the server is at its limit of %d open sessions",
 			ErrSessionCapExceeded, r.globalCap)
 	}
-	if r.perUser[s.userID] >= r.perUserCap {
+	if !frontDoor && r.perUser[s.userID] >= r.perUserCap {
 		return fmt.Errorf("%w: you already have %d open sessions, the per-user limit",
 			ErrSessionCapExceeded, r.perUserCap)
 	}
-	if leaseConn != 0 && r.leaseCap > 0 && r.leases[leaseConn] >= r.leaseCap {
-		return fmt.Errorf("%w: connection %d is at its limit of %d concurrent wire sessions",
-			ErrLeaseCapExceeded, leaseConn, r.leaseCap)
+	var key leaseKey
+	if frontDoor {
+		var limit int
+		key, limit = r.leaseScope(leaseConn)
+		if r.leases[key] >= limit {
+			return fmt.Errorf("%w: connection %d's pool is at its limit of %d concurrent wire sessions",
+				ErrLeaseCapExceeded, leaseConn, limit)
+		}
 	}
 	// A NEGATIVE charge is refused rather than accepted as a credit. This is
 	// the resource-accounting choke point, and the way an accounting bug
@@ -599,12 +624,14 @@ func (r *sessionRegistry) admitLocked(s *session, leaseConn int64, overhead int6
 	}
 
 	r.byID[s.id] = s
-	r.perUser[s.userID]++
-	if leaseConn != 0 {
-		r.leases[leaseConn]++
+	if !frontDoor {
+		r.perUser[s.userID]++
+	}
+	if frontDoor {
+		r.leases[key]++
 	}
 	r.resident += overhead
-	s.reservation = reservation{LeaseConn: leaseConn, Overhead: overhead}
+	s.reservation = reservation{LeaseConn: leaseConn, Key: key, Overhead: overhead, CountedPerUser: !frontDoor}
 	// The generation is stamped at admission and never reused, so a terminal
 	// claim taken against this session cannot be honoured against whichever
 	// session next occupies its place.
@@ -619,41 +646,41 @@ func (r *sessionRegistry) admitLocked(s *session, leaseConn int64, overhead int6
 
 // noteTxOpened and noteTxEnded record when a lease-holding transaction's outer
 // bound expires. Safe to call with the session's mutex held: txMu is a leaf.
-func (r *sessionRegistry) noteTxOpened(leaseConn int64, id SessionID, boundUntil time.Time) {
-	if r == nil || leaseConn == 0 {
+func (r *sessionRegistry) noteTxOpened(key leaseKey, id SessionID, boundUntil time.Time) {
+	if r == nil || key == (leaseKey{}) {
 		return
 	}
 	r.txMu.Lock()
-	if r.txWithinBound[leaseConn] == nil {
-		r.txWithinBound[leaseConn] = map[SessionID]time.Time{}
+	if r.txWithinBound[key] == nil {
+		r.txWithinBound[key] = map[SessionID]time.Time{}
 	}
-	r.txWithinBound[leaseConn][id] = boundUntil
+	r.txWithinBound[key][id] = boundUntil
 	r.txMu.Unlock()
 }
 
-func (r *sessionRegistry) noteTxEnded(leaseConn int64, id SessionID) {
-	if r == nil || leaseConn == 0 {
+func (r *sessionRegistry) noteTxEnded(key leaseKey, id SessionID) {
+	if r == nil || key == (leaseKey{}) {
 		return
 	}
 	r.txMu.Lock()
-	if m := r.txWithinBound[leaseConn]; m != nil {
+	if m := r.txWithinBound[key]; m != nil {
 		delete(m, id)
 		if len(m) == 0 {
 			// Deleted rather than left empty: a map of every target that ever
 			// held a transaction grows without bound on a long-lived daemon.
-			delete(r.txWithinBound, leaseConn)
+			delete(r.txWithinBound, key)
 		}
 	}
 	r.txMu.Unlock()
 }
 
-// txWithinBoundCount reports how many of a target's transactions are still
+// txWithinBoundCount reports how many of a lease key's transactions are still
 // inside their bounds at this instant.
-func (r *sessionRegistry) txWithinBoundCount(leaseConn int64, now time.Time) int {
+func (r *sessionRegistry) txWithinBoundCount(key leaseKey, now time.Time) int {
 	r.txMu.Lock()
 	defer r.txMu.Unlock()
 	n := 0
-	for _, until := range r.txWithinBound[leaseConn] {
+	for _, until := range r.txWithinBound[key] {
 		// STRICTLY BEFORE, so the instant a bound expires the transaction stops
 		// counting. At equality the expiry rung owns it and capacity is coming.
 		if now.Before(until) {
@@ -661,6 +688,31 @@ func (r *sessionRegistry) txWithinBoundCount(leaseConn int64, now time.Time) int
 		}
 	}
 	return n
+}
+
+// execReservedSessions are the global session slots front-door sessions can't
+// take, so exec and the admin TUI always get in while the front door is full.
+const execReservedSessions = 16
+
+// ValidateSessionLimits refuses a global session cap that would leave the
+// front door nothing once execReservedSessions is held back.
+func ValidateSessionLimits(maxSessionsGlobal int) error {
+	if maxSessionsGlobal <= execReservedSessions {
+		return fmt.Errorf("exec.max_sessions_global is %d; %d of them are held back for exec "+
+			"and the admin TUI, so the front door could admit no session. Use more than %d",
+			maxSessionsGlobal, execReservedSessions, execReservedSessions)
+	}
+	return nil
+}
+
+// leaseScope is the pools' answer for a connection, or, in a registry built
+// without pools (cells that exercise the caps alone), the connection's own key
+// with no lease limit.
+func (r *sessionRegistry) leaseScope(connID int64) (leaseKey, int) {
+	if r.pools == nil {
+		return leaseKey{conn: connID}, math.MaxInt
+	}
+	return r.pools.leaseScope(connID)
 }
 
 // allLeasesInTransactionLocked reports whether every lease on this target is
@@ -672,11 +724,12 @@ func (r *sessionRegistry) txWithinBoundCount(leaseConn int64, now time.Time) int
 // decide -- "nothing is coming, do not wait" -- is exactly the one that must
 // not be issued on a stale view.
 func (r *sessionRegistry) allLeasesInTransactionLocked(leaseConn int64) bool {
-	if leaseConn == 0 || r.leaseCap <= 0 {
+	if leaseConn == 0 {
 		return false
 	}
-	held := r.leases[leaseConn]
-	if held < r.leaseCap {
+	key, limit := r.leaseScope(leaseConn)
+	held := r.leases[key]
+	if held < limit {
 		return false
 	}
 	// EVERY lease must be held by a transaction that is STILL INSIDE ITS
@@ -684,24 +737,27 @@ func (r *sessionRegistry) allLeasesInTransactionLocked(leaseConn int64) bool {
 	// is coming and this request must be allowed to wait for it -- telling it
 	// "nothing is coming" would be false, and it would be told so immediately
 	// rather than being served moments later.
-	return r.txWithinBoundCount(leaseConn, r.clock()) >= held
+	return r.txWithinBoundCount(key, r.clock()) >= held
 }
 
 // releaseReservation gives back everything admitWithLease took. Called from
 // remove, so a session cannot leave the registry while still holding a lease.
 func (r *sessionRegistry) releaseReservation(s *session) {
-	if s.reservation.LeaseConn != 0 {
+	if key := s.reservation.Key; s.reservation.LeaseConn != 0 {
 		// THE PROMISE IS DISCHARGED WHERE THE LEASE COMES BACK, not where the
 		// reclamation was decided. Between those two points the lease is still
 		// held, and a retry that counted it as returned would reclaim a second
 		// session for a request the first one already answers.
-		r.dischargeDemand(s.reservation.LeaseConn, s.id)
-		if n := r.leases[s.reservation.LeaseConn]; n > 1 {
-			r.leases[s.reservation.LeaseConn] = n - 1
+		//
+		// The STORED key, never a fresh lookup: a session a move left behind
+		// gives its lease back to the pool it took it from.
+		r.dischargeDemand(key, s.id)
+		if n := r.leases[key]; n > 1 {
+			r.leases[key] = n - 1
 		} else {
-			// Delete rather than leave a zero: a map of connections that
-			// once had leases grows without bound on a long-lived daemon.
-			delete(r.leases, s.reservation.LeaseConn)
+			// Delete rather than leave a zero: a map of keys that once had
+			// leases grows without bound on a long-lived daemon.
+			delete(r.leases, key)
 		}
 	}
 	r.resident -= s.reservation.Overhead
@@ -899,7 +955,8 @@ func (s *session) executing() bool {
 func (r *sessionRegistry) leaseCount(connID int64) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.leases[connID]
+	key, _ := r.leaseScope(connID)
+	return r.leases[key]
 }
 
 // residentHeld reports the charged memory. Test-support.
@@ -940,10 +997,14 @@ func (r *sessionRegistry) remove(s *session) {
 	r.mu.Lock()
 	if _, ok := r.byID[s.id]; ok {
 		delete(r.byID, s.id)
-		if n := r.perUser[s.userID] - 1; n > 0 {
-			r.perUser[s.userID] = n
-		} else {
-			delete(r.perUser, s.userID)
+		// Read BEFORE releaseReservation zeroes the reservation: only what
+		// admission counted per user is given back per user.
+		if s.reservation.CountedPerUser {
+			if n := r.perUser[s.userID] - 1; n > 0 {
+				r.perUser[s.userID] = n
+			} else {
+				delete(r.perUser, s.userID)
+			}
 		}
 		// The lease and the memory charge go with the session, under the
 		// SAME lock that removed it. Releasing them separately would let a
@@ -966,9 +1027,9 @@ func (r *sessionRegistry) remove(s *session) {
 // Marking comes FIRST and under the same lock as the snapshot, so no session
 // can be admitted onto a connection that is already being torn down — the
 // ordering the design requires of conn.delete.
-func (r *sessionRegistry) setDraining(connID int64) []*session {
+func (r *sessionRegistry) setDraining(connID int64, why drainCause) []*session {
 	r.mu.Lock()
-	r.draining[connID] = true
+	r.draining[connID] = why
 	var out []*session
 	for _, s := range r.byID {
 		if s.connID == connID {
@@ -1000,11 +1061,35 @@ func (r *sessionRegistry) wireSessions(connID int64) []*session {
 	return out
 }
 
-// isDraining reports whether a connection is shutting down.
-func (r *sessionRegistry) isDraining(connID int64) bool {
+// drainCause is why a connection is draining, and so what everyone it turns
+// away is told: waiters swept at the mark, and newcomers refused by admission
+// and by target().
+type drainCause int
+
+const (
+	// drainRemoved: a delete. The connection no longer exists.
+	drainRemoved drainCause = iota + 1
+	// drainChanged: a move to another pool or a profile downgrade. The
+	// connection is still there, and a retry succeeds once the change lands.
+	drainChanged
+)
+
+// drainErr is nil while connID isn't draining, and otherwise the ONE answer
+// for it: ErrTargetGone for a delete, ErrConnectionDraining for a change.
+func (r *sessionRegistry) drainErr(connID int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.draining[connID]
+	return r.drainErrLocked(connID)
+}
+
+func (r *sessionRegistry) drainErrLocked(connID int64) error {
+	switch r.draining[connID] {
+	case drainRemoved:
+		return fmt.Errorf("%w: connection %d", ErrTargetGone, connID)
+	case drainChanged:
+		return fmt.Errorf("%w: connection %d is being changed", ErrConnectionDraining, connID)
+	}
+	return nil
 }
 
 // snapshot returns every open session.

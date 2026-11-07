@@ -107,11 +107,11 @@ type demandVictim struct {
 // A CANDIDATE THAT LOSES THE RESERVATION COSTS NOTHING. If something else is
 // already ending that session, the next candidate is tried; nothing has been
 // spent on the one that got away.
-func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (demandVictim, bool) {
+func (r *sessionRegistry) reserveDemandVictim(key leaseKey, now time.Time) (demandVictim, bool) {
 	r.mu.Lock()
 	candidates := make([]*session, 0, len(r.byID))
 	for _, s := range r.byID {
-		if s.reservation.LeaseConn == leaseConn {
+		if s.reservation.Key == key {
 			candidates = append(candidates, s)
 		}
 	}
@@ -166,7 +166,7 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 		// So the claim is taken atomically, under this candidate's own lock,
 		// against the same state the reservation commits to. demandMu is a leaf
 		// and nothing that touches a socket runs while it is held.
-		claimed := eligible && r.tryPromiseDemand(leaseConn, s.id)
+		claimed := eligible && r.tryPromiseDemand(key, s.id)
 		// The reservation is taken INSIDE this same hold. It is the ordinary
 		// close claim, so it also settles ownership against the reaper, an
 		// operator's delete and the client's own disconnect.
@@ -176,7 +176,7 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 			// reaper or the client's own disconnect; a demand unit left spent
 			// on a candidate nobody reserved would make the target look
 			// answered and strand the request that is still waiting.
-			r.dischargeDemand(leaseConn, s.id)
+			r.dischargeDemand(key, s.id)
 		}
 		var knock func()
 		if reserved {
@@ -230,11 +230,11 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 // that can use it, which may well be somebody else. Handing it to whoever
 // triggered the reclaim would make demand a way to jump the queue, and a queue
 // with a bypass is not a queue.
-func (e *Engine) demandReclaim(leaseConn int64) bool {
+func (e *Engine) demandReclaim(key leaseKey) bool {
 	if e.sessions == nil {
 		return false
 	}
-	v, ok := e.sessions.reserveDemandVictim(leaseConn, e.now())
+	v, ok := e.sessions.reserveDemandVictim(key, e.now())
 	if !ok {
 		return false
 	}
@@ -266,7 +266,7 @@ func (e *Engine) OfferReceive(id SessionID) uint64 {
 	s.tokenSeq++
 	s.recvToken = s.tokenSeq
 	token := s.recvToken
-	target := s.reservation.LeaseConn
+	target := s.reservation.Key
 	s.mu.Unlock()
 
 	// THIS IS THE INSTANT A HOLDER BECOMES ASKABLE, and therefore the only
@@ -490,32 +490,32 @@ func demandOutcomeSuffix(idle time.Duration, held bool, delivery DemandDelivery)
 
 // wantDemand records that one more queued request on this target needs a lease
 // reclaimed.
-func (r *sessionRegistry) wantDemand(leaseConn int64) {
-	if leaseConn == 0 {
+func (r *sessionRegistry) wantDemand(key leaseKey) {
+	if key == (leaseKey{}) {
 		return
 	}
 	r.demandMu.Lock()
 	defer r.demandMu.Unlock()
 	if r.demandWanted == nil {
-		r.demandWanted = map[int64]int{}
+		r.demandWanted = map[leaseKey]int{}
 	}
-	r.demandWanted[leaseConn]++
+	r.demandWanted[key]++
 }
 
 // dropDemand records that a queued request no longer needs one, whether it was
 // served, cancelled, expired or refused.
-func (r *sessionRegistry) dropDemand(leaseConn int64) {
-	if leaseConn == 0 {
+func (r *sessionRegistry) dropDemand(key leaseKey) {
+	if key == (leaseKey{}) {
 		return
 	}
 	r.demandMu.Lock()
 	defer r.demandMu.Unlock()
-	if n := r.demandWanted[leaseConn]; n > 1 {
-		r.demandWanted[leaseConn] = n - 1
+	if n := r.demandWanted[key]; n > 1 {
+		r.demandWanted[key] = n - 1
 	} else {
 		// Deleted rather than left at zero: a map of every target that ever
 		// queued a request grows without bound on a long-lived daemon.
-		delete(r.demandWanted, leaseConn)
+		delete(r.demandWanted, key)
 	}
 }
 
@@ -526,51 +526,51 @@ func (r *sessionRegistry) dropDemand(leaseConn int64) {
 // answering it" in two critical sections lets every concurrent offer read the
 // same encouraging answer and act on it, which is how one waiting request came
 // to end several sessions.
-func (r *sessionRegistry) tryPromiseDemand(leaseConn int64, id SessionID) bool {
-	if leaseConn == 0 {
+func (r *sessionRegistry) tryPromiseDemand(key leaseKey, id SessionID) bool {
+	if key == (leaseKey{}) {
 		return false
 	}
 	r.demandMu.Lock()
 	defer r.demandMu.Unlock()
-	if r.demandWanted[leaseConn] <= len(r.demandPromised[leaseConn]) {
+	if r.demandWanted[key] <= len(r.demandPromised[key]) {
 		return false
 	}
 	if r.demandPromised == nil {
-		r.demandPromised = map[int64]map[SessionID]struct{}{}
+		r.demandPromised = map[leaseKey]map[SessionID]struct{}{}
 	}
-	if r.demandPromised[leaseConn] == nil {
-		r.demandPromised[leaseConn] = map[SessionID]struct{}{}
+	if r.demandPromised[key] == nil {
+		r.demandPromised[key] = map[SessionID]struct{}{}
 	}
-	r.demandPromised[leaseConn][id] = struct{}{}
+	r.demandPromised[key][id] = struct{}{}
 	return true
 }
 
 // dischargeDemand records that a reserved session's lease has come back.
-func (r *sessionRegistry) dischargeDemand(leaseConn int64, id SessionID) {
-	if leaseConn == 0 {
+func (r *sessionRegistry) dischargeDemand(key leaseKey, id SessionID) {
+	if key == (leaseKey{}) {
 		return
 	}
 	r.demandMu.Lock()
 	defer r.demandMu.Unlock()
-	m := r.demandPromised[leaseConn]
+	m := r.demandPromised[key]
 	if m == nil {
 		return
 	}
 	delete(m, id)
 	if len(m) == 0 {
-		delete(r.demandPromised, leaseConn)
+		delete(r.demandPromised, key)
 	}
 }
 
 // demandOutstanding reports whether more requests are waiting on this target
 // than reclamations are already coming for it.
-func (r *sessionRegistry) demandOutstanding(leaseConn int64) bool {
-	if leaseConn == 0 {
+func (r *sessionRegistry) demandOutstanding(key leaseKey) bool {
+	if key == (leaseKey{}) {
 		return false
 	}
 	r.demandMu.Lock()
 	defer r.demandMu.Unlock()
-	return r.demandWanted[leaseConn] > len(r.demandPromised[leaseConn])
+	return r.demandWanted[key] > len(r.demandPromised[key])
 }
 
 // pressDemand asks for one reclamation on this target, but only while one is
@@ -579,11 +579,11 @@ func (r *sessionRegistry) demandOutstanding(leaseConn int64) bool {
 // EVERY ASK GOES THROUGH HERE, the arrival and the retry alike, so there is
 // one place that decides whether asking is warranted. Called with no lock
 // held: selecting a victim reads sessions and knocks on a socket.
-func (r *sessionRegistry) pressDemand(leaseConn int64) bool {
+func (r *sessionRegistry) pressDemand(key leaseKey) bool {
 	// AN OPTIMISATION, NOT THE ACCOUNTING. It spares a pointless walk over the
 	// candidates when nothing is owed. Correctness rests on tryPromiseDemand at
 	// the reservation itself -- this answer is stale the instant it is read.
-	if r == nil || !r.demandOutstanding(leaseConn) {
+	if r == nil || !r.demandOutstanding(key) {
 		return false
 	}
 	if h := r.hookAfterDemandCheck; h != nil {
@@ -603,14 +603,14 @@ func (r *sessionRegistry) pressDemand(leaseConn int64) bool {
 	if demand == nil {
 		return false
 	}
-	return demand(leaseConn)
+	return demand(key)
 }
 
 // promisedCount reports how many reclamations are already coming for a target.
 // Test-support: the accounting is the guarantee, so a cell has to be able to
 // read it rather than infer it from how many sessions happen to be closing.
-func (r *sessionRegistry) promisedCount(leaseConn int64) int {
+func (r *sessionRegistry) promisedCount(key leaseKey) int {
 	r.demandMu.Lock()
 	defer r.demandMu.Unlock()
-	return len(r.demandPromised[leaseConn])
+	return len(r.demandPromised[key])
 }

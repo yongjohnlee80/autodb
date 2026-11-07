@@ -99,16 +99,8 @@ type Config struct {
 	ServiceHostSeen bool `toml:"-"`
 }
 
-// provenanceKnown reports whether a decoder observed this config at all.
-//
-// The distinction matters for wording: with no decoder there is no basis for
-// saying a value was defaulted OR chosen, and a message that asserts either is
-// making something up.
-func (c Config) provenanceKnown() bool { return c.seen != nil }
-
-// wasSet reports whether the file named this key. False for every key when
-// provenance is unknown — callers that care about the difference ask
-// provenanceKnown first.
+// wasSet reports whether the file named this key. False for every key when no
+// decoder observed this config.
 func (c Config) wasSet(section, key string) bool {
 	if c.seen == nil {
 		return false
@@ -209,24 +201,9 @@ type FrontDoor struct {
 	// benefit of one process.
 	TLSRootCAFile string `toml:"tls_root_ca_file"`
 
-	// ReservedHeadroom is how many connections of each target pool are held
-	// back from wire leases, for the interactive surfaces and the engine's
-	// own control queries.
-	//
-	// Without it the front door can take every connection in the pool and
-	// the TUI stops working — with the front door looking healthy, because
-	// from its side nothing failed.
-	ReservedHeadroom int `toml:"reserved_headroom"`
-
-	// MaxLeases caps concurrent wire sessions per target pool.
-	//
-	// Unset DERIVES it as pool_max_conns - reserved_headroom, which is the
-	// value the ADR specifies and the one an operator should almost always
-	// take. An explicit value is validated against that derivation and may
-	// only be lower: a number above it would promise leases the pool cannot
-	// supply, and the failure would land on whichever session asked last
-	// rather than on the operator who set it.
-	MaxLeases int `toml:"max_leases"`
+	// was: ReservedHeadroom and MaxLeases. Each connection pool's ledger
+	// derives both: a front-door share and a headroom share (core/exec
+	// permits.go). A file that still sets them loads with a warning.
 
 	// ResidentBudgetBytes bounds the memory open wire sessions may reserve
 	// in total (default 1 GiB, ceiling 4 GiB).
@@ -344,7 +321,7 @@ const (
 
 // EffectiveGeneralLane is the general lane actually in force.
 //
-// One function, for the same reason EffectiveMaxLeases is one function: two
+// One function, so the number is computed once: two
 // places deriving it separately is how a validator and the thing it guards end
 // up disagreeing, and here the disagreement would surface as statements
 // refused for backpressure that nothing is wrong with.
@@ -434,31 +411,9 @@ type Exec struct {
 	// may RUN is not a reason to store more of it.
 	MaxStatementBytes int `toml:"max_statement_bytes"`
 
-	// MaxTargetConns is this instance's TOTAL production-connection budget:
-	// the number of sockets autodb may have open to target databases at once,
-	// across every target.
-	//
-	// It is the one quantity autodb can actually enforce, and the only new
-	// key this design spends (the connection-budget policy D1, the one-new-key rule). Per-target
-	// `pool_max_conns` is a technical ceiling on ONE pool; this bounds the
-	// aggregate, so two targets may each be allowed more than this and the
-	// runtime permit ledger is what keeps the total true.
-	//
-	// CHOOSE IT AS AT MOST HALF THE SERVER'S max_connections. That is
-	// guidance, not validation: autodb cannot measure the server's limit and
-	// must not pretend to. Summing across instances is the operator's job and
-	// is stated as such rather than inferred.
-	//
-	// NO DEFAULT (D3). A wrong default over-claims a production database
-	// silently, and there is no value that is both conservative and useful.
-	// Unset with the front door enabled is a configuration error, not
-	// "unlimited" — see Validate.
-	//
-	// Every socket to a target is counted: query, health check, control, and
-	// one still being dialled. The meta store is excluded as a named product
-	// boundary, not because it is free; on a same-cluster deployment its
-	// connections come out of the half left to the server.
-	MaxTargetConns int `toml:"max_target_conns"`
+	// was: MaxTargetConns, one instance-wide socket budget. Budgets are per
+	// connection pool (db_pool_connections), set through pool admin, never in
+	// this file. A file that still sets it loads with a warning.
 
 	// MaxSessionsPerUser and MaxSessionsGlobal bound the number of open
 	// ExecSessions. One transaction per session bounds pinned
@@ -892,10 +847,6 @@ func Default() Config {
 		FrontDoor: FrontDoor{
 			Enabled: false,
 			Bind:    DefaultFrontDoorBind,
-			// DERIVED FROM THE POOL, not a constant beside it. The two were
-			// independent and on a 1 vCPU host they contradicted: pool 2,
-			// headroom 4.
-			ReservedHeadroom: DefaultReservedHeadroom(DefaultPoolMaxConns()),
 		},
 		Remote: Remote{
 			Bind:               DefaultRemoteBind,
@@ -941,11 +892,6 @@ const (
 	// exposing it is a decision an operator writes down.
 	DefaultFrontDoorBind = "127.0.0.1:5432"
 
-	// MaxReservedHeadroom is the most any pool holds back from wire leases,
-	// for the interactive surfaces and the engine's own control queries. It is
-	// a CEILING now rather than the value: see DefaultReservedHeadroom.
-	MaxReservedHeadroom = 4
-
 	// A tenth of the 90s idle-in-transaction bound: an expired transaction
 	// is rolled back within a few seconds of its deadline rather than at the
 	// next thing that happens to look.
@@ -984,38 +930,6 @@ const (
 // for the sessions themselves. The ADR's sizing rule for tuning it upward is
 // MaxConns >= concurrent tx-holders + statement headroom.
 func DefaultPoolMaxConns() int { return 2 * runtime.NumCPU() }
-
-// DefaultReservedHeadroom is the headroom for a pool of this size.
-//
-// IT IS A FUNCTION OF THE POOL because the two numbers were independent and
-// jointly impossible on a small host: DefaultPoolMaxConns() is 2 x NumCPU, the
-// headroom was a flat 4, so a 1 vCPU machine shipped a pool of 2 with 4 held
-// back — the front door enabled with less than nothing to serve anyone with,
-// and exactly nothing at 2 vCPU. Nobody met it because install_frontdoor.sh
-// always emits pool_max_conns explicitly, sized for the host; an invariant
-// enforced by whoever happens to write the file is not an invariant.
-//
-// min(4, pool/2): 4 stays the intent, pool/2 is the bound that makes it
-// honourable, and pool <= 1 is stated rather than left to integer division. A
-// machine that can hold ONE connection cannot both reserve and serve, so the
-// front door gets it — a degraded install, not an invalid one, and the operator
-// is told rather than refused.
-//
-// THE POOL IS NEVER RAISED TO SATISFY THIS. exec.pool_max_conns is a claim on
-// the TARGET database's connection budget, a number the operator sized against
-// a server autodb does not own. Inflating it to fit an internal reservation
-// would take backends nobody granted and move the failure into somebody else's
-// production database at peak. A reservation may shrink to fit a pool; it may
-// never grow the pool to fit itself.
-func DefaultReservedHeadroom(poolMaxConns int) int {
-	if poolMaxConns <= 1 {
-		return 0
-	}
-	if half := poolMaxConns / 2; half < MaxReservedHeadroom {
-		return half
-	}
-	return MaxReservedHeadroom
-}
 
 // Duration is a TOML-friendly time.Duration: written as a string ("30m",
 // "90s") because an operator setting a timeout should not have to count
@@ -1205,6 +1119,10 @@ func unknownKeyWarning(path, key string) string {
 		return fmt.Sprintf("%s: %s was removed when notes became identity-keyed — notes are now "+
 			"keyed by (user, workspace) in both frontends and are visible only to their owner, "+
 			"so no setting selects a note tree; it has no effect: delete this key", path, key)
+	case "exec.max_target_conns", "frontdoor.max_leases", "frontdoor.reserved_headroom":
+		return fmt.Sprintf("%s: %s was retired when socket budgets became per connection pool — "+
+			"each pool's max_conns, set with pool admin, replaces it; it has no effect: delete this key",
+			path, key)
 	}
 	return fmt.Sprintf("%s: %s is not a setting this release knows; it has no effect — "+
 		"delete it, or check its spelling", path, key)
@@ -1270,7 +1188,6 @@ func Load(path string) (Config, error) {
 	for _, k := range md.Keys() {
 		cfg.seen[k.String()] = true
 	}
-	cfg.deriveSizing()
 	// A file was read, so the Config can say which one. The ErrNotExist branch
 	// above deliberately leaves this empty: "defaults, from nowhere" is a
 	// different fact from "this file", and a refusal that named a file which
@@ -1279,17 +1196,6 @@ func Load(path string) (Config, error) {
 	return cfg, cfg.validate()
 }
 
-// deriveSizing resolves the reserved headroom against the pool that is
-// actually in force, once the file has been decoded.
-//
-// ONLY WHEN THE OPERATOR DID NOT SET IT. An explicit reserved_headroom is an
-// INSTRUCTION: silently reducing it to fit would be autodb overriding a written
-// decision, which is the behaviour being removed here. So the
-// DEFAULT learns to fit the pool — including an explicitly-set pool, which is
-// the installer's case — and an explicit headroom that cannot hold gets an
-// error instead of a quiet correction.
-//
-// The pool is not touched here or anywhere: see DefaultReservedHeadroom.
 // isFilesystemError reports whether err is about REACHING the file rather than
 // about its contents.
 //
@@ -1300,13 +1206,6 @@ func Load(path string) (Config, error) {
 func isFilesystemError(err error) bool {
 	var pathErr *fs.PathError
 	return errors.As(err, &pathErr)
-}
-
-func (c *Config) deriveSizing() {
-	if c.wasSet("frontdoor", "reserved_headroom") {
-		return
-	}
-	c.FrontDoor.ReservedHeadroom = DefaultReservedHeadroom(c.Exec.PoolMaxConns)
 }
 
 // Validate reports whether this configuration would be accepted at startup,
@@ -1421,7 +1320,7 @@ func (c Config) validate() error {
 			"so a transaction could sit well past its deadline before anything looked", ErrInvalid,
 			c.Exec.JanitorInterval.Duration(), c.Exec.IdleInTxTimeout.Duration())
 	}
-	if err := c.FrontDoor.validate(c.Exec.PoolMaxConns, c.sizingSource()); err != nil {
+	if err := c.FrontDoor.validate(); err != nil {
 		return err
 	}
 	// NO DEFAULT, and REQUIRED under the front door — that is
@@ -1444,15 +1343,6 @@ func (c Config) validate() error {
 			"value would describe behaviour the runtime does not have. Remove the key, or set it to match",
 			ErrInvalid, c.Exec.DebugIdleInTxTimeout.Duration(), c.Exec.IdleInTxTimeout.Duration())
 	}
-	// A VIABLE MINIMUM. One permit is reserved so a cancellation can always be
-	// delivered — a developer cancels a query because the system is busy, so a
-	// budget that leaves no room for the cancel removes it at the only moment
-	// anyone reaches for it. A budget of 1 would therefore serve nobody.
-	if c.FrontDoor.Enabled && c.Exec.MaxTargetConns == 1 {
-		return fmt.Errorf("%w: exec.max_target_conns is 1, which leaves nothing for ordinary work — "+
-			"one permit is reserved so a cancellation can still be delivered when every other "+
-			"slot is spent. Use at least 2", ErrInvalid)
-	}
 	// An idle session must not outlive the pool's own idle reaping, or it
 	// holds a backend CHECKED OUT past the point the pool would have closed
 	// it — which defeats the shrink-to-zero behaviour pool_max_conn_idle_time
@@ -1464,12 +1354,6 @@ func (c Config) validate() error {
 			"closed it, so unused pools could never shrink to zero against the target. Lower the "+
 			"session bound, or raise the pool's",
 			ErrInvalid, c.Exec.SessionIdleTimeout.Duration(), c.Exec.PoolMaxConnIdleTime.Duration())
-	}
-	if c.FrontDoor.Enabled && c.Exec.MaxTargetConns <= 0 {
-		return fmt.Errorf("%w: exec.max_target_conns is required when the front door is enabled — "+
-			"it is this instance's TOTAL production-connection budget and has no default. "+
-			"Choose at most half the target server's max_connections; autodb cannot measure "+
-			"that limit and will not guess it", ErrInvalid)
 	}
 	if c.Exec.SessionIdleTimeout <= 0 {
 		return fmt.Errorf("%w: exec.session_idle_timeout %s must be positive — an unbounded idle window "+
@@ -1504,37 +1388,7 @@ func (c Config) validate() error {
 // does not run the front door should not be asked to hold a certificate for
 // it, and refusing to start over an unused section would be a validator
 // enforcing a feature nobody asked for.
-// sizingSource describes where the two sizing numbers came from, for the
-// diagnostic — never for the arithmetic. The arithmetic must be right whether
-// or not anyone knows who chose the values.
-type sizingSource struct {
-	known       bool // a decoder observed this config
-	poolSet     bool
-	headroomSet bool
-}
-
-// describe names a value's origin in the operator's terms, or says nothing at
-// all when there is no basis for a claim.
-func (s sizingSource) describe(set bool, derivedFrom string) string {
-	switch {
-	case !s.known:
-		return ""
-	case set:
-		return " (which you set)"
-	default:
-		return " (autodb's default" + derivedFrom + ")"
-	}
-}
-
-func (c Config) sizingSource() sizingSource {
-	return sizingSource{
-		known:       c.provenanceKnown(),
-		poolSet:     c.wasSet("exec", "pool_max_conns"),
-		headroomSet: c.wasSet("frontdoor", "reserved_headroom"),
-	}
-}
-
-func (f FrontDoor) validate(poolMaxConns int, src sizingSource) error {
+func (f FrontDoor) validate() error {
 	if !f.Enabled {
 		return nil
 	}
@@ -1561,7 +1415,7 @@ func (f FrontDoor) validate(poolMaxConns int, src sizingSource) error {
 	if f.CleartextDebug() {
 		// Cert, key and host names are not required in this mode — there is no
 		// identity to prove. Everything else below still applies.
-		return f.validateBudgets(poolMaxConns, src)
+		return f.validateBudgets()
 	}
 	// TLS is not optional on this surface and neither half of it is. A cert
 	// without a key cannot serve, and a key without a cert cannot prove
@@ -1594,18 +1448,14 @@ func (f FrontDoor) validate(poolMaxConns int, src sizingSource) error {
 			return fmt.Errorf("%w: frontdoor.tls_host_names[%d] is blank", ErrInvalid, i)
 		}
 	}
-	return f.validateBudgets(poolMaxConns, src)
+	return f.validateBudgets()
 }
 
 // validateBudgets checks the numeric limits, which apply in EVERY mode.
 // Extracted so the cleartext path shares them rather than restating them —
 // the exception is about TLS material, not about budgets, and a second copy
 // is how the two drift.
-func (f FrontDoor) validateBudgets(poolMaxConns int, src sizingSource) error {
-	if f.ReservedHeadroom < 0 {
-		return fmt.Errorf("%w: frontdoor.reserved_headroom is %d; it cannot be negative",
-			ErrInvalid, f.ReservedHeadroom)
-	}
+func (f FrontDoor) validateBudgets() error {
 	// The listener validates the RELATIONSHIPS between the caps before it
 	// binds (frontdoor.Open). What is checked here is the thing config can
 	// check on its own: that nobody wrote a negative where zero means the
@@ -1662,49 +1512,5 @@ func (f FrontDoor) validateBudgets(poolMaxConns int, src sizingSource) error {
 			ErrInvalid, f.GeneralLaneBytes, MaxGeneralLaneBytes)
 	}
 
-	// The derivation, and the reason an explicit value may only be lower.
-	//
-	// THE MESSAGE NAMES WHOSE NUMBER IS WHOSE. The old text read as though the
-	// operator had chosen both, and on the droplet neither had been typed — so
-	// it showed somebody two figures they had never seen and asked them to
-	// reconcile them. With provenance unknown (a Config built in Go) it claims
-	// nothing, because there is nothing to claim.
-	derived := poolMaxConns - f.ReservedHeadroom
-	if derived < 1 {
-		return fmt.Errorf("%w: frontdoor.reserved_headroom (%d%s) leaves %d of "+
-			"exec.pool_max_conns (%d%s) for wire leases; the front door would be enabled "+
-			"with no capacity to serve anyone",
-			ErrInvalid,
-			f.ReservedHeadroom, src.describe(src.headroomSet, ""),
-			derived,
-			poolMaxConns, src.describe(src.poolSet, ", 2 x this host's cores"))
-	}
-	switch {
-	case f.MaxLeases == 0:
-		// Unset. The derived value applies — see EffectiveMaxLeases.
-	case f.MaxLeases < 0:
-		return fmt.Errorf("%w: frontdoor.max_leases is %d; it cannot be negative",
-			ErrInvalid, f.MaxLeases)
-	case f.MaxLeases > derived:
-		return fmt.Errorf("%w: frontdoor.max_leases is %d but only %d connections remain after "+
-			"reserved_headroom (%d) is held back from exec.pool_max_conns (%d); a cap above what "+
-			"the pool can supply does not create capacity, it just moves the failure onto "+
-			"whichever session asks last", ErrInvalid, f.MaxLeases, derived, f.ReservedHeadroom,
-			poolMaxConns)
-	}
 	return nil
-}
-
-// EffectiveMaxLeases is the wire-lease cap actually in force: the operator's
-// value when set, otherwise the derivation.
-//
-// One function so the number is computed once. Two places deriving it
-// separately is how the validator and the admission gate end up disagreeing,
-// and the disagreement would surface as leases refused by a cap no
-// configuration file mentions.
-func (f FrontDoor) EffectiveMaxLeases(poolMaxConns int) int {
-	if f.MaxLeases > 0 {
-		return f.MaxLeases
-	}
-	return poolMaxConns - f.ReservedHeadroom
 }

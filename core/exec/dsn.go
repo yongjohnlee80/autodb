@@ -114,7 +114,7 @@ func ValidateDSN(engineName engine.Name, dsn string) error {
 // Statements stay in plain autocommit, so transaction-prohibited DDL
 // (VACUUM, CREATE DATABASE, CONCURRENTLY forms) remains executable.
 // Existing PrepareConn/BeforeAcquire hooks are chained first.
-func pgPrepareConnVerify() golibpg.Option {
+func pgPrepareConnVerify(connID int64) golibpg.Option {
 	return func(cfg *pgxpool.Config) {
 		prevPrepare := cfg.PrepareConn
 		prevBefore := cfg.BeforeAcquire //nolint:staticcheck // chained for completeness
@@ -163,9 +163,11 @@ func pgPrepareConnVerify() golibpg.Option {
 			}
 			if verr := v.VerifyReportedGrammar(conn.PgConn().ParameterStatus); verr != nil {
 				if errors.Is(verr, ErrGrammarDrifted) {
-					// Drifted session: destroy it and let the pool retry on a
-					// fresh one, which self-heals.
-					return false, nil
+					// A pool backend is never reused, so a drifted one is
+					// fresh: the server's own default is incompatible, and a
+					// retry would only redial up to MaxConns + 1 times. Fail
+					// once, as the configuration fact it is.
+					return false, NewConfigFailure(ConfigStageDSN, connID, DetailGrammarUnproved, verr)
 				}
 				// Unreadable, not drifted. Retrying would spin the pool's
 				// bounded attempts against a peer that will never answer.
@@ -218,6 +220,11 @@ func (e *Engine) pgAfterReleaseReset(connID int64) golibpg.Option {
 		prev := cfg.AfterRelease
 		cfg.AfterRelease = func(conn *pgx.Conn) bool {
 			if prev != nil && !prev(conn) {
+				return false
+			}
+			// A pool backend is never reused: closed without a reset, and
+			// without a log line, since that is its ordinary end.
+			if !e.reusesBackend(connID) {
 				return false
 			}
 			v := e.runResetPlan(context.Background(), poolResetRunner{conn: conn})
