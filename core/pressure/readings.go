@@ -6,7 +6,7 @@ import "strconv"
 // pair up on and the string an operator will end up grepping for at three in
 // the morning.
 const (
-	SessionsGlobal   = "sessions.global"
+	SessionsGlobal = "sessions.global"
 	// SessionsUser is exec and TUI sessions per user: front-door sessions
 	// are not counted per user. was: "sessions.user".
 	SessionsUser = "sessions.user.exec"
