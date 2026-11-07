@@ -212,7 +212,7 @@ func (l *Listener) PressureSnapshot(caps CapacityReader) (pressure.Snapshot, err
 	omitted := l.meter.breakdown.Omitted()
 
 	return l.meter.tracker.Assemble(pressure.ViewInput{
-		Caps: pressureCaps(snap),
+		Caps:  pressureCaps(snap),
 		Conns: lanes.Conns, MaxConns: lanes.MaxConns,
 		PreAuth: lanes.PreAuth, MaxPreAuth: lanes.MaxPreAuth,
 		Denials: denials, DenialsOmitted: omitted,
