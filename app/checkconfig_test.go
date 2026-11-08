@@ -200,6 +200,26 @@ func TestCheckConfig_AcceptsAConfigTheDaemonWouldLoad(t *testing.T) {
 	}
 }
 
+// A FILE WRITTEN BEFORE THE TWO-HOUR BOUND STILL PASSES THE PRE-FLIGHT, so an
+// update does not stop on the shipped 8h defaults of an older release. The
+// clamp is not silent: check-config prints the warning naming the key.
+func TestCheckConfig_PassesATimeoutAboveTheBoundAndWarnsOfTheClamp(t *testing.T) {
+	bin := buildAutodb(t)
+	cfg := serviceConfig(t, "\n[exec]\nmax_tx_duration = \"8h\"\nmax_tx_duration_ceiling = \"8h\"\n", frontDoorOff)
+	seedStoreAndKey(t, filepath.Dir(cfg))
+
+	cmd := exec.Command(bin, "--config", cfg, "--check-config")
+	out, err := cmd.CombinedOutput()
+	body := string(out)
+	if err != nil {
+		t.Fatalf("a file with max_tx_duration = 8h was refused (exit %d); it should load clamped:\n%s",
+			cmd.ProcessState.ExitCode(), body)
+	}
+	if !strings.Contains(body, "exec.max_tx_duration = 8h0m0s") {
+		t.Errorf("the pre-flight passed without warning of the clamp:\n%s", body)
+	}
+}
+
 // A configuration the daemon would refuse: the front door ON with a global
 // session cap the exec reservation leaves nothing of. Exit 78 is asserted by the
 // entry-point table in exitcode_test.go; what this adds is that the NAME reaches
