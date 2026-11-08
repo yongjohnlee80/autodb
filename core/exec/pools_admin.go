@@ -221,12 +221,26 @@ func (e *Engine) SetConnectionPool(ctx context.Context, token string, connID, po
 // store I/O and session teardown, which is why nothing a statement takes ever
 // waits for it.
 func (e *Engine) lifecycleOp() (end func()) {
+	// TryLock first only so the race-window hook can say which way the
+	// acquisition went, before a writer that found the guard held waits.
+	if e.lifecycle.TryLock() {
+		e.atLifecycleStep(lifecycleAcquired)
+		return e.lifecycle.Unlock
+	}
+	e.atLifecycleStep(lifecycleBlocked)
 	e.lifecycle.Lock()
 	return e.lifecycle.Unlock
 }
 
-// atLifecycleStep marks a named step of a lifecycle operation for the
-// race-window hook. Nothing in production.
+// The steps lifecycleOp reports: the guard was free, or it was held and the
+// writer is about to wait.
+const (
+	lifecycleAcquired = "lifecycle acquired"
+	lifecycleBlocked  = "lifecycle blocked"
+)
+
+// atLifecycleStep marks a named step of a lifecycle operation, or of its
+// acquisition, for the race-window hook. Nothing in production.
 func (e *Engine) atLifecycleStep(step string) {
 	if h := e.hookInLifecycleOp; h != nil {
 		h(step)
