@@ -102,7 +102,7 @@ func (h *Host) focusPane(id string) {
 // the active connection, the explorer's rows, the last result.
 func (h *Host) forgetWorkspace() {
 	h.pressureClosed()
-	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile", "userForm", "users", "addresses", "history", "historyFilter", "audit", "auditFilter", "caCert", "keyslotConfirm", "keyslot", "widening", "search", "noteOpen", "remoteManage", "remoteServerForm", "sshKeyForm"} {
+	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile", "userForm", "users", "addresses", "pools", "history", "historyFilter", "audit", "auditFilter", "caCert", "keyslotConfirm", "keyslot", "widening", "search", "noteOpen", "remoteManage", "remoteServerForm", "sshKeyForm"} {
 		if err := h.p.Call(id, "close"); err != nil {
 			h.keep(err)
 		}
@@ -141,6 +141,11 @@ func (h *Host) forgetWorkspace() {
 	h.addresses.bound = nil
 	h.addresses.rows, h.addresses.all = nil, nil
 	h.addresses.model.Reset(nil)
+	h.pools.bound, h.poolEditID = nil, 0
+	h.pools.rows, h.pools.all = nil, nil
+	h.pools.model.Reset(nil)
+	h.poolList = nil
+	h.poolChoices.Reset(nil)
 	h.history.bound = nil
 	h.history.all, h.history.rows = nil, nil
 	h.history.model.Reset(nil)

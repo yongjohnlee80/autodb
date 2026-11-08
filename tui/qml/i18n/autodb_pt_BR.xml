@@ -223,6 +223,14 @@
             <source>ip allowlist (admin)…</source>
             <translation>lista de IPs permitidos (admin)…</translation>
         </message>
+        <message id="autodb.menu.pool.manage">
+            <source>C&amp;onnection pools (admin)…</source>
+            <translation>Pools de c&amp;onexão (admin)…</translation>
+        </message>
+        <message id="autodb.leader.pool.manage">
+            <source>connection pools (admin)…</source>
+            <translation>pools de conexão (admin)…</translation>
+        </message>
         <message id="autodb.menu.keyslot.manage">
             <source>Service &amp;keyslot (admin)…</source>
             <translation>Slot de chave do serviço (&amp;k)</translation>
@@ -434,6 +442,42 @@
         <message id="autodb.addresses.text4">
             <source>Close(&amp;q)</source>
             <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.connectionForm.pool">
+            <source>Connection pool (moving ends its sessions)</source>
+            <translation>Pool de conexão (mover encerra suas sessões)</translation>
+        </message>
+        <message id="autodb.pools.close">
+            <source>Close(&amp;q)</source>
+            <translation>Fechar(&amp;q)</translation>
+        </message>
+        <message id="autodb.pools.delete">
+            <source>&amp;Delete</source>
+            <translation>Excluir (&amp;d)</translation>
+        </message>
+        <message id="autodb.pools.new">
+            <source>&amp;New</source>
+            <translation>&amp;Novo</translation>
+        </message>
+        <message id="autodb.pools.placeholderMax">
+            <source>max sockets</source>
+            <translation>máximo de sockets</translation>
+        </message>
+        <message id="autodb.pools.placeholderName">
+            <source>pool name</source>
+            <translation>nome do pool</translation>
+        </message>
+        <message id="autodb.pools.save">
+            <source>&amp;Save</source>
+            <translation>&amp;Salvar</translation>
+        </message>
+        <message id="autodb.pools.setMax">
+            <source>Set &amp;max</source>
+            <translation>Definir &amp;máximo</translation>
+        </message>
+        <message id="autodb.pools.title">
+            <source>connection pools</source>
+            <translation>pools de conexão</translation>
         </message>
         <message id="autodb.audit.title">
             <source>audit log</source>

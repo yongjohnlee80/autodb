@@ -93,6 +93,9 @@ func (h *Host) state(theme string) map[string]any {
 	for k, v := range addressManagerState(h) {
 		st[k] = v
 	}
+	for k, v := range poolManagerState(h) {
+		st[k] = v
+	}
 	st["App.historyRows"] = h.history.model
 	st["App.historyStatus"] = historyHelp
 	st["App.historyConnChoices"] = h.hist.conns
