@@ -1270,5 +1270,46 @@ func All() []Mutation {
 			Fails:       "a file setting only idle_in_tx_timeout was refused",
 			Guarantee:   "that a config file setting only idle_in_tx_timeout is not refused for the deprecated debug key's default",
 		},
+		{
+			// Needs TEST_PGURL: the open is a real pgxpool build.
+			Name: "a-drain-revokes-an-open-in-flight", Package: "./core/exec/", File: "core/exec/conns.go",
+			Anchor:      "\t// An open in flight was authorized by the lifecycle this drain ends.\n\tdelete(e.opening, connID)\n",
+			Replacement: "",
+			Test:        "TestTarget_AnOpenThatOutlivesAMoveIsRebuiltOnTheCurrentPool",
+			Fails:       "target published the pool it opened before the move ended",
+			Guarantee:   "that a pool opened before a completed move is never published to charge the pool the connection left",
+		},
+		{
+			Name: "two-updates-publish-in-commit-order", Package: "./core/exec/", File: "core/exec/pools_admin.go",
+			Anchor:      "\te.lifecycle.Lock()\n\treturn e.lifecycle.Unlock\n",
+			Replacement: "\treturn func() {}\n",
+			Test:        "TestLifecycle_TwoUpdatesPublishInCommitOrder",
+			Fails:       "all three must be 3",
+			Guarantee:   "that a pool's live budget is the one its store holds after concurrent updates",
+		},
+		{
+			Name: "two-moves-do-not-share-a-fence", Package: "./core/exec/", File: "core/exec/pools_admin.go",
+			Anchor:      "\te.lifecycle.Lock()\n\treturn e.lifecycle.Unlock\n",
+			Replacement: "\treturn func() {}\n",
+			Test:        "TestLifecycle_TwoMovesOfOneConnectionDoNotShareAFence",
+			Fails:       "lifted this one's fence",
+			Guarantee:   "that one move of a connection can't lift another's admission fence",
+		},
+		{
+			Name: "a-delete-and-an-assignment-leave-no-dangling-membership", Package: "./core/exec/", File: "core/exec/pools_admin.go",
+			Anchor:      "\te.lifecycle.Lock()\n\treturn e.lifecycle.Unlock\n",
+			Replacement: "\treturn func() {}\n",
+			Test:        "TestLifecycle_ADeleteAndAnAssignmentLeaveNoDanglingMembership",
+			Fails:       "which does not exist",
+			Guarantee:   "that a pool delete racing a move into it leaves no connection in a deleted pool",
+		},
+		{
+			Name: "a-clamp-and-its-audit-row-are-one-transaction", Package: "./core/exec/", File: "core/exec/policy.go",
+			Anchor:      "\t\t\tif uerr := e.store.KV.On(tx).\n",
+			Replacement: "\t\t\tif uerr := e.store.KV.OnCtx(ctx).\n",
+			Test:        "TestLoadDurablePolicy_AClampWhoseAuditFailsStoresNothing",
+			Fails:       "the blob was stored without its policy_clamped row",
+			Guarantee:   "that a clamped policy is never stored without its policy_clamped audit row",
+		},
 	}
 }
