@@ -18,35 +18,33 @@ import (
 //
 // The claim being tested is not "the reset statements were dispatched" — the
 // cells beside this file already show that without a database. It is the
-// stronger one: one session takes a piece of session state, goes away, a SECOND
-// session is handed the SAME physical backend, and cannot find what the first
-// one left.
+// stronger one: one session takes a piece of session state, goes away, and a
+// SECOND session cannot find what the first one left.
 //
-// TWO THINGS MAKE THESE CELLS NON-VACUOUS, and without either of them a passing
-// run would mean nothing.
+// A SESSION'S BACKEND IS NEVER REUSED. golib (since v0.8) destroys a pinned
+// member at Release once a command left session state on it (SET, RESET,
+// DISCARD, PREPARE, LISTEN, DECLARE, by their tags), and every wire session's
+// startup settings and the reset plan itself are such commands. So the second
+// session is always handed a FRESH backend, and the matrix proves that: the
+// two process ids differ on a one-member pool, and the first backend is gone
+// from pg_stat_activity. The reset plan's per-step proof, which needs the same
+// backend handed on, waits for a broker that reuses backends, and that needs a
+// golib way to keep a member autodb has proved clean.
 //
-// The first is that the second session must genuinely inherit the first one's
-// backend. A pool with room to spare would hand out a fresh connection, every
-// probe would come back clean, and the reset could be deleted entirely without
-// a single cell noticing. So the target is opened with room for exactly ONE
-// physical connection, and every cell asserts that both sessions reported the
-// same backend process id. If they ever differ the cell fails on that, before
-// it looks at anything else.
+// THE ONE-MEMBER POOL IS WHAT MAKES THE MATRIX NON-VACUOUS. With room to
+// spare, a fresh backend for the second session would prove nothing about the
+// first's; with room for one, a parked first backend would be the only one the
+// second could get. So a differing process id, plus the first one gone from
+// pg_stat_activity, is the proof that it was destroyed.
 //
-// The second is that each cell is also run with its own reset step REMOVED. A
-// cell that stays clean under that mutation is not testing its step; it is
-// testing something else that happens to clean up after it, and the matrix says
-// so rather than passing.
-//
-// The same plan runs at both ends — when a session gives a backend up and when
-// one takes it — so a clean probe here means the pair held, not one half of it.
-// Which half does the work on its own is settled by the cells below this table:
-// a reset the target refuses makes the release side discard rather than pool,
-// and a backend dirtied by something that never went near a session is cleaned
-// at checkout.
+// The gate still runs and still decides: a reset the target refuses makes the
+// release side discard rather than hand back, and a backend dirtied by
+// something that never went near a session is cleaned at checkout. The cells
+// below this table settle those.
 
-// leakTarget is a live PostgreSQL connection sized so that one backend serves
-// every session in turn, which is what makes cross-session leakage observable.
+// leakTarget is a live PostgreSQL connection with room for one backend, so a
+// backend that was parked rather than destroyed is the one the next borrower
+// gets.
 type leakTarget struct {
 	f      *fixture
 	row    *meta.Connection
@@ -262,39 +260,45 @@ func leakCells() []leakCell {
 	}
 }
 
-// THE MATRIX. Each cell twice: once with the whole reset, once with that cell's
-// own step taken out.
+// THE MATRIX. Each cell: the first session's backend is destroyed, so the
+// second, on a one-member pool, is handed a fresh one that holds none of it.
 func TestReleaseGatePG_NothingOneSessionLeavesIsVisibleToTheNext(t *testing.T) {
 	t.Parallel()
 	for _, cell := range leakCells() {
 		t.Run(cell.name, func(t *testing.T) {
 			t.Parallel()
-			t.Run("the whole reset removes it", func(t *testing.T) {
-				got, first, second := runLeakCell(t, cell, nil)
-				if first != second {
-					t.Fatalf("the second session was handed backend %s and the first held %s, "+
-						"so nothing about leakage was observed. The target must have room for "+
-						"one connection only", second, first)
-				}
-				if got != cell.clean {
-					t.Fatalf("the second session found %q where a clean backend reports %q: "+
-						"%s survived a verified reset and reached a session that did not "+
-						"create it", got, cell.clean, cell.name)
-				}
-			})
-			t.Run("removing its reset step makes it visible", func(t *testing.T) {
-				got, first, second := runLeakCell(t, cell, resetPlanWithout(cell.carries))
-				if first != second {
-					t.Fatalf("backends %s and %s differ, so this mutation proved nothing", first, second)
-				}
-				if got == cell.clean {
-					t.Fatalf("the reset ran WITHOUT the step for %q and the second session "+
-						"still found nothing. Either that step is not what removes %s, or "+
-						"something else is cleaning up and the cell above is passing for the "+
-						"wrong reason", cell.carries, cell.name)
-				}
-			})
+			got, first, second := runLeakCell(t, cell, nil)
+			if got != cell.clean {
+				t.Fatalf("the second session found %q where a clean backend reports %q: "+
+					"%s reached a session that did not create it", got, cell.clean, cell.name)
+			}
+			if first == second {
+				t.Fatalf("the second session was handed backend %s, the one the first session "+
+					"left %s on; a session's backend must be destroyed, not reused", first, cell.name)
+			}
 		})
+	}
+}
+
+// requireBackendGone fails unless backend pid has left pg_stat_activity, as
+// seen through ask. A destroyed member's Terminate is sent at Release, and the
+// server ends the process a moment later, so this waits up to two seconds.
+func requireBackendGone(t *testing.T, ask func(string) string, pid string) {
+	t.Helper()
+	// Positive control: the same view finds the asker's own live backend, so a
+	// zero below means "gone", not "this role can't see the rows".
+	if got := ask("SELECT count(*)::text FROM pg_stat_activity WHERE pid = pg_backend_pid()"); got != "1" {
+		t.Fatalf("pg_stat_activity shows %s row(s) for the asker's own backend, so it cannot "+
+			"witness another backend's end", got)
+	}
+	q := "SELECT count(*)::text FROM pg_stat_activity WHERE pid = " + pid
+	deadline := time.Now().Add(2 * time.Second)
+	for ask(q) != "0" {
+		if time.Now().After(deadline) {
+			t.Fatalf("backend %s is still in pg_stat_activity two seconds after its session "+
+				"closed; it was parked, not destroyed", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -317,18 +321,19 @@ func runLeakCell(t *testing.T, cell leakCell, plan []resetStep) (probed, firstPI
 
 	second := lt.open(t)
 	defer second.close()
-	return second.scalar(cell.probe), first.pid, second.pid
+	probed = second.scalar(cell.probe)
+	requireBackendGone(t, second.scalar, first.pid)
+	return probed, first.pid, second.pid
 }
 
-// A session that goes away inside a transaction must leave an IDLE backend.
+// A session that goes away inside a transaction leaves no backend at all.
 //
-// This is the cell the other seven cannot cover: an unfinished transaction is
-// not something a reset statement removes — DISCARD ALL refuses to run inside a
-// transaction block at all — so it has to be ended by the session's own owner
-// before the gate runs. If that ordering is ever broken the reset fails, and
-// the backend is discarded rather than leaked, which is safe but wasteful; what
-// must never happen is the backend reaching the pool still inside the block.
-func TestReleaseGatePG_ASessionThatEndsInsideATransactionLeavesAnIdleBackend(t *testing.T) {
+// An unfinished transaction is not something a reset statement removes —
+// DISCARD ALL refuses to run inside a transaction block — and what must never
+// happen is a backend reaching the next borrower still inside the block. Since
+// a session's backend is destroyed (see the matrix's header), the proof is that
+// the first backend is gone and the next session's has no transaction.
+func TestReleaseGatePG_ASessionThatEndsInsideATransactionLeavesNoBackend(t *testing.T) {
 	t.Parallel()
 	lt := newLeakTarget(t)
 
@@ -346,15 +351,15 @@ func TestReleaseGatePG_ASessionThatEndsInsideATransactionLeavesAnIdleBackend(t *
 
 	second := lt.open(t)
 	defer second.close()
-	if second.pid != first.pid {
-		t.Fatalf("backend %s was not the one the first session held (%s); the transaction "+
-			"cell proved nothing", second.pid, first.pid)
+	if second.pid == first.pid {
+		t.Fatalf("the next session was handed backend %s, which the first left inside a "+
+			"transaction; it must be destroyed", first.pid)
 	}
+	requireBackendGone(t, second.scalar, first.pid)
 	// scalar fails the test unless the backend answered with the idle status,
 	// so reaching this line is the assertion.
 	if got := second.scalar("SELECT txid_current_if_assigned() IS NULL"); got != "t" {
-		t.Fatalf("the inherited backend already has a transaction id assigned (%q), so the "+
-			"first session's transaction is still open on it", got)
+		t.Fatalf("the next session's backend already has a transaction id assigned (%q)", got)
 	}
 }
 
@@ -398,11 +403,13 @@ func TestReleaseGatePG_AResetTheTargetRefusesDiscardsTheBackend(t *testing.T) {
 	}
 }
 
-// The positive control for everything above: a session that leaves nothing
-// behind DOES get its backend pooled, and the record says so. Without this, a
-// gate that discarded unconditionally would satisfy every other cell in this
-// file while delivering none of the point.
-func TestReleaseGatePG_ACleanSessionsBackendIsReused(t *testing.T) {
+// The gate's positive control: a session that leaves nothing behind passes the
+// gate (its verdict is "pooled", and nothing is discarded), so a gate that
+// refused unconditionally fails here. golib then destroys the member anyway,
+// because the session's startup settings are session state; that is golib's
+// decision after the gate's, and the cell pins it so backend reuse notices the day it
+// changes.
+func TestReleaseGatePG_ACleanSessionPassesTheGateAndIsStillNotReused(t *testing.T) {
 	t.Parallel()
 	lt := newLeakTarget(t)
 
@@ -419,11 +426,11 @@ func TestReleaseGatePG_ACleanSessionsBackendIsReused(t *testing.T) {
 	}
 	second := lt.open(t)
 	defer second.close()
-	if second.pid != firstPID {
-		t.Fatalf("the second session got backend %s rather than the pooled %s; either the "+
-			"handback did not happen or the pool has more room than this test assumes",
-			second.pid, firstPID)
+	if second.pid == firstPID {
+		t.Fatalf("the second session got backend %s back; golib recycles a member a session's "+
+			"startup settings left state on, so backend reuse can start", firstPID)
 	}
+	requireBackendGone(t, second.scalar, firstPID)
 }
 
 // A BACKEND THE ORDINARY POOLED PATH DIRTIED MUST NOT BE HANDED TO A SESSION
