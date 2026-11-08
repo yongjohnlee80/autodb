@@ -145,31 +145,10 @@ func pgClient(t *testing.T, addr, secret, database string) *pgproto3.Frontend {
 // the reader, not as root.
 func pgClientAs(t *testing.T, addr, secret, database, user string) *pgproto3.Frontend {
 	t.Helper()
-
-	conn, fe := startupTo(t, addr, map[string]string{
-		"user": user, "database": database, "application_name": "psql",
-	})
-	t.Cleanup(func() { _ = conn.Close() })
-	if _, err := fe.Receive(); err != nil {
-		t.Fatalf("auth request: %v", err)
-	}
-	fe.Send(&pgproto3.PasswordMessage{Password: secret})
-	if err := fe.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	for {
-		msg, err := fe.Receive()
-		if err != nil {
-			t.Fatalf("the success sequence: %v", err)
-		}
-		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
-			return fe
-		}
-	}
+	_, fe, _ := pgOpen(t, addr, secret, database, user)
+	return fe
 }
 
-// pgClientCollecting authenticates and returns the frontend plus every frame the
-// server sent between the auth request and ReadyForQuery — the session-open set.
 // pgClientWithConn authenticates and returns the connection alongside the
 // frontend, so a cell can bound reads with a deadline instead of racing a
 // goroutine against the frontend — pgproto3.Frontend is not safe for concurrent
@@ -177,33 +156,29 @@ func pgClientAs(t *testing.T, addr, secret, database, user string) *pgproto3.Fro
 // race that -race catches and a plain run does not.
 func pgClientWithConn(t *testing.T, addr, secret, database string) (*tls.Conn, *pgproto3.Frontend) {
 	t.Helper()
-	conn, fe := startupTo(t, addr, map[string]string{
-		"user": "root", "database": database, "application_name": "psql",
-	})
-	t.Cleanup(func() { _ = conn.Close() })
-	if _, err := fe.Receive(); err != nil {
-		t.Fatalf("auth request: %v", err)
-	}
-	fe.Send(&pgproto3.PasswordMessage{Password: secret})
-	if err := fe.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	for {
-		msg, err := fe.Receive()
-		if err != nil {
-			t.Fatalf("the success sequence: %v", err)
-		}
-		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
-			return conn, fe
-		}
-	}
+	conn, fe, _ := pgOpen(t, addr, secret, database, "root")
+	return conn, fe
 }
 
+// pgClientCollecting authenticates and returns the frontend plus every frame the
+// server sent between the auth request and ReadyForQuery — the session-open set.
 func pgClientCollecting(t *testing.T, addr, secret, database string) (*pgproto3.Frontend, []pgproto3.BackendMessage) {
+	t.Helper()
+	_, fe, opening := pgOpen(t, addr, secret, database, "root")
+	return fe, opening
+}
+
+// pgOpen is the one startup every pg client helper above runs: it
+// authenticates as user and reads the session-open set up to ReadyForQuery.
+//
+// An ErrorResponse fails the cell with its code. The server closes the socket
+// right after one, so a loop that read past it reported only "unexpected EOF"
+// and lost the reason the session did not open.
+func pgOpen(t *testing.T, addr, secret, database, user string) (*tls.Conn, *pgproto3.Frontend, []pgproto3.BackendMessage) {
 	t.Helper()
 
 	conn, fe := startupTo(t, addr, map[string]string{
-		"user": "root", "database": database, "application_name": "psql",
+		"user": user, "database": database, "application_name": "psql",
 	})
 	t.Cleanup(func() { _ = conn.Close() })
 	if _, err := fe.Receive(); err != nil {
@@ -219,8 +194,11 @@ func pgClientCollecting(t *testing.T, addr, secret, database string) (*pgproto3.
 		if err != nil {
 			t.Fatalf("the success sequence: %v", err)
 		}
-		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
-			return fe, opening
+		switch m := msg.(type) {
+		case *pgproto3.ReadyForQuery:
+			return conn, fe, opening
+		case *pgproto3.ErrorResponse:
+			t.Fatalf("the session did not open: %s %s", m.Code, m.Message)
 		}
 		opening = append(opening, snapshot(msg))
 	}
