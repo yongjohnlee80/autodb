@@ -14,6 +14,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/outcome"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // THE POST-AUTH SESSION LOOP (F1's wire half).
@@ -1217,7 +1218,7 @@ const (
 // deadlineGoodbyeBudget bounds the write of the frame that explains a deadline
 // expiry. Short: the peer is already past its budget and this is a courtesy, not
 // a reason to hold the slot open.
-const deadlineGoodbyeBudget = 2 * time.Second
+const deadlineGoodbyeBudget = timeouts.GoodbyeWrite
 
 // classifyGateError maps a front-door refusal onto the matrix §7 refusal catalogue:
 // SQLSTATE, the DETAIL rule id, the HINT, and whether the connection survives.

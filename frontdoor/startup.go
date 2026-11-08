@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/yongjohnlee80/autodb/core/outcome"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // The startup exchange (protocol matrix §2 rows 2.1–2.5a).
@@ -55,8 +56,8 @@ const (
 	// Each is its own deadline rather than one budget for the lot, so a peer
 	// cannot spend the whole allowance on the handshake and still be owed
 	// time for the startup packet.
-	TLSHandshakeDeadline = 10 * time.Second
-	StartupDeadline      = 10 * time.Second
+	TLSHandshakeDeadline = timeouts.TLSHandshake
+	StartupDeadline      = timeouts.StartupPacket
 )
 
 // deadlines is the phase budget one connection runs under.
@@ -90,7 +91,7 @@ func defaultDeadlines() deadlines {
 		tls:     TLSHandshakeDeadline,
 		startup: StartupDeadline,
 		auth:    AuthDeadline,
-		idle:    IdleDeadline, outputStall: 30 * time.Second, frameStall: 30 * time.Second}
+		idle:    IdleDeadline, outputStall: timeouts.OutputStall, frameStall: timeouts.FrameStall}
 }
 
 // Protocol version constants. autodb speaks 3.0 and negotiates 3.x down to

@@ -9,6 +9,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 	"github.com/yongjohnlee80/golib/dao"
 )
 
@@ -422,7 +423,7 @@ func (e *Engine) transferDemotionClose(s *session, ip string) bool {
 // closeQuiesceTimeout bounds the wait for an in-flight statement during a
 // close. Longer than the timeout path's: a close is usually a person asking,
 // and finishing the rollback properly is worth a few more seconds.
-const closeQuiesceTimeout = 15 * time.Second
+const closeQuiesceTimeout = timeouts.CloseQuiesce
 
 // closeSessionsFor closes every session on a connection. It is the first step
 // of deleting or closing a connection: the pool must not go away underneath a
@@ -455,7 +456,7 @@ func (e *Engine) closeSessionsFor(ctx context.Context, connID int64, ip, reason 
 
 // poolCloseTimeout bounds how long conn.delete waits for a target pool to
 // shut down cleanly.
-const poolCloseTimeout = 20 * time.Second
+const poolCloseTimeout = timeouts.PoolClose
 
 // CloseAllSessions closes every open session (engine shutdown).
 func (e *Engine) CloseAllSessions(ctx context.Context, reason string) {
@@ -487,7 +488,7 @@ const ReasonR7DependencyTimeout = "r7-dependency-timeout"
 // client legitimately holding a prepared statement across a quiet period is
 // doing nothing wrong; one that has not touched it in two hours while chatting
 // continuously has abandoned it in every sense except the protocol's.
-const r7DependencyBound = 2 * time.Hour
+const r7DependencyBound = timeouts.IdleHoldingState
 
 // r7Expired reports whether this session has reached R7's bound.
 //

@@ -19,6 +19,7 @@ import (
 	"github.com/yongjohnlee80/golib/dao/sqlite"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // Target pools opened with no bounds at all: no MaxConns,
@@ -97,6 +98,30 @@ func TestPoolLimits_BoundAndCap(t *testing.T) {
 // An engine built with no options is bounded too, on every driver. Defaults
 // are the configuration almost every deployment runs, so "safe only when
 // configured" is not safe.
+// A NEW BACKEND'S CONNECT IS BOUNDED BY autodb, not by pgxpool's own fallback,
+// and a DSN that sets connect_timeout keeps it. The same for a target inside a
+// connection pool and one outside every pool.
+func TestPoolLimits_ABackendConnectIsBounded(t *testing.T) {
+	t.Parallel()
+	pooled := New(nil, nil)
+	unpooled := New(nil, nil)
+	unpooled.pools = nil
+	for name, e := range map[string]*Engine{"in a pool": pooled, "outside every pool": unpooled} {
+		row := &meta.Connection{ID: 1, Engine: engine.Postgres, PoolID: meta.DefaultPoolID}
+		cfg := &pgxpool.Config{ConnConfig: &pgx.ConnConfig{}}
+		e.pgPoolLimits(row)(cfg)
+		if got := cfg.ConnConfig.ConnectTimeout; got != timeouts.BackendConnect {
+			t.Errorf("%s: connect timeout %v, want timeouts.BackendConnect (%v)", name, got, timeouts.BackendConnect)
+		}
+		set := &pgxpool.Config{ConnConfig: &pgx.ConnConfig{}}
+		set.ConnConfig.ConnectTimeout = 7 * time.Second
+		e.pgPoolLimits(row)(set)
+		if got := set.ConnConfig.ConnectTimeout; got != 7*time.Second {
+			t.Errorf("%s: a DSN's connect_timeout of 7s became %v", name, got)
+		}
+	}
+}
+
 func TestPoolLimits_DefaultsAreBounded(t *testing.T) {
 	t.Parallel()
 

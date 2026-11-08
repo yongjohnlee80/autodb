@@ -166,12 +166,10 @@ Configured to track connection hold durations across the reclamation ladder:
 ```
   1s, 10s, 1m, 5m,
   10m,  ─── Session Idle Timeout
-  30m,
+  30m,  ─── Idle-in-Transaction Timeout
   1h,
-  2h,   ─── Idle-in-Transaction Timeout
-  4h,
-  6h,
-  8h,   ─── Maximum Transaction Bound
+  2h,   ─── Maximum Transaction Bound (the most any timeout may be)
+  4h, 6h, 8h,
   12h   ─── Headroom Above Bound (allows tracking overdue holds)
 ```
 
@@ -235,7 +233,7 @@ type Histogram struct { ... }
 // QueueWaitEdgesMs resolves admission queue delays up to the 90s deadline.
 var QueueWaitEdgesMs = []int64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000, 30000, 90000}
 
-// BackendHoldEdgesMs resolves connection holding bounds (10m, 2h, 8h, and 12h headroom).
+// BackendHoldEdgesMs resolves connection holding bounds (10m, 30m, 2h, and headroom to 12h).
 var BackendHoldEdgesMs = []int64{
     1000, 10000, 60000, 300000,
     600000, 1800000, 3600000, 7200000,

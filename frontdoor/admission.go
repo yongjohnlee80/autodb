@@ -58,7 +58,7 @@ const (
 	// AuthFailuresPerIP and AuthFailureWindow throttle credential and
 	// handshake grinding from one source (matrix rows 2.1b and 2.7).
 	AuthFailuresPerIP = 10
-	AuthFailureWindow = time.Minute
+	AuthFailureWindow = time.Minute // not a timeout: a throttle window
 
 	// AuthWorkers bounds CONCURRENT credential verifications (matrix §9:
 	// "pre-auth conns 64 / auth workers 16").

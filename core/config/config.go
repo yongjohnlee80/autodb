@@ -9,7 +9,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"github.com/yongjohnlee80/autodb/core/engine"
 	"io/fs"
 	"net"
 	"net/netip"
@@ -21,6 +20,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/yongjohnlee80/autodb/core/engine"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // ErrInvalid wraps every validation failure; test with errors.Is.
@@ -83,7 +84,8 @@ type Config struct {
 	// caller or a cell does -- carries no claim about where it came from. A
 	// zero value must not assert "there is a service on this host".
 	sourcePath string
-	// warnings are the unknown keys the file carried (Load).
+	// warnings are what Load found worth saying but not refusing: unknown or
+	// retired keys, and timeouts clamped to timeouts.MaxBound.
 	warnings []string
 
 	// ServiceHostSeen records that a system SERVER config exists on this
@@ -696,12 +698,12 @@ func dataPath(name string) (string, error) {
 // Remote listener defaults.
 const (
 	DefaultRemoteBlockAfterFailures = 3
-	DefaultRemoteBlockDuration      = 24 * time.Hour
+	DefaultRemoteBlockDuration      = 24 * time.Hour // not a timeout: a block window
 	DefaultRemoteBind               = "0.0.0.0:7422"
 	DefaultRemoteMaxUnauthenticated = 16
-	DefaultRemoteHandshakeTimeout   = 10 * time.Second
-	DefaultRemoteReconnectGrace     = 2 * time.Minute
-	DefaultRemoteDeviceKeyMaxAge    = 90 * 24 * time.Hour
+	DefaultRemoteHandshakeTimeout   = timeouts.RemoteHandshake
+	DefaultRemoteReconnectGrace     = timeouts.RemoteReconnectGrace
+	DefaultRemoteDeviceKeyMaxAge    = 90 * 24 * time.Hour // not a timeout: a key lifetime
 )
 
 // HostKeyPath is where the remote listener's host key lives: [remote]
@@ -869,22 +871,20 @@ const (
 	DefaultMaxSessionsGlobal  = 256
 	// DefaultSessionIdleTimeout closes an idle session, which also reaps the
 	// ones a crashed client left behind.
-	DefaultSessionIdleTimeout = 10 * time.Minute
+	DefaultSessionIdleTimeout = timeouts.SessionIdle
 )
 
 // Transaction bounds.
 const (
-	DefaultIdleInTxTimeout      = 2 * time.Hour
-	DefaultMaxTxDuration        = 8 * time.Hour
-	DefaultDebugIdleInTxTimeout = 2 * time.Hour
-	DefaultMaxTxDurationCeiling = 8 * time.Hour
+	DefaultIdleInTxTimeout      = timeouts.IdleInTransaction
+	DefaultMaxTxDuration        = timeouts.MaxTransaction
+	DefaultDebugIdleInTxTimeout = timeouts.IdleInTransaction
+	DefaultMaxTxDurationCeiling = timeouts.MaxTransactionCeiling
 
-	// Pool-lifecycle defaults are the engine's: idle 10m / lifetime 60m,
-	// so unused pools shrink to zero against a live production target. An
-	// earlier 5m/30m here was my own invention and contradicted the ADR
-	// without an amendment, which is not a call this code gets to make.
-	DefaultPoolMaxConnIdleTime = 10 * time.Minute
-	DefaultPoolMaxConnLifetime = 60 * time.Minute
+	// Pool-lifecycle defaults, so unused pools shrink to zero against a live
+	// production target.
+	DefaultPoolMaxConnIdleTime = timeouts.BackendIdle
+	DefaultPoolMaxConnLifetime = timeouts.BackendLifetime
 
 	// DefaultFrontDoorBind is the PostgreSQL port on loopback. Loopback and
 	// not 0.0.0.0: the default for a surface that speaks a protocol every
@@ -895,18 +895,18 @@ const (
 	// A tenth of the 90s idle-in-transaction bound: an expired transaction
 	// is rolled back within a few seconds of its deadline rather than at the
 	// next thing that happens to look.
-	DefaultJanitorInterval = 10 * time.Second
+	DefaultJanitorInterval = 10 * time.Second // not a timeout: an interval
 
 	// A minute. An unresolved outcome is not urgent the way a held lock is —
 	// nothing is blocked on it — and the startup pass is what recovers the
 	// crash window, so this cadence only governs entries whose target was
 	// unreachable when that pass ran.
-	DefaultReconcileInterval = time.Minute
+	DefaultReconcileInterval = time.Minute // not a timeout: an interval
 
 	// DefaultOutcomeRetentionInterval is the cadence used IF retention is
 	// enabled. It is deliberately slow: collapsing a settled transaction is
 	// never urgent, and the pass reads a slice of the outcome log.
-	DefaultOutcomeRetentionInterval = time.Hour
+	DefaultOutcomeRetentionInterval = time.Hour // not a timeout: an interval
 
 	// DefaultMetaPoolMaxConns bounds the meta store's own pool.
 	//
@@ -1129,8 +1129,8 @@ func unknownKeyWarning(path, key string) string {
 }
 
 // Warnings are what loading the configuration found worth saying but not
-// worth refusing: keys this release does not know. Whatever loaded the config
-// prints them.
+// worth refusing: keys this release does not know, and timeouts clamped to
+// their bound. Whatever loaded the config prints them.
 func (c Config) Warnings() []string { return c.warnings }
 
 // Load reads the configuration at path. An empty path resolves to
@@ -1193,7 +1193,59 @@ func Load(path string) (Config, error) {
 	// different fact from "this file", and a refusal that named a file which
 	// does not exist would send an operator to edit nothing.
 	cfg.sourcePath = path
+	cfg.deriveDebugIdleInTx()
+	cfg.clampToMaxBound()
 	return cfg, cfg.validate()
+}
+
+// boundedRow is one configured timeout held to timeouts.MaxBound, by its key.
+type boundedRow struct {
+	key string
+	val *Duration
+}
+
+// boundedRows is the one list of configured timeouts MaxBound covers: Load
+// clamps by it and validate refuses by it.
+func (c *Config) boundedRows() []boundedRow {
+	return []boundedRow{
+		{"exec.session_idle_timeout", &c.Exec.SessionIdleTimeout},
+		{"exec.idle_in_tx_timeout", &c.Exec.IdleInTxTimeout},
+		{"exec.max_tx_duration", &c.Exec.MaxTxDuration},
+		{"exec.debug_idle_in_tx_timeout", &c.Exec.DebugIdleInTxTimeout},
+		{"exec.max_tx_duration_ceiling", &c.Exec.MaxTxDurationCeiling},
+		{"exec.pool_max_conn_idle_time", &c.Exec.PoolMaxConnIdleTime},
+		{"exec.pool_max_conn_lifetime", &c.Exec.PoolMaxConnLifetime},
+	}
+}
+
+// clampToMaxBound lowers every bounded timeout above timeouts.MaxBound to it,
+// with a warning naming the key.
+//
+// CLAMPED ON LOAD, REFUSED BY Validate. A file written before the bound
+// existed (max_tx_duration = "8h" was the shipped default) must still start
+// the daemon and pass check-config; a caller that builds a Config itself and
+// never went through Load is refused instead. Every row is clamped together,
+// so session_idle_timeout = "3h" beside pool_max_conn_idle_time = "4h" still
+// passes the idle-vs-pool check once both are 2h.
+func (c *Config) clampToMaxBound() {
+	for _, r := range c.boundedRows() {
+		if r.val.Duration() > timeouts.MaxBound {
+			c.warnings = append(c.warnings, fmt.Sprintf("%s: %s = %v is above the %v every timeout is held to; "+
+				"it runs at %v — lower it in the file to silence this", c.sourcePath, r.key, r.val.Duration(),
+				timeouts.MaxBound, timeouts.MaxBound))
+			*r.val = Duration(timeouts.MaxBound)
+		}
+	}
+}
+
+// deriveDebugIdleInTx makes the deprecated debug key follow idle_in_tx_timeout
+// when the file set only the latter. The debug key selects nothing, and
+// validate refuses the two when they differ, so without this a file that never
+// mentioned the debug key would be refused for the default it did not write.
+func (c *Config) deriveDebugIdleInTx() {
+	if c.wasSet("exec", "idle_in_tx_timeout") && !c.wasSet("exec", "debug_idle_in_tx_timeout") {
+		c.Exec.DebugIdleInTxTimeout = c.Exec.IdleInTxTimeout
+	}
 }
 
 // isFilesystemError reports whether err is about REACHING the file rather than
@@ -1295,6 +1347,14 @@ func (c Config) validate() error {
 		if b.val <= 0 {
 			return fmt.Errorf("%w: %s %s must be positive — an unbounded transaction on a live "+
 				"database holds its locks until something else ends it", ErrInvalid, b.name, b.val.Duration())
+		}
+	}
+	// Load has already clamped these, so only a Config that bypassed Load
+	// reaches this refusal.
+	for _, r := range c.boundedRows() {
+		if r.val.Duration() > timeouts.MaxBound {
+			return fmt.Errorf("%w: %s is %v; no timeout may exceed %v",
+				ErrInvalid, r.key, r.val.Duration(), timeouts.MaxBound)
 		}
 	}
 	if c.Exec.MaxTxDuration > c.Exec.MaxTxDurationCeiling {

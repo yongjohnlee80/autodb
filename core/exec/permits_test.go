@@ -496,24 +496,6 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
-// The three copies of the transaction bounds must agree.
-//
-// They live in core/config, in this package's mirror, and in defaultTxLimits.
-// engine.go builds every Engine from the last one, so a change to the first
-// two alone is a NO-OP that the rest of the suite would report as green --
-// which is exactly why this asserts the identity rather than the values.
-func TestDefaultTxLimitsMatchTheDeclaredConstants(t *testing.T) {
-	l := defaultTxLimits()
-	if l.idleInTx != DefaultIdleInTxTimeout {
-		t.Errorf("defaultTxLimits idleInTx = %v, constant = %v — the copies have drifted",
-			l.idleInTx, DefaultIdleInTxTimeout)
-	}
-	if l.maxTx != DefaultMaxTxDuration {
-		t.Errorf("defaultTxLimits maxTx = %v, constant = %v — the copies have drifted",
-			l.maxTx, DefaultMaxTxDuration)
-	}
-}
-
 // The deprecated debug flag selects nothing: both states get the one common
 // bound, whatever the deprecated value says.
 func TestDebugFlagSelectsNothing(t *testing.T) {
@@ -549,11 +531,10 @@ func TestTheCeilingDoesNotClipTheRuledMaximum(t *testing.T) {
 	}
 }
 
-// The core/exec mirror of the policy defaults, pinned to literals.
+// The core/exec aliases of the policy defaults, pinned to literals.
 //
-// core/config carries the same numbers and pins them independently. Both are
-// literal on purpose: comparing one copy to the other passes when BOTH are
-// wrong, which is the failure mode a mirror invites.
+// core/config's aliases are pinned the same way. Literal on purpose: an alias
+// pointed at the wrong core/timeouts constant agrees with it perfectly.
 func TestExecPolicyMirrorIsTheRuledValues(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -561,14 +542,14 @@ func TestExecPolicyMirrorIsTheRuledValues(t *testing.T) {
 		want time.Duration
 	}{
 		{"session idle", DefaultSessionIdleTimeout, 10 * time.Minute},
-		{"idle in transaction", DefaultIdleInTxTimeout, 2 * time.Hour},
-		{"max transaction duration", DefaultMaxTxDuration, 8 * time.Hour},
-		{"max transaction ceiling", DefaultMaxTxDurationCeiling, 8 * time.Hour},
-		{"deprecated debug idle", DefaultDebugIdleInTxTimeout, 2 * time.Hour},
+		{"idle in transaction", DefaultIdleInTxTimeout, 30 * time.Minute},
+		{"max transaction duration", DefaultMaxTxDuration, 2 * time.Hour},
+		{"max transaction ceiling", DefaultMaxTxDurationCeiling, 2 * time.Hour},
+		{"deprecated debug idle", DefaultDebugIdleInTxTimeout, 30 * time.Minute},
 		{"pool idle", DefaultPoolMaxConnIdleTime, 10 * time.Minute},
 	} {
 		if tc.got != tc.want {
-			t.Errorf("%s = %v, want %v — the core/exec mirror has drifted from the ruled policy",
+			t.Errorf("%s = %v, want %v — the core/exec alias is not the ruled policy",
 				tc.name, tc.got, tc.want)
 		}
 	}

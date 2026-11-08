@@ -23,8 +23,8 @@ func goodSpec() PolicySpec {
 	return PolicySpec{
 		SessionIdleTimeout:   5 * time.Minute,
 		IdleInTxTimeout:      90 * time.Minute,
-		MaxTxDuration:        6 * time.Hour,
-		MaxTxDurationCeiling: 8 * time.Hour,
+		MaxTxDuration:        100 * time.Minute,
+		MaxTxDurationCeiling: 110 * time.Minute,
 	}
 }
 
@@ -90,7 +90,7 @@ func TestReloadPolicy_AnInvalidSpecChangesNothing(t *testing.T) {
 			MaxTxDurationCeiling: time.Hour}},
 		{"a max above the ceiling", func() PolicySpec {
 			s := goodSpec()
-			s.MaxTxDuration = 9 * time.Hour
+			s.MaxTxDuration = 115 * time.Minute // under MaxBound, so the ceiling is what refuses it
 			return s
 		}()},
 		{"a session idle longer than the pool's", func() PolicySpec {
@@ -157,8 +157,8 @@ func TestReloadPolicy_PublishesTheBoundsAsOneGeneration(t *testing.T) {
 		{"generation", got.PolicyGeneration, uint64(1)},
 		{"session idle", got.SessionIdleTimeout, 5 * time.Minute},
 		{"idle in tx", got.IdleInTxTimeout, 90 * time.Minute},
-		{"max tx", got.MaxTxDuration, 6 * time.Hour},
-		{"ceiling", got.MaxTxDurationCeiling, 8 * time.Hour},
+		{"max tx", got.MaxTxDuration, 100 * time.Minute},
+		{"ceiling", got.MaxTxDurationCeiling, 110 * time.Minute},
 	} {
 		if c.got != c.want {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
@@ -232,8 +232,8 @@ func TestReloadPolicy_SurvivesARestart(t *testing.T) {
 	}
 
 	got := restarted.Settings()
-	if got.IdleInTxTimeout != 90*time.Minute || got.MaxTxDuration != 6*time.Hour ||
-		got.SessionIdleTimeout != 5*time.Minute || got.MaxTxDurationCeiling != 8*time.Hour {
+	if got.IdleInTxTimeout != 90*time.Minute || got.MaxTxDuration != 100*time.Minute ||
+		got.SessionIdleTimeout != 5*time.Minute || got.MaxTxDurationCeiling != 110*time.Minute {
 		t.Errorf("the restarted engine is running the configured policy, not the reloaded one: %+v", got)
 	}
 	if got.PolicyGeneration != 1 {
@@ -286,7 +286,7 @@ func TestReloadPolicy_AuditsTheChangeWithoutSecrets(t *testing.T) {
 	detail := rows[0]
 	// BEFORE AS WELL AS AFTER. "set to 90m" does not tell a reader whether
 	// anything actually changed.
-	for _, want := range []string{"generation 0 -> 1", "2h0m0s -> 1h30m0s"} {
+	for _, want := range []string{"generation 0 -> 1", "30m0s -> 1h30m0s"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("the audit detail is missing %q:\n%s", want, detail)
 		}
@@ -315,7 +315,7 @@ func TestReloadPolicy_RefusesADurationItCannotPersistExactly(t *testing.T) {
 	}{
 		{"a sub-millisecond idle bound", func(s *PolicySpec) { s.IdleInTxTimeout = 90*time.Minute + time.Nanosecond }},
 		{"a sub-millisecond session bound", func(s *PolicySpec) { s.SessionIdleTimeout = 5*time.Minute + 500*time.Microsecond }},
-		{"a sub-millisecond maximum", func(s *PolicySpec) { s.MaxTxDuration = 6*time.Hour + time.Microsecond }},
+		{"a sub-millisecond maximum", func(s *PolicySpec) { s.MaxTxDuration = 100*time.Minute + time.Microsecond }},
 	} {
 		spec := goodSpec()
 		c.mut(&spec)

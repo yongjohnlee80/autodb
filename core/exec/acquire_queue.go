@@ -2,7 +2,8 @@ package exec
 
 import (
 	"errors"
-	"time"
+
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // A REQUEST THAT CANNOT HAVE A CONNECTION NOW WAITS ITS TURN, AND THE TURN IS
@@ -36,7 +37,7 @@ import (
 // for an answer. Tying the two together meant a policy change about
 // transaction tolerance silently became a policy change about request latency.
 // This is its own fixed server policy, and it is not a developer knob.
-const queueWait = 90 * time.Second
+const queueWait = timeouts.QueueWait
 
 // The front door's answer has to be written while the credential deadline
 // (frontdoor/auth.go) still lets it, so each stage of opening a session stops
@@ -44,15 +45,15 @@ const queueWait = 90 * time.Second
 const (
 	// pinAllowance is what the session line leaves the pin: the dial, TLS,
 	// startup, the encoding check and the startup parameters.
-	pinAllowance = 2 * time.Second
+	pinAllowance = timeouts.PinAllowance
 	// handshakeReserve is what the pin leaves for writing the handshake or the
 	// refusal before the credential deadline closes the socket.
-	handshakeReserve = 2 * time.Second
+	handshakeReserve = timeouts.HandshakeReserve
 )
 
 // strayBackendIdle reaps a pool backend whose acquirer left while it was being
 // dialled: pgxpool's MaxConnIdleTime and HealthCheckPeriod for a pooled target.
-const strayBackendIdle = 1 * time.Second
+const strayBackendIdle = timeouts.StrayBackendIdle
 
 // ErrQueueTimeout is a request that waited its turn and never reached the head
 // in time.

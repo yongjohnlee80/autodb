@@ -13,6 +13,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // THE EXTENDED-QUERY ROUTING (F2's wire half, matrix §4).
@@ -759,7 +760,7 @@ const ruleSegmentCap = "frontdoor/segment-cap"
 // outputStall measures one that will not take what it is being sent, and this
 // measures one that asked for output and then left the segment open. Sharing a
 // constant would make a later change to one silently change the others.
-const segmentStallBudget = 30 * time.Second
+const segmentStallBudget = timeouts.SegmentStall
 
 // segmentStall is the effective segment budget, so a cell can shorten it and
 // still exercise the real enforcement path.

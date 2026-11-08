@@ -67,7 +67,7 @@ var ErrReaderAdvancedPattern = errors.New("exec: read-only sessions may not call
 // udfCacheTTL bounds how long a target's user-function set is trusted without
 // a refresh. DDL that runs THROUGH autodb invalidates immediately; DDL applied
 // outside autodb is seen within this window.
-const udfCacheTTL = 60 * time.Second
+const udfCacheTTL = 60 * time.Second // not a timeout: a cache lifetime
 
 // udfSet is a target's user-defined routines: every function and procedure
 // outside pg_catalog and information_schema, by bare name (exact, as stored —

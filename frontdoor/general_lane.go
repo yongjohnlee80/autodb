@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/autodb/core/config"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // THE GENERAL LANE — the process-wide resident-memory budget (matrix §1.4, §8.1).
@@ -154,7 +155,7 @@ const DefaultGeneralLaneBytes = config.DefaultGeneralLaneBytes
 
 // generalLaneWaitBudget bounds how long one connection waits for another to
 // release before it stops holding a statement open. Policy, not a matrix figure.
-const generalLaneWaitBudget = 30 * time.Second
+const generalLaneWaitBudget = timeouts.MemoryLaneWait
 
 // GENERAL-LANE FLOOR (matrix §1.4's composition rule, ruled 2026-09-03).
 //

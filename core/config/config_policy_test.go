@@ -8,16 +8,11 @@ import (
 	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
-// The bounds live in core/config and are mirrored in core/exec, which is
-// deliberate -- core/config must depend on nothing there. The mirror is
-// therefore unenforced by the compiler, and this is what enforces it.
+// The bounds' values live in core/timeouts; core/config and core/exec alias
+// them. These pin the aliases to the ruled values.
 //
-// A DRIFT HERE IS SILENT AND EXPENSIVE. The engine builds every session from
-// the core/exec copy, so a change made only in core/config leaves the daemon
-// running the old policy while the configuration reports the new one.
-//
-// Literal expectations, not a comparison of one constant to another: two
-// copies of a wrong number agree with each other perfectly.
+// Literal expectations, not a comparison of one constant to another: an alias
+// pointed at the wrong timeout agrees with that timeout perfectly.
 func TestPolicyDefaultsAreTheRuledValues(t *testing.T) {
 	t.Parallel()
 
@@ -27,10 +22,10 @@ func TestPolicyDefaultsAreTheRuledValues(t *testing.T) {
 		want time.Duration
 	}{
 		{"session idle", config.DefaultSessionIdleTimeout, 10 * time.Minute},
-		{"idle in transaction", config.DefaultIdleInTxTimeout, 2 * time.Hour},
-		{"max transaction duration", config.DefaultMaxTxDuration, 8 * time.Hour},
-		{"max transaction ceiling", config.DefaultMaxTxDurationCeiling, 8 * time.Hour},
-		{"deprecated debug idle", config.DefaultDebugIdleInTxTimeout, 2 * time.Hour},
+		{"idle in transaction", config.DefaultIdleInTxTimeout, 30 * time.Minute},
+		{"max transaction duration", config.DefaultMaxTxDuration, 2 * time.Hour},
+		{"max transaction ceiling", config.DefaultMaxTxDurationCeiling, 2 * time.Hour},
+		{"deprecated debug idle", config.DefaultDebugIdleInTxTimeout, 30 * time.Minute},
 		{"pool idle", config.DefaultPoolMaxConnIdleTime, 10 * time.Minute},
 	} {
 		if tc.got != tc.want {
@@ -56,12 +51,11 @@ func TestPolicyDefaultsAreTheRuledValues(t *testing.T) {
 	}
 }
 
-// THE TWO COPIES MUST AGREE, asserted across the package boundary.
+// THE TWO PACKAGES' ALIASES MUST AGREE, asserted across the package boundary.
 //
-// core/exec deliberately mirrors these rather than importing core/config, so
-// nothing but a test can catch a drift — and the engine builds every session
-// from the exec copy, so a drift means the daemon runs one policy while the
-// configuration reports another.
+// Each aliases a core/timeouts constant, and the engine builds every session
+// from core/exec's: an alias pointed at a different constant would have the
+// daemon run one policy while the configuration reports another.
 func TestConfigAndExecPolicyCopiesAgree(t *testing.T) {
 	t.Parallel()
 
@@ -77,7 +71,7 @@ func TestConfigAndExecPolicyCopiesAgree(t *testing.T) {
 		{"pool idle", config.DefaultPoolMaxConnIdleTime, exec.DefaultPoolMaxConnIdleTime},
 	} {
 		if tc.cfg != tc.exe {
-			t.Errorf("%s: core/config has %v, core/exec has %v — the copies have drifted",
+			t.Errorf("%s: core/config has %v, core/exec has %v — the aliases differ",
 				tc.name, tc.cfg, tc.exe)
 		}
 	}

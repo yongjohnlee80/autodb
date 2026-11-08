@@ -16,18 +16,24 @@ here in full.
 | Setting | Value | What it governs |
 | --- | ---: | --- |
 | `exec.session_idle_timeout` | **10 min** | An idle session with no open transaction |
-| `exec.idle_in_tx_timeout` | **2 h** | Idle *inside* an open transaction |
-| `exec.max_tx_duration` | **8 h** | Total wall-clock life of one transaction |
-| `exec.max_tx_duration_ceiling` | **8 h** | Hard cap on the line above |
+| `exec.idle_in_tx_timeout` | **30 min** | Idle *inside* an open transaction |
+| `exec.max_tx_duration` | **2 h** | Total wall-clock life of one transaction |
+| `exec.max_tx_duration_ceiling` | **2 h** | Hard cap on the line above |
 
 Socket budgets are not in this table: they are per connection pool, in the
 meta store (*Connection pools* below).
 
+**No timeout exceeds two hours** (Johno, 2026-11-07: no transaction should run
+longer than 2 hours). A policy reload above 2 h is refused, naming the setting.
+A config file or a stored policy above it still starts the daemon: the value is
+clamped to 2 h with a warning, and a clamped stored policy is re-written with a
+`policy_clamped` audit row. Every timeout's value lives in one Go package,
+`core/timeouts`.
+
 **The two transaction bounds do different jobs.** The idle bound catches the
 *abandoned* transaction — someone opens one and walks away, and it is gone in
-two hours whatever the total says. The duration bound protects the *long but
-attended* one. So a forgotten transaction costs two hours rather than eight,
-and nothing survives overnight.
+thirty minutes whatever the total says, and the pool capacity it held is free
+again. The duration bound caps the *long but attended* one at two hours.
 
 **The session bound is short on purpose.** An idle session holding no
 transaction is the only thing that can be reclaimed freely, so a long bound
@@ -95,12 +101,12 @@ An open transaction that has been idle for thirty minutes writes a high-severity
 `idle_in_transaction_holder` audit record, and another every thirty minutes
 after that until it either does something or is reclaimed.
 
-This is what makes a two-hour idle bound safe to have. The bound is generous
+This is what makes a long idle bound safe to have. The bound is generous
 because a developer debugging needs to think rather than race a clock — but
 generous bounds are only safe if somebody can see what is holding a lock while
 it is still holding it. Previously a holder was invisible until the moment it
-was reclaimed, so the trail recorded the ending and never the two hours of
-waiting that led there.
+was reclaimed, so the trail recorded the ending and never the wait that led
+there.
 
 Each record carries who is holding it, from where, since when, which token
 identifies them, how many other backends that same account is holding, how many

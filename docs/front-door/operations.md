@@ -26,8 +26,8 @@ Everything the scripts do, and why. For a guided walkthrough start with the
   a client's connection pool holds several, bounded by its connection pool's
   front-door share, not per user. Abandoned
   transactions cannot sit on production locks forever: a session idle inside a
-  transaction is rolled back after `idle_in_tx_timeout` (default **2 h**), and no
-  transaction outlives `max_tx_duration` (default **8 h**). Both live in `[exec]`
+  transaction is rolled back after `idle_in_tx_timeout` (default **30 min**), and no
+  transaction outlives `max_tx_duration` (default **2 h**, the most any timeout may be). Both live in `[exec]`
   in [`config.example.toml`](../../config.example.toml). Every timeout rollback
   is audited with the limit that fired.
 - **Refusals explain themselves.** An autodb-layer refusal carries an accurate
