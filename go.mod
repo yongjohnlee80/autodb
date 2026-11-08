@@ -1,6 +1,6 @@
 module github.com/yongjohnlee80/autodb
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/BurntSushi/toml v1.6.0
@@ -11,35 +11,35 @@ require (
 	github.com/lib/pq v1.12.3
 	// v0.5.23 carries postgres.Destroyer, which the release gate requires of
 	// every pin. main pins v0.5.22, which predates it.
-	github.com/yongjohnlee80/golib v0.7.43
-	golang.org/x/crypto v0.55.0
-	golang.org/x/term v0.45.0
+	github.com/yongjohnlee80/golib v0.8.38
+	golang.org/x/crypto v0.57.0
+	golang.org/x/term v0.46.0
 )
 
-require github.com/yongjohnlee80/golib/gui v0.2.26
+require github.com/yongjohnlee80/golib/gui v0.3.15
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	gioui.org/shader v1.0.9 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/go-text/typesetting v0.3.5 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/ncruces/go-strftime v1.1.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/yongjohnlee80/gio v0.1.4 // indirect
+	github.com/yongjohnlee80/gio v0.1.6 // indirect
 	golang.org/x/exp/shiny v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/image v0.45.0 // indirect
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
-	modernc.org/libc v1.72.3 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
+	modernc.org/libc v1.79.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.52.0 // indirect
+	modernc.org/memory v1.12.1 // indirect
+	modernc.org/sqlite v1.61.1 // indirect
 )
