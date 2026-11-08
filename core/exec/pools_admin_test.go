@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -226,5 +227,43 @@ func TestWithDefaultPoolMax_SizesTheDefaultPoolsShare(t *testing.T) {
 	}
 	if err := e.sessions.admitWithLease(&session{id: "second", userID: 2, connID: 5}, 5, 0); !errors.Is(err, ErrLeaseCapExceeded) {
 		t.Fatalf("a second front-door session in a share of 1 = %v, want ErrLeaseCapExceeded", err)
+	}
+}
+
+// A POSTGRESQL CONNECTION IN A POOL NEVER REUSES ITS BACKENDS: an idle one
+// would hold a pool permit no other database in the pool could use.
+func TestReuse_APooledTargetNeverReusesItsBackends(t *testing.T) {
+	t.Parallel()
+	e := New(nil, nil)
+	e.pools.setPoolOf(&meta.Connection{ID: 5, Engine: engine.Postgres, PoolID: meta.DefaultPoolID})
+	e.pools.setPoolOf(&meta.Connection{ID: 6, Engine: engine.SQLite, PoolID: meta.DefaultPoolID})
+	// Positive control: a connection outside every pool keeps reuse, so the
+	// rule answers both ways and the assertion below is not vacuous.
+	if !e.reusesBackend(6) {
+		t.Fatal("a SQLite connection, outside every pool, does not reuse its backends")
+	}
+	if e.reusesBackend(5) {
+		t.Error("a PostgreSQL connection in a pool reuses its backends; an idle one would hold a " +
+			"pool permit no other database in the pool can use")
+	}
+}
+
+// A REGISTRATION FROM A STALE ROW CANNOT UNDO A MOVE. The open path registers
+// a connection from a row it read earlier; a move that landed in between must
+// stand.
+func TestPoolAdmin_ARegistrationFromAStaleRowCannotUndoAMove(t *testing.T) {
+	t.Parallel()
+	p := newPoolSet(8)
+	if err := p.setPool(&meta.ConnectionPool{ID: 2, Name: "prod", MaxConns: 10}); err != nil {
+		t.Fatal(err)
+	}
+	stale := &meta.Connection{ID: 5, Engine: engine.Postgres, PoolID: meta.DefaultPoolID}
+	p.setPoolOf(stale)
+	moved := *stale
+	moved.PoolID = 2
+	p.setPoolOf(&moved)   // the move
+	p.ensurePoolOf(stale) // an open that read the row before it
+	if key, _ := p.leaseScope(5); key != (leaseKey{pool: 2}) {
+		t.Errorf("connection 5 scopes to %+v after the move, want pool 2: a stale row undid the move", key)
 	}
 }
