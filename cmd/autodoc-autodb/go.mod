@@ -5,7 +5,7 @@ go 1.26.10
 require (
 	github.com/yongjohnlee80/autodb v0.0.0
 	github.com/yongjohnlee80/autodoc v0.1.59
-	github.com/yongjohnlee80/golib v0.8.38
+	github.com/yongjohnlee80/golib v0.8.39
 )
 
 require (
