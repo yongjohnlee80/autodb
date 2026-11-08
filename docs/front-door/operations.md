@@ -15,8 +15,16 @@ Everything the scripts do, and why. For a guided walkthrough start with the
 - **Read and write, gated by role.** `editor` users run the application's real
   traffic through the full gate stack. `reader` users are pinned inside
   server-enforced read-only transactions.
+- **Connection pools bound what autodb holds on each database server.** Every
+  connection belongs to a pool (`default`, 25 sockets, until an admin moves
+  it), and the sockets autodb holds to a pool's databases together never exceed
+  its max. A client's own connection pool needs no sizing: sessions beyond the
+  pool's front-door share wait their turn, and a full pool answers `53300`,
+  never a credential error. See
+  [connection-holding-policy.md](connection-holding-policy.md).
 - **Transactions behave like PostgreSQL.** One open transaction per connection;
-  a connection pool holds several, bounded by per-user session caps. Abandoned
+  a client's connection pool holds several, bounded by its connection pool's
+  front-door share, not per user. Abandoned
   transactions cannot sit on production locks forever: a session idle inside a
   transaction is rolled back after `idle_in_tx_timeout` (default **2 h**), and no
   transaction outlives `max_tx_duration` (default **8 h**). Both live in `[exec]`

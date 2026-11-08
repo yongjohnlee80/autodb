@@ -393,8 +393,9 @@ flowchart TD
     B & C & D & E & F & G & H & I & J & K --> X["uniform denial 28000<br/>close · reason audited only"]
 ```
 
-The reservation is **one operation**: per-user session slot (8), global slot
-(256), target lease (`frontdoor_max_leases`) and the session's fixed overhead
+The reservation is **one operation**: global slot (256, less 16 kept for exec
+and the TUI), the connection pool's front-door lease (its front-door share; a
+front-door session is not counted per user) and the session's fixed overhead
 charge. Partial reservation is impossible; failure holds nothing.
 
 **The IP admission rule** (ADR-0075 Amendment 1) is an **OR**, not an AND:
@@ -956,7 +957,7 @@ different limits and will move for different reasons.
 | Global budget 1 GiB / 4 GiB (+ control lane §1.4) | §8 |
 | Pre-auth conns 64 / auth workers 16 | accept + §2 (the pre-auth slot is RETURNED at authentication, not at close: it bounds anonymous connections, and holding it for a session's life would let a few long-lived legitimate sessions consume the allowance that keeps half-open ones from starving them) |
 | Auth attempts **1/conn**, **10 FAILED/min/IP** (rev 5) | §2 row 2.7 |
-| `reserved_headroom` 4; `frontdoor_max_leases` derived ≥ 1 | the row-2.7 atomic reservation (row 2.9 acquires nothing; any later target checkout is NOT admission control and can neither race nor emit `fd.auth_ok` before capacity is held) |
+| connection pool's front-door share (pool max − 1 − min(max/2, 4)) ≥ 1 | the row-2.7 atomic reservation (row 2.9 acquires nothing; any later target checkout is NOT admission control and can neither race nor emit `fd.auth_ok` before capacity is held) |
 
 ---
 

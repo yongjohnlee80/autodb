@@ -5,6 +5,13 @@ setting.**
 
 ## What this is about
 
+> **Since connection pools, `exec.max_target_conns` is retired.** Socket
+> budgets are per connection pool in the meta store, and a config that still
+> sets the key loads with a warning. The hazard below is history: the
+> upgrade-path cell (`TestUpgradePath_AnOldConfigLoads`) now asserts that every
+> qualifying old tag's config loads with today's code. The policy still stands
+> for any setting that becomes required later.
+
 `exec.max_target_conns` became **required** in `v0.3.15`, a patch release, and
 `v0.3.16`/`v0.3.17` inherit it. Every host still on `<= v0.3.14` with the front
 door enabled meets that requirement for the first time *during an update*.
