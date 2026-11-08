@@ -1145,6 +1145,7 @@ func All() []Mutation {
 			Test:        "TestASharesSocketsAreItsOwn",
 			Fails:       "a fourth front-door dial must be refused",
 			Guarantee:   "that each share of a pool is bounded by itself, so exec can't take the sockets the session line admitted front-door sessions against, nor a full front door those autodb's own queries need",
+			Race:        true,
 		},
 		{
 			Name: "a-share-line-is-first-come", Package: "./core/exec/", File: "core/exec/permits.go",
@@ -1153,6 +1154,7 @@ func All() []Mutation {
 			Test:        "TestAFullShareServesItsLineInOrder",
 			Fails:       "the line is not first come first served",
 			Guarantee:   "that a released slot goes to the share's oldest waiter, so an old dial can't lose every race and time out beside newer ones that succeed",
+			Race:        true,
 		},
 		{
 			Name: "a-caller-that-leaves-leaves-the-line", Package: "./core/exec/", File: "core/exec/permits.go",
@@ -1161,6 +1163,7 @@ func All() []Mutation {
 			Test:        "TestAWaiterThatGivesUpLeavesTheLine",
 			Fails:       "left in line after the caller gave up",
 			Guarantee:   "that a dial whose caller gave up leaves its share's line, so no permit is taken for nobody and parked idle",
+			Race:        true,
 		},
 		{
 			Name: "a-raise-serves-the-lines", Package: "./core/exec/", File: "core/exec/permits.go",
@@ -1169,6 +1172,7 @@ func All() []Mutation {
 			Test:        "TestARaiseServesWaitersAtOnce",
 			Fails:       "a raise left waiters in line beside free slots",
 			Guarantee:   "that raising a pool's max serves both shares' waiters at once rather than leaving them beside free slots",
+			Race:        true,
 		},
 		{
 			Name: "a-pool-backend-is-never-reused", Package: "./core/exec/", File: "core/exec/release_gate.go",
