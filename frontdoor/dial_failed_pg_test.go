@@ -139,7 +139,11 @@ func assertLivePgError(t *testing.T, err error) {
 }
 
 // dialFaultConn opens a real pgconn to the faulted front door.
-func dialFaultConn(t *testing.T, ctx context.Context, addr, secret, database string) *pgconn.PgConn {
+//
+// A refused connect names the listener's own record of why: the wire says only
+// the fixed literal, and an intermittent startup refusal is otherwise
+// undiagnosable from the run that saw it.
+func dialFaultConn(t *testing.T, ctx context.Context, addr, secret, database string, events func() []Event) *pgconn.PgConn {
 	t.Helper()
 	host, port, ok := strings.Cut(addr, ":")
 	if !ok {
@@ -153,7 +157,11 @@ func dialFaultConn(t *testing.T, ctx context.Context, addr, secret, database str
 	cfg.TLSConfig.InsecureSkipVerify = true // the cell's own listener is self-signed
 	conn, err := pgconn.ConnectConfig(ctx, cfg)
 	if err != nil {
-		t.Fatalf("connecting: %v", err)
+		var trail []string
+		for _, e := range events() {
+			trail = append(trail, fmt.Sprintf("%s reason=%s detail=%s", e.Kind, e.Reason, e.Detail))
+		}
+		t.Fatalf("connecting: %v\nthe listener's events: %s", err, strings.Join(trail, "; "))
 	}
 	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	return conn
@@ -166,7 +174,7 @@ func TestDialFailedPG_PgxKeepsTheSessionAcrossASimpleQueryFailure(t *testing.T) 
 	defer cancel()
 
 	_, addr, secret, database, events := dialFaultLoop(t)
-	conn := dialFaultConn(t, ctx, addr, secret, database)
+	conn := dialFaultConn(t, ctx, addr, secret, database, events)
 
 	if _, err := conn.Exec(ctx, "SELECT 1 "+dialFaultMarker).ReadAll(); err == nil {
 		t.Fatal("the armed acquisition produced no error")
@@ -218,8 +226,8 @@ func TestDialFailedPG_PgxKeepsTheSessionAcrossAnExtendedFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	_, addr, secret, database, _ := dialFaultLoop(t)
-	conn := dialFaultConn(t, ctx, addr, secret, database)
+	_, addr, secret, database, events := dialFaultLoop(t)
+	conn := dialFaultConn(t, ctx, addr, secret, database, events)
 
 	failed := conn.ExecParams(ctx, "SELECT $1::int AS n "+dialFaultMarker, [][]byte{[]byte("7")}, nil, nil, nil).Read()
 	if failed.Err == nil {

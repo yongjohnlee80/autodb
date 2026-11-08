@@ -62,7 +62,7 @@ func TestConnectionUnusablePG_PgxKeepsTheSessionAndLearnsNothing(t *testing.T) {
 	_, events, addr := listenerWith(t, Options{
 		Authn: h.eng, Queries: q, AuthFailuresPerIP: unthrottled,
 	})
-	conn := dialFaultConn(t, ctx, addr, h.secret, h.database)
+	conn := dialFaultConn(t, ctx, addr, h.secret, h.database, events)
 
 	_, err := conn.Exec(ctx, "SELECT 1 "+configFaultMarker).ReadAll()
 	if err == nil {
