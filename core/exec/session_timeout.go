@@ -11,6 +11,7 @@ import (
 	"github.com/yongjohnlee80/golib/dao"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // Transaction timeouts.
@@ -37,7 +38,7 @@ import (
 // It covers the reaper's tick, not a proportion of the bound, so it does NOT
 // scale with the timeout: at a two-hour idle bound thirty seconds is as
 // sufficient as it was at ninety.
-const serverBeltMarginDefault = 30 * time.Second
+const serverBeltMarginDefault = timeouts.ServerBeltMargin
 
 // txLimits are the bounds on one session's transaction.
 type txLimits struct {
@@ -437,7 +438,7 @@ func (e *Engine) rollbackDemotedOwned(
 // to stop after being cancelled. With the statement running on a context the
 // engine controls, cancellation reaches the driver, so this is an outer bound
 // on a fast path rather than an expected wait.
-const quiesceTimeout = 10 * time.Second
+const quiesceTimeout = timeouts.Quiesce
 
 // StartJanitor runs the reaper until ctx is done. The daemon calls it once;
 // tests call reapExpired directly with their own clock.
@@ -446,7 +447,7 @@ func (e *Engine) StartJanitor(ctx context.Context, every time.Duration) {
 	// between sweeps -- a deadline nothing looks at in time is not a deadline.
 	e.janitorSweep.Store(int64(every))
 	if every <= 0 {
-		every = 15 * time.Second
+		every = 15 * time.Second // not a timeout: the janitor's default tick
 	}
 	go func() {
 		t := time.NewTicker(every)

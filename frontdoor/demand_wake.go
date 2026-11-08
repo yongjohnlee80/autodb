@@ -63,7 +63,7 @@ import (
 // exists to avoid.
 func knockFor(conn net.Conn, now func() time.Time) func() {
 	return func() {
-		if err := conn.SetReadDeadline(now().Add(-time.Second)); err != nil {
+		if err := conn.SetReadDeadline(now().Add(-time.Second)); err != nil { // not a timeout: the knock, a deadline in the past
 			// THE KNOCK FAILED, SO THE DOOR COMES OFF ITS HINGES. The session
 			// is already reserved for termination; if the owner never wakes,
 			// that reservation is inert and its lease is held forever by a

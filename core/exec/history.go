@@ -188,7 +188,7 @@ func (e *Engine) SearchHistory(ctx context.Context, token string, f HistoryFilte
 			// script_history.started_at is unix SECONDS (see meta), not
 			// millis — reading it as millis dated every run to 1970.
 			StartedAt: time.Unix(r.StartedAt, 0),
-			Duration:  time.Duration(r.DurationMS) * time.Millisecond,
+			Duration:  time.Duration(r.DurationMS) * time.Millisecond, // not a timeout: unit conversion
 			RowCount:  r.RowCount, Status: string(r.Status), Error: r.Error,
 			// Through the entity's own predicate rather than by comparing the
 			// stored integer here: the 0/1-on-both-engines convention has one

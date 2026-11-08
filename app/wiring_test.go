@@ -601,10 +601,10 @@ func TestPolicyRules_TheReloadAgreesWithTheConfigFile(t *testing.T) {
 			MaxSessionsPerUser:   8,
 			MaxSessionsGlobal:    256,
 			SessionIdleTimeout:   config.Duration(10 * time.Minute),
-			IdleInTxTimeout:      config.Duration(2 * time.Hour),
-			MaxTxDuration:        config.Duration(8 * time.Hour),
-			DebugIdleInTxTimeout: config.Duration(2 * time.Hour),
-			MaxTxDurationCeiling: config.Duration(8 * time.Hour),
+			IdleInTxTimeout:      config.Duration(30 * time.Minute),
+			MaxTxDuration:        config.Duration(100 * time.Minute),
+			DebugIdleInTxTimeout: config.Duration(30 * time.Minute),
+			MaxTxDurationCeiling: config.Duration(110 * time.Minute),
 			PoolMaxConns:         20,
 			PoolMaxConnIdleTime:  config.Duration(10 * time.Minute),
 			PoolMaxConnLifetime:  config.Duration(60 * time.Minute),
@@ -634,7 +634,16 @@ func TestPolicyRules_TheReloadAgreesWithTheConfigFile(t *testing.T) {
 		{"the baseline itself", func(*config.Exec) {}},
 		{"a zero idle-in-transaction bound", func(e *config.Exec) { e.IdleInTxTimeout = 0; e.DebugIdleInTxTimeout = 0 }},
 		{"a zero session idle bound", func(e *config.Exec) { e.SessionIdleTimeout = 0 }},
-		{"a maximum above the ceiling", func(e *config.Exec) { e.MaxTxDuration = config.Duration(9 * time.Hour) }},
+		{"a maximum above the ceiling", func(e *config.Exec) { e.MaxTxDuration = config.Duration(115 * time.Minute) }},
+		{"a maximum above MaxBound", func(e *config.Exec) {
+			e.MaxTxDuration = config.Duration(3 * time.Hour)
+			e.MaxTxDurationCeiling = config.Duration(3 * time.Hour)
+		}},
+		{"a session idle above MaxBound", func(e *config.Exec) {
+			e.SessionIdleTimeout = config.Duration(3 * time.Hour)
+			e.PoolMaxConnIdleTime = config.Duration(3 * time.Hour)
+			e.PoolMaxConnLifetime = config.Duration(3 * time.Hour)
+		}},
 		{"a session idle longer than the pool's", func(e *config.Exec) { e.SessionIdleTimeout = config.Duration(11 * time.Minute) }},
 		{"an idle bound below the sweep interval", func(e *config.Exec) {
 			e.IdleInTxTimeout = config.Duration(5 * time.Second)

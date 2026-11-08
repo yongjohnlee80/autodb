@@ -31,7 +31,7 @@ const (
 
 	// idleHolderCadence is the heartbeat interval: 30m, 60m, 90m, and so on
 	// until the episode ends (Johno's ruling, 2026-09-15).
-	idleHolderCadence = 30 * time.Minute
+	idleHolderCadence = 30 * time.Minute // not a timeout: the announcement interval
 
 	// statementPreviewBytes bounds the ESCAPED preview. An audit row is not a
 	// place to store a megabyte of generated SQL, and an unbounded field in a
@@ -214,7 +214,7 @@ func (h idleHolder) render() string {
 // between the two, not information about the holder. `idle_age=30m0.00000019s`
 // is also simply worse to read and to grep for than `idle_age=30m0s`.
 func durationField(d time.Duration) string {
-	return d.Truncate(time.Second).String()
+	return d.Truncate(time.Second).String() // not a timeout: formatting
 }
 
 func quoteOrNull(s string) string {

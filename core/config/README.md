@@ -295,10 +295,10 @@ Configures the SQL execution engine and connection pool boundaries.
 | `max_sessions_per_user`| integer | `8` | Maximum concurrent execution sessions per user identity. |
 | `max_sessions_global` | integer | `256` | Maximum concurrent execution sessions across all users. |
 | `session_idle_timeout` | duration | `"10m"` | Inactivity duration before an idle execution session is reaped. |
-| `idle_in_tx_timeout` | duration | `"2h"` | Maximum time an open transaction may remain idle between statements. |
-| `max_tx_duration` | duration | `"8h"` | Maximum total lifetime of any open transaction before automated rollback. |
-| `debug_idle_in_tx_timeout`| duration | `"2h"` | Deprecated transaction idle timeout for debug connections. |
-| `max_tx_duration_ceiling` | duration | `"8h"` | Upper bound for per-connection transaction duration overrides. |
+| `idle_in_tx_timeout` | duration | `"30m"` | Maximum time an open transaction may remain idle between statements. |
+| `max_tx_duration` | duration | `"2h"` | Maximum total lifetime of any open transaction before automated rollback. |
+| `debug_idle_in_tx_timeout`| duration | `"30m"` | Deprecated; selects nothing. Follows `idle_in_tx_timeout` when only that is set. |
+| `max_tx_duration_ceiling` | duration | `"2h"` | Upper bound for per-connection transaction duration overrides. |
 | `pool_max_conns` | integer | `2 × NumCPU` | Maximum physical database connections per target pool. |
 | `pool_max_conn_idle_time`| duration | `"10m"` | Time before an unused pooled connection is closed. |
 | `pool_max_conn_lifetime` | duration | `"60m"` | Maximum duration a pooled connection is kept alive. |

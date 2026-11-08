@@ -44,7 +44,7 @@ import (
 // txReconcileBackoff is the per-entry retry floor. An entry whose target is
 // unreachable would otherwise be re-probed on every pass, turning a down
 // database into a tight loop of connection attempts against it.
-const txReconcileBackoff = 30 * time.Second
+const txReconcileBackoff = 30 * time.Second // not a timeout: a backoff
 
 // reconciler holds the cross-pass state: which entries are in flight right
 // now, and when each may next be attempted.

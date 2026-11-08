@@ -85,16 +85,16 @@ func TestHistogram_ASampleAtEachBoundIsCountable(t *testing.T) {
 	}{
 		{"the 90s queue deadline", QueueWaitEdgesMs, 90 * time.Second},
 		{"the 10m session idle bound", BackendHoldEdgesMs, 10 * time.Minute},
-		{"the 2h idle-in-transaction bound", BackendHoldEdgesMs, 2 * time.Hour},
-		{"the 8h total transaction bound", BackendHoldEdgesMs, 8 * time.Hour},
+		{"the 30m idle-in-transaction bound", BackendHoldEdgesMs, 30 * time.Minute},
+		{"the 2h total transaction bound", BackendHoldEdgesMs, 2 * time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ms := tc.at.Milliseconds()
 
 			// THE BOUND IS AN EDGE, EXACTLY. "not in +Inf" is too weak and a
-			// control proved it: the hold set carries 12h of headroom above
-			// the 8h bound, so deleting the 8h edge still leaves an 8h sample
-			// countable — in the WRONG bin, lumped with everything up to 12h.
+			// control proved it: the hold set carries headroom above the 2h
+			// bound, so deleting the 2h edge still leaves a 2h sample
+			// countable — in the WRONG bin, lumped with everything up to 4h.
 			// An operator asking "are holds piling up AT the bound" would read
 			// that as fine.
 			var idx = -1

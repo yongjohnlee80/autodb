@@ -16,6 +16,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // Transaction verbs are STATE TRANSITIONS, never passthrough.
@@ -599,7 +600,7 @@ func describeTxOptions(o dao.TxOptions) string {
 }
 
 // txCleanupTimeout bounds a commit or rollback taken on a fresh context.
-const txCleanupTimeout = 30 * time.Second
+const txCleanupTimeout = timeouts.TxCleanup
 
 // quiesce stops the in-flight statement and waits for it to actually stop.
 //
@@ -670,4 +671,4 @@ func (e *Engine) auditBoundedErr(ctx context.Context, userID int64, ip, action, 
 // auditTimeout bounds a cleanup audit. Generous, because losing the record of
 // why a transaction ended is a real loss — but bounded, because a teardown
 // that cannot finish is a worse one.
-const auditTimeout = 10 * time.Second
+const auditTimeout = timeouts.AuditWrite

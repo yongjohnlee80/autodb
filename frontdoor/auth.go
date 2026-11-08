@@ -9,13 +9,13 @@ import (
 	"net"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/outcome"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // Authentication and session open (protocol matrix rows 2.6-2.9).
@@ -31,7 +31,7 @@ import (
 // every phase here has its own: a peer that spent the whole allowance getting
 // through TLS must not still be owed time to sit holding an open socket while
 // deciding whether to send a password.
-const AuthDeadline = 10 * time.Second
+const AuthDeadline = timeouts.CredentialExchange
 
 // IdleDeadline is what replaces the pre-auth deadlines once a session is
 // open (matrix §9: between-messages, 30m idle).
@@ -42,7 +42,7 @@ const AuthDeadline = 10 * time.Second
 // person to notice would be a developer sitting on a debug breakpoint
 // wondering why their connection dropped. The >90s cell exists for exactly
 // that reader.
-const IdleDeadline = 30 * time.Minute
+const IdleDeadline = timeouts.IdleBetweenMessages
 
 // CancelKeyLen is the BackendKeyData secret's length in bytes.
 //

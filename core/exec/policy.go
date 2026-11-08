@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 	"github.com/yongjohnlee80/golib/dao"
 )
 
@@ -87,12 +89,42 @@ func (s PolicySpec) stored(generation uint64, at, by int64) storedPolicy {
 	}
 }
 
+// policyRow is one policy timeout and the name an operator knows it by.
+type policyRow struct {
+	name string
+	val  *time.Duration
+}
+
+// rows is the one list of policy timeouts: validation refuses by it and the
+// load clamps by it, so a timeout added to the spec is held to both.
+func (s *PolicySpec) rows() []policyRow {
+	return []policyRow{
+		{"session_idle_timeout", &s.SessionIdleTimeout},
+		{"idle_in_tx_timeout", &s.IdleInTxTimeout},
+		{"max_tx_duration", &s.MaxTxDuration},
+		{"max_tx_duration_ceiling", &s.MaxTxDurationCeiling},
+	}
+}
+
+// clampToMaxBound lowers every row above timeouts.MaxBound to it, and says
+// what it changed, one "name stored -> applied" entry per row.
+func (s *PolicySpec) clampToMaxBound() []string {
+	var changed []string
+	for _, r := range s.rows() {
+		if *r.val > timeouts.MaxBound {
+			changed = append(changed, fmt.Sprintf("%s %v -> %v", r.name, *r.val, timeouts.MaxBound))
+			*r.val = timeouts.MaxBound
+		}
+	}
+	return changed
+}
+
 func (p storedPolicy) spec() PolicySpec {
 	return PolicySpec{
-		SessionIdleTimeout:   time.Duration(p.SessionIdleMS) * time.Millisecond,
-		IdleInTxTimeout:      time.Duration(p.IdleInTxMS) * time.Millisecond,
-		MaxTxDuration:        time.Duration(p.MaxTxMS) * time.Millisecond,
-		MaxTxDurationCeiling: time.Duration(p.MaxTxCeilingMS) * time.Millisecond,
+		SessionIdleTimeout:   time.Duration(p.SessionIdleMS) * time.Millisecond,  // not a timeout: unit conversion
+		IdleInTxTimeout:      time.Duration(p.IdleInTxMS) * time.Millisecond,     // not a timeout: unit conversion
+		MaxTxDuration:        time.Duration(p.MaxTxMS) * time.Millisecond,        // not a timeout: unit conversion
+		MaxTxDurationCeiling: time.Duration(p.MaxTxCeilingMS) * time.Millisecond, // not a timeout: unit conversion
 	}
 }
 
@@ -118,18 +150,17 @@ func (e *Engine) ValidatePolicy(s PolicySpec) error { return e.validatePolicy(s)
 // as it applied them would leave the engine running a configuration that is
 // half the operator's and half the old one's, with no record of which.
 func (e *Engine) validatePolicy(s PolicySpec) error {
-	for _, b := range []struct {
-		name string
-		val  time.Duration
-	}{
-		{"session_idle_timeout", s.SessionIdleTimeout},
-		{"idle_in_tx_timeout", s.IdleInTxTimeout},
-		{"max_tx_duration", s.MaxTxDuration},
-		{"max_tx_duration_ceiling", s.MaxTxDurationCeiling},
-	} {
-		if b.val <= 0 {
+	for _, r := range s.rows() {
+		name, val := r.name, *r.val
+		if val <= 0 {
 			return fmt.Errorf("%w: %s %s must be positive — an unbounded transaction on a live "+
-				"database holds its locks until something else ends it", ErrPolicyInvalid, b.name, b.val)
+				"database holds its locks until something else ends it", ErrPolicyInvalid, name, val)
+		}
+		// Refused on write; a stored value above it is clamped on load
+		// (LoadDurablePolicy), so a daemon still starts on an older blob.
+		if val > timeouts.MaxBound {
+			return fmt.Errorf("%w: %s is %v; no policy timeout may exceed %v",
+				ErrPolicyInvalid, name, val, timeouts.MaxBound)
 		}
 		// MILLISECOND-ALIGNED, because that is the resolution the durable form
 		// keeps. A bound expressed more finely would RUN at the value given
@@ -140,10 +171,10 @@ func (e *Engine) validatePolicy(s PolicySpec) error {
 		// bound nobody chose while the audit row recorded the one they asked
 		// for, and the difference would surface as a transaction ending early
 		// for no reason anyone could find.
-		if b.val%time.Millisecond != 0 {
+		if val%time.Millisecond != 0 { // not a timeout: unit check
 			return fmt.Errorf("%w: %s (%v) is not a whole number of milliseconds, which is the "+
 				"resolution the stored policy keeps; it would run at one value and persist as "+
-				"another", ErrPolicyInvalid, b.name, b.val)
+				"another", ErrPolicyInvalid, name, val)
 		}
 	}
 	if s.MaxTxDuration > s.MaxTxDurationCeiling {
@@ -258,6 +289,13 @@ func policyAuditDetail(from, to *enginePolicy) string {
 // a record of an intention nothing acts on, and an operator's 3am change is
 // undone by the next deploy.
 //
+// A timeout above timeouts.MaxBound, stored before the bound existed, is
+// CLAMPED rather than refused, so the daemon still starts: the clamped policy
+// is re-persisted under the next generation, with one policy_clamped audit row,
+// in one transaction. If that write fails (a read-only store, a full disk) the
+// clamped values still run, in memory, under the STORED generation, so the
+// next start's generation names the blob it actually writes.
+//
 // A spec that no longer validates is REFUSED rather than partially applied:
 // the stored policy was valid when it was written, so if it is not valid now
 // something else changed underneath it -- the pool's idle time, the janitor's
@@ -278,8 +316,13 @@ func (e *Engine) LoadDurablePolicy(ctx context.Context) error {
 			"refusing to start on a policy nobody can see", uerr)
 	}
 	spec := stored.spec()
+	clamped := spec.clampToMaxBound()
 	if verr := e.validatePolicy(spec); verr != nil {
 		return fmt.Errorf("exec: the stored policy is no longer valid: %w", verr)
+	}
+	generation := stored.Generation
+	if len(clamped) > 0 {
+		generation = e.persistClampedPolicy(ctx, spec, generation, clamped)
 	}
 	cur := e.currentPolicy()
 	e.policy.Store(&enginePolicy{
@@ -291,9 +334,33 @@ func (e *Engine) LoadDurablePolicy(ctx context.Context) error {
 		},
 		debugIdle:    spec.IdleInTxTimeout,
 		maxTxCeiling: spec.MaxTxDurationCeiling,
-		generation:   stored.Generation,
+		generation:   generation,
 	})
 	return nil
+}
+
+// persistClampedPolicy writes the clamped policy and its policy_clamped audit
+// row in one transaction, and returns the generation the engine should run
+// under: the next one if the write landed, the stored one if it did not.
+func (e *Engine) persistClampedPolicy(ctx context.Context, spec PolicySpec, stored uint64, clamped []string) uint64 {
+	detail := fmt.Sprintf("generation %d -> %d: %s", stored, stored+1, strings.Join(clamped, ", "))
+	e.logf("WARNING: the stored policy exceeds %v; running it clamped: %s", timeouts.MaxBound, detail)
+	// User 0 is the system: no operator asked for this change.
+	blob, err := json.Marshal(spec.stored(stored+1, e.now().Unix(), 0))
+	if err == nil {
+		err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
+			if uerr := e.store.KV.On(tx).
+				Set(meta.KVKey, policyStoreKey).Set(meta.KVValue, string(blob)).Upsert(); uerr != nil {
+				return uerr
+			}
+			return e.auth.AuditTx(tx, 0, "", "policy_clamped", detail)
+		})
+	}
+	if err != nil {
+		e.logf("WARNING: the clamped policy could not be stored (%v); it runs in memory under generation %d", err, stored)
+		return stored
+	}
+	return stored + 1
 }
 
 // ShowPolicy is the read half of the operator surface: what is in force right

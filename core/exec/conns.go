@@ -20,6 +20,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // Driver open seams. Production uses golib's own functions; a test replaces
@@ -285,6 +286,11 @@ func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 		if lifetime > 0 {
 			cfg.MaxConnLifetime = lifetime
 		}
+		// A DSN's connect_timeout wins; otherwise autodb's bound, not pgxpool's
+		// own fallback, so the value has one owner.
+		if cfg.ConnConfig != nil && cfg.ConnConfig.ConnectTimeout <= 0 {
+			cfg.ConnConfig.ConnectTimeout = timeouts.BackendConnect
+		}
 		// OUTSIDE EVERY POOL (an engine with no pools): the connection's own
 		// cap, exactly as MySQL and SQLite get it, and its backends are reused.
 		if ledger == nil {
@@ -298,11 +304,10 @@ func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 		}
 		// NEVER BINDS: the ledger refuses the dial first, so a raised pool max
 		// needs no rebuild. puddle's semaphore allocates nothing per slot.
-		// was: min(exec.pool_max_conns, row.pool_max_conns).
 		cfg.MaxConns = int32(meta.MaxPoolConns)
 		// A pool backend is never reused, so a member is idle only when its
-		// acquirer left while it was dialled. Reap it in about two seconds,
-		// not row 12's ten minutes. was: row 12.
+		// acquirer left while it was dialled. Reap it within about two
+		// seconds, not BackendIdle's ten minutes.
 		cfg.MaxConnIdleTime = strayBackendIdle
 		cfg.HealthCheckPeriod = strayBackendIdle
 		if cfg.ConnConfig == nil {

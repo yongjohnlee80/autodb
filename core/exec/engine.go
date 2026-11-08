@@ -16,6 +16,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // DefaultMaxRows is the read-result page size unless overridden.
@@ -39,26 +40,24 @@ const (
 	// the statement in full.
 	maxAuditSQLBytes = 8 * 1024
 	maxErrorBytes    = 2 * 1024
-	recordTimeout    = 10 * time.Second
+	recordTimeout    = timeouts.Record
 )
 
 // Session defaults, matching the config package's.
 const (
 	DefaultMaxSessionsPerUser = 8
 	DefaultMaxSessionsGlobal  = 256
-	DefaultSessionIdleTimeout = 10 * time.Minute
+	DefaultSessionIdleTimeout = timeouts.SessionIdle
 
-	// Target-pool defaults, mirroring core/config so an
-	// engine built without options is bounded exactly as a defaulted daemon
-	// is. They are duplicated rather than imported because core/config
-	// depends on nothing here and this package must not depend on it.
-	DefaultPoolMaxConnIdleTime = 10 * time.Minute
-	DefaultPoolMaxConnLifetime = 60 * time.Minute
-	// Transaction bounds, mirroring the config package's.
-	DefaultIdleInTxTimeout      = 2 * time.Hour
-	DefaultMaxTxDuration        = 8 * time.Hour
-	DefaultDebugIdleInTxTimeout = 2 * time.Hour
-	DefaultMaxTxDurationCeiling = 8 * time.Hour
+	// Target-pool and transaction defaults: core/timeouts owns the values,
+	// so an engine built without options is bounded exactly as a defaulted
+	// daemon is.
+	DefaultPoolMaxConnIdleTime  = timeouts.BackendIdle
+	DefaultPoolMaxConnLifetime  = timeouts.BackendLifetime
+	DefaultIdleInTxTimeout      = timeouts.IdleInTransaction
+	DefaultMaxTxDuration        = timeouts.MaxTransaction
+	DefaultDebugIdleInTxTimeout = timeouts.IdleInTransaction
+	DefaultMaxTxDurationCeiling = timeouts.MaxTransactionCeiling
 )
 
 // DefaultMaxStatementBytes is the default execution size cap, matching
@@ -495,7 +494,7 @@ func (e *Engine) Close() error {
 }
 
 // closeTimeout bounds one pool's close during engine shutdown.
-const closeTimeout = 15 * time.Second
+const closeTimeout = timeouts.EngineClose
 
 // Result is one execution's outcome.
 type Result struct {

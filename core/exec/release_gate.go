@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 )
 
@@ -132,7 +132,7 @@ func (e *Engine) setResetPlan(plan []resetStep) {
 // runs while a session is closing and a slow answer is not yet a wrong one, and
 // it is bounded because a reset that never returns must not keep a closing
 // session alive: the timeout simply becomes a discard, which is safe.
-const backendResetTimeout = 10 * time.Second
+const backendResetTimeout = timeouts.BackendReset
 
 // The limbs of the gate, named so a discard can be read back afterwards
 // instead of guessed at.

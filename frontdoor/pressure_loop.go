@@ -52,7 +52,7 @@ const EventPressure = "fd.pressure"
 // on. One denial bucket is the natural cadence — the window cannot move in
 // smaller steps than that, so ticking faster would report the same figures
 // again and ticking slower would skip a bucket the window had already dropped.
-const pressureInterval = 10 * time.Second
+const pressureInterval = 10 * time.Second // not a timeout: a ticker
 
 // pressureDetail is what travels with the event, as canonical JSON.
 //

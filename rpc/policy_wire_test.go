@@ -42,23 +42,23 @@ func TestPolicyVerbs_AreReachableOverTheWire(t *testing.T) {
 		t.Fatalf("user_create: %#v", errVal)
 	}
 	editorTok := c.login("policy-editor", "editor-passphrase")
-	errVal, _ = c.call("policy.reload", editorTok, 300000, 5400000, 21600000, 28800000)
+	errVal, _ = c.call("policy.reload", editorTok, 300000, 5400000, 6000000, 6600000)
 	mustErr(t, errVal, rpc.CodeDenied)
 
 	// A client from before connection pools still sends max_target_conns
 	// fifth: it is told what replaced it, not "wrong number of arguments".
-	errVal, _ = c.call("policy.reload", f.rootTok, 300000, 5400000, 21600000, 28800000, 40)
+	errVal, _ = c.call("policy.reload", f.rootTok, 300000, 5400000, 6000000, 6600000, 40)
 	if errVal == nil || !strings.Contains(fmt.Sprint(errVal), "pool.update") {
 		t.Errorf("a reload carrying the retired max_target_conns got %#v, want a refusal naming pool.update", errVal)
 	}
 
 	// An invalid spec is refused ON THE WIRE, not accepted and then ignored.
-	errVal, _ = c.call("policy.reload", f.rootTok, 300000, 5400000, 32400000, 28800000)
+	errVal, _ = c.call("policy.reload", f.rootTok, 300000, 5400000, 6900000, 6600000)
 	if errVal == nil {
 		t.Error("a max_tx_duration above the ceiling was accepted over the wire")
 	}
 
-	errVal, result = c.call("policy.reload", f.rootTok, 300000, 5400000, 21600000, 28800000)
+	errVal, result = c.call("policy.reload", f.rootTok, 300000, 5400000, 6000000, 6600000)
 	if errVal != nil {
 		t.Fatalf("policy.reload: %#v", errVal)
 	}

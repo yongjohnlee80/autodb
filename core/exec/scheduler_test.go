@@ -429,7 +429,7 @@ func TestScheduler_TheServerWaitExpiresWithItsOwnIdentity(t *testing.T) {
 // THE SERVER WAIT IS NINETY SECONDS AND IS NOT DERIVED FROM ANYTHING ELSE.
 //
 // An earlier design computed it from IdleInTxTimeout, which was ninety seconds
-// then and is two hours now. Two hours is how long a transaction may sit idle;
+// then and is thirty minutes now. That is how long a transaction may sit idle;
 // it is not how long a person should wait for an answer. Tying them together
 // meant a policy change about transaction tolerance silently became a policy
 // change about request latency.

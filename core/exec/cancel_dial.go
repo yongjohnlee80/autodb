@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // controlCancelHandler issues PostgreSQL cancellations on a socket charged to
@@ -75,7 +76,7 @@ func (h *controlCancelHandler) HandleUnwatchAfterCancel() {
 func buildControlCancelHandler(conn *pgconn.PgConn) ctxwatch.Handler {
 	return &controlCancelHandler{
 		conn:          conn,
-		cancelDelay:   5 * time.Millisecond,
-		deadlineDelay: 5 * time.Second,
+		cancelDelay:   5 * time.Millisecond, // not a timeout: pacing before the cancel is sent
+		deadlineDelay: timeouts.CancelDialFallback,
 	}
 }

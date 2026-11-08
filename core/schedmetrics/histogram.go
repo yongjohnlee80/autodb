@@ -24,20 +24,22 @@ import "time"
 // countable, and a bound sitting in +Inf is the one sample you cannot see.
 var QueueWaitEdgesMs = []int64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000, 30000, 90_000}
 
-// BackendHoldEdgesMs resolves the three holding bounds — 10 minutes, 2 hours
-// and 8 hours — each of which is an exact edge.
+// BackendHoldEdgesMs resolves the three holding bounds — 10 minutes, 30
+// minutes and 2 hours (core/timeouts) — each of which is an exact edge. The
+// edges past 2 hours are headroom, so a hold past every bound is still
+// countable rather than lumped into +Inf.
 //
 // Reclamation and termination timing use this same set, per the same table.
 var BackendHoldEdgesMs = []int64{
 	1_000, 10_000, 60_000, 300_000,
 	600_000,    // 10 min — session idle
-	1_800_000,  // 30 min
+	1_800_000,  // 30 min — idle in transaction
 	3_600_000,  // 1 h
-	7_200_000,  // 2 h — idle in transaction
-	14_400_000, // 4 h
-	21_600_000, // 6 h
-	28_800_000, // 8 h — the total transaction bound
-	43_200_000, // 12 h — headroom above the bound, so a hold PAST it is still countable
+	7_200_000,  // 2 h — the total transaction bound
+	14_400_000, // 4 h — headroom
+	21_600_000, // 6 h — headroom
+	28_800_000, // 8 h — headroom
+	43_200_000, // 12 h — headroom
 }
 
 // Histogram counts durations into exclusive internal bins.

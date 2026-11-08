@@ -113,8 +113,8 @@ type CertResult struct {
 }
 
 const (
-	defaultCALifetime   = 10 * 365 * 24 * time.Hour
-	defaultLeafLifetime = 365 * 24 * time.Hour
+	defaultCALifetime   = 10 * 365 * 24 * time.Hour // not a timeout: certificate validity
+	defaultLeafLifetime = 365 * 24 * time.Hour      // not a timeout: certificate validity
 )
 
 // CreateCert generates the front door's TLS material.
@@ -373,7 +373,7 @@ func createIssuers(req CertRequest, dns []string, ips []net.IP) (*x509.Certifica
 	caTmpl := &x509.Certificate{
 		SerialNumber: caSerial,
 		Subject:      pkix.Name{Organization: []string{"autodb"}, CommonName: "autodb front door root CA"},
-		NotBefore:    req.Now.Add(-time.Hour),
+		NotBefore:    req.Now.Add(-time.Hour), // not a timeout: NotBefore backdating
 		NotAfter:     req.Now.Add(req.CALifetime),
 		IsCA:         true,
 		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -404,7 +404,7 @@ func createIssuers(req CertRequest, dns []string, ips []net.IP) (*x509.Certifica
 			Organization: []string{"autodb"},
 			CommonName:   "autodb front door issuing CA",
 		},
-		NotBefore: req.Now.Add(-time.Hour),
+		NotBefore: req.Now.Add(-time.Hour), // not a timeout: NotBefore backdating
 		NotAfter:  req.Now.Add(req.CALifetime),
 		IsCA:      true,
 		KeyUsage:  x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -462,7 +462,7 @@ func createLeaf(req CertRequest, issuer *x509.Certificate, issuerKey *ecdsa.Priv
 		// Measured against its own control; see the package comment. An
 		// Organization keeps the subject readable without reintroducing it.
 		Subject:     pkix.Name{Organization: []string{"autodb front door"}},
-		NotBefore:   req.Now.Add(-time.Hour),
+		NotBefore:   req.Now.Add(-time.Hour), // not a timeout: NotBefore backdating
 		NotAfter:    req.Now.Add(req.LeafLifetime),
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
