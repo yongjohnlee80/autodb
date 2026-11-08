@@ -982,10 +982,10 @@ func All() []Mutation {
 		},
 		{
 			Name: "card-the-connections-own-bound-leads", Package: "./tui/",
-			File: "tui/conncard.go", Anchor: `line("  %-22s %-9s %s", "this connection", cardCap(conn.PoolMaxConns), "pooled connections to "+cardDatabase(conn))`,
+			File: "tui/conncard.go", Anchor: `line("  %-22s %-9s %s", "pool "+conn.PoolName, cardCap(conn.PoolMaxConns), "backend connections, shared by every database in the pool")`,
 			Replacement: `line("  %-22s %-9s %s", "sessions per user", cardCap(ep.MaxSessionsPerUser), "you, across databases")`,
-			Test:        "TestCardBudget_TheConnectionsOwnBoundLeads", Fails: "connection-owned bound did not lead",
-			Guarantee: "that the connection-owned pool bound leads the shared ceilings",
+			Test:        "TestCardBudget_TheConnectionsOwnBoundLeads", Fails: "own pool did not lead",
+			Guarantee: "that the connection's own pool bound leads the shared ceilings",
 		},
 		{
 			Name: "pressure-the-view-is-admin-only", Package: "./rpc/",
