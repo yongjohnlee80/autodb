@@ -658,14 +658,21 @@ func (e *Engine) auditBounded(ctx context.Context, userID int64, ip, action, det
 // claimed the interval has to give it back, or the interval is spent on a row
 // nobody has.
 func (e *Engine) auditBoundedErr(ctx context.Context, userID int64, ip, action, detail string) error {
-	if e.hookAuditFail != nil {
-		if err := e.hookAuditFail(action); err != nil {
-			return err
-		}
+	if err := e.injectedAuditFailure(action); err != nil {
+		return err
 	}
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
 	defer cancel()
 	return e.auth.Audit(actx, userID, ip, action, detail)
+}
+
+// injectedAuditFailure is hookAuditFail's answer for action: nil in
+// production.
+func (e *Engine) injectedAuditFailure(action string) error {
+	if e.hookAuditFail == nil {
+		return nil
+	}
+	return e.hookAuditFail(action)
 }
 
 // auditTimeout bounds a cleanup audit. Generous, because losing the record of

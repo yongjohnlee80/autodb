@@ -81,11 +81,23 @@ type Engine struct {
 	exposureMu sync.RWMutex
 	// opening reserves a connID while its driver is connecting, so the open
 	// happens outside e.mu without two callers racing to publish two pools.
+	// beginDraining REVOKES a reservation by deleting it: the open in flight
+	// then closes what it built and starts again (target).
 	opening map[int64]chan struct{}
+	// lifecycle serializes every admin write to pool budgets, pool membership
+	// or a connection's drain mark, from its first authoritative read to its
+	// last live publication (lifecycleOp). Never taken by a statement.
+	lifecycle sync.Mutex
 	// hookAfterDrainCheck runs inside target's check→effect window. Test-only
 	// (the mandate to inject each competing transition inside that
 	// window, rather than run it alongside and hope).
 	hookAfterDrainCheck func()
+	// hookBeforePublish runs after target's open and before it takes e.mu to
+	// publish the result. hookInLifecycleOp runs at a named step inside a
+	// lifecycle write, between its store work and its live effect. Test-only
+	// race-window controls, like hookAfterDrainCheck.
+	hookBeforePublish func(dao.DataConn)
+	hookInLifecycleOp func(step string)
 	// udfCache is the reader analysis stage's per-connection user-routine set
 	// (reader_analysis.go), guarded by udfMu.
 	udfMu    sync.Mutex
@@ -119,8 +131,9 @@ type Engine struct {
 	// hookBeforeWireAdmit pauses a wire open after its durable exposure read
 	// but before its registry reservation. Test-only race-window control.
 	hookBeforeWireAdmit func()
-	// hookAuditFail makes a bounded audit write fail, so a cell can prove what
-	// happens to an obligation whose record did not land. Nil in production.
+	// hookAuditFail makes an audit write fail (a bounded one, or the clamp's
+	// inside its transaction), so a cell can prove what happens to an
+	// obligation whose record did not land. Nil in production.
 	hookAuditFail func(action string) error
 	// backendReset replaces the reset a closing session runs before its
 	// backend may go back to the pool. It is empty in production, where the

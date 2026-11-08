@@ -353,6 +353,9 @@ func (e *Engine) persistClampedPolicy(ctx context.Context, spec PolicySpec, stor
 				Set(meta.KVKey, policyStoreKey).Set(meta.KVValue, string(blob)).Upsert(); uerr != nil {
 				return uerr
 			}
+			if herr := e.injectedAuditFailure("policy_clamped"); herr != nil {
+				return herr
+			}
 			return e.auth.AuditTx(tx, 0, "", "policy_clamped", detail)
 		})
 	}

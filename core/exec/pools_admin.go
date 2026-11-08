@@ -16,6 +16,11 @@ import (
 // with its audit row in one transaction, then updates poolSet, then lets the
 // session line serve whoever a raise can now admit. The store is written
 // first, so a failed write changes nothing live.
+//
+// Each write is ONE lifecycle operation (lifecycleOp), from its first read to
+// its last live effect. The store orders commits and poolSet orders
+// publications, but nothing else orders the two: two updates could commit
+// 95 then 3 and publish 3 then 95, leaving the live budget at 95.
 
 // ErrPoolInUse refuses deleting a pool a connection, archived or not, still
 // belongs to. Postgres's foreign key would refuse it and SQLite's schema has
@@ -32,6 +37,7 @@ func (e *Engine) CreatePool(ctx context.Context, token, name string, maxConns in
 	if err := validPool(name, maxConns); err != nil {
 		return 0, err
 	}
+	defer e.lifecycleOp()()
 	var id int64
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		now := e.now().Unix()
@@ -67,6 +73,7 @@ func (e *Engine) UpdatePool(ctx context.Context, token string, poolID int64, max
 	if err != nil {
 		return err
 	}
+	defer e.lifecycleOp()()
 	cur, err := e.store.Pools.OnCtx(ctx).With(meta.PoolID, poolID).Get()
 	if err != nil {
 		return poolNotFound(poolID, err)
@@ -89,6 +96,7 @@ func (e *Engine) UpdatePool(ctx context.Context, token string, poolID int64, max
 	if err != nil {
 		return err
 	}
+	e.atLifecycleStep("pool.update committed")
 	cur.MaxConns = int64(maxConns)
 	if err := e.pools.setPool(cur); err != nil {
 		return err
@@ -107,6 +115,7 @@ func (e *Engine) DeletePool(ctx context.Context, token string, poolID int64, ip 
 	if poolID == meta.DefaultPoolID {
 		return fmt.Errorf("%w: the default pool can't be deleted", ErrInvalidPool)
 	}
+	defer e.lifecycleOp()()
 	cur, err := e.store.Pools.OnCtx(ctx).With(meta.PoolID, poolID).Get()
 	if err != nil {
 		return poolNotFound(poolID, err)
@@ -119,6 +128,7 @@ func (e *Engine) DeletePool(ctx context.Context, token string, poolID int64, ip 
 		return fmt.Errorf("%w: pool %q has %d connection(s), archived ones included; move them first",
 			ErrPoolInUse, cur.Name, n)
 	}
+	e.atLifecycleStep("pool.delete counted")
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if derr := e.store.Pools.On(tx).With(meta.PoolID, poolID).Delete(); derr != nil {
 			return derr
@@ -147,7 +157,8 @@ func (e *Engine) ListPools(ctx context.Context, token string) ([]PoolSnapshot, e
 // on the connection, as a profile downgrade does, because a live socket can't
 // change ledgers.
 //
-// THE FENCE IS HELD ACROSS EVERY STEP. closeSessionsFor marks the connection
+// THE FENCE IS HELD ACROSS EVERY STEP, and it is this move's alone
+// (lifecycleOp). closeSessionsFor marks the connection
 // draining and detaches its pgxpool in one step under e.mu, so nothing can be
 // admitted, and no pgxpool built on the old ledger, until clearDraining; it
 // then ends the sessions and closes the pgxpool within poolCloseTimeout.
@@ -160,6 +171,7 @@ func (e *Engine) SetConnectionPool(ctx context.Context, token string, connID, po
 	if err != nil {
 		return err
 	}
+	defer e.lifecycleOp()()
 	row, err := e.liveConnection(ctx, connID)
 	if err != nil {
 		return err
@@ -178,6 +190,7 @@ func (e *Engine) SetConnectionPool(ctx context.Context, token string, connID, po
 	e.closeSessionsFor(ctx, connID, ip, "connection-pool-changed", drainChanged)
 	// A failed write leaves the connection where it was, and usable.
 	defer e.sessions.clearDraining(connID)
+	e.atLifecycleStep("conn.set_pool drained")
 
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if uerr := e.store.Connections.On(tx).With(meta.ConnID, connID).
@@ -195,6 +208,29 @@ func (e *Engine) SetConnectionPool(ctx context.Context, token string, connID, po
 	// The next pgxpool build and the next lease both see the new pool.
 	e.pools.setPoolOf(row)
 	return nil
+}
+
+// lifecycleOp starts one lifecycle operation and returns its end: an admin
+// write to pool budgets, pool membership or a connection's drain mark.
+// Operations run one at a time, so each publishes what it committed, and the
+// drain mark a write sets is the one it clears: one connection's two moves, or
+// a move and a delete, would otherwise share a single mark and the first to
+// finish would lift the other's fence.
+//
+// Lock order: lifecycle → e.mu → registry.mu → poolSet.mu. It is held over
+// store I/O and session teardown, which is why nothing a statement takes ever
+// waits for it.
+func (e *Engine) lifecycleOp() (end func()) {
+	e.lifecycle.Lock()
+	return e.lifecycle.Unlock
+}
+
+// atLifecycleStep marks a named step of a lifecycle operation for the
+// race-window hook. Nothing in production.
+func (e *Engine) atLifecycleStep(step string) {
+	if h := e.hookInLifecycleOp; h != nil {
+		h(step)
+	}
 }
 
 // requireAdmin is the authority check every pool write shares.
