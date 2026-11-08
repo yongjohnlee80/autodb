@@ -72,10 +72,11 @@ func TestPoolVerbs_AreReachableOverTheWire(t *testing.T) {
 		t.Errorf("after conn.set_pool, pool.list connections = %#v, want [%d]", conns, connID)
 	}
 
-	// A pool a connection is in can't be deleted, and says what to do.
+	// A pool a connection is in can't be deleted. The wire answers the
+	// sentinel's constant text, which names no pool or connection.
 	errVal, _ = c.call("pool.delete", f.rootTok, id)
-	if msg := mustErr(t, errVal, golibrpc.CodeInvalidParams); !strings.Contains(msg, "move them first") {
-		t.Errorf("deleting a pool in use answered %q, want it to say to move the connections first", msg)
+	if msg := mustErr(t, errVal, golibrpc.CodeInvalidParams); !strings.Contains(msg, "still has connections") {
+		t.Errorf("deleting a pool in use answered %q, want the pool-in-use refusal", msg)
 	}
 
 	// Moved back, the pool deletes and is no longer listed.
