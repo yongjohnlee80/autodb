@@ -72,6 +72,11 @@ func probeLifecycle(e *Engine, step string, holds int) *lifecycleProbe {
 	return p
 }
 
+// contended is the failure when a second writer finds the guard free while
+// the first is held inside its operation. The cell goes on to show what that
+// overtaking breaks.
+const contended = "a second lifecycle write found the guard free while the first was inside its operation"
+
 // first waits for the first writer to take the guard and reach step.
 func (p *lifecycleProbe) first(t *testing.T) {
 	t.Helper()
@@ -213,6 +218,7 @@ func TestLifecycle_TwoUpdatesPublishInCommitOrder(t *testing.T) {
 	probe.first(t)
 	go func() { defer close(doneB); errB = f.eng.UpdatePool(ctx, f.rootTok, id, 3, testIP) }()
 	if recv(t, probe.free, "the second update to reach the guard") {
+		t.Error(contended)
 		recv(t, doneB, "the second update, which found the guard free, to finish")
 	}
 	close(probe.release[0])
@@ -281,6 +287,7 @@ func TestLifecycle_TwoMovesOfOneConnectionDoNotShareAFence(t *testing.T) {
 	probe.first(t)
 	go func() { defer close(done2); err2 = f.eng.SetConnectionPool(ctx, f.rootTok, pg, c, testIP) }()
 	if recv(t, probe.free, "the second move to reach the guard") {
+		t.Error(contended)
 		// Found free: it drains alongside the first, which then finishes.
 		recv(t, probe.arrived, "the second move to reach its drain")
 		close(probe.release[0])
@@ -330,6 +337,7 @@ func TestLifecycle_ADeleteAndAnAssignmentLeaveNoDanglingMembership(t *testing.T)
 	probe.first(t)
 	go func() { defer close(doneM); errM = f.eng.SetConnectionPool(ctx, f.rootTok, pg, p, testIP) }()
 	if recv(t, probe.free, "the move to reach the guard") {
+		t.Error(contended)
 		recv(t, doneM, "the move, which found the guard free, to finish")
 	}
 	close(probe.release[0])
