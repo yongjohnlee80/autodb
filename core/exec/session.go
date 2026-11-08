@@ -1040,7 +1040,9 @@ func (r *sessionRegistry) setDraining(connID int64, why drainCause) []*session {
 	return out
 }
 
-// clearDraining lets a connection be used again (a failed delete).
+// clearDraining lets a connection be used again: a failed delete, or the end
+// of a move or a profile downgrade. Only the lifecycle operation that set the
+// mark clears it (lifecycleOp).
 func (r *sessionRegistry) clearDraining(connID int64) {
 	r.mu.Lock()
 	delete(r.draining, connID)

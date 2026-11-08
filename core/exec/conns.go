@@ -108,9 +108,19 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 		e.mu.Unlock()
 
 		conn, err := e.openTarget(ctx, connID, row)
+		if h := e.hookBeforePublish; h != nil && err == nil {
+			h(conn)
+		}
 
 		e.mu.Lock()
-		delete(e.opening, connID)
+		// Revoked: a drain began while the driver was connecting. A drain
+		// that is still in force refuses below; one that has already ENDED
+		// (a whole move) leaves no mark to see, and only the revocation says
+		// that this pool was built on the ledger the move replaced.
+		revoked := e.opening[connID] != reserved
+		if !revoked {
+			delete(e.opening, connID)
+		}
 		close(reserved)
 		if err != nil {
 			e.mu.Unlock()
@@ -123,6 +133,13 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 			e.mu.Unlock()
 			_ = conn.Close()
 			return nil, derr
+		}
+		if revoked {
+			// Built for a lifecycle that has ended: rebuild against the
+			// current one (pgPoolLimits reads membership afresh).
+			e.mu.Unlock()
+			_ = conn.Close()
+			continue
 		}
 		e.conns[connID] = conn
 		e.mu.Unlock()
@@ -376,6 +393,8 @@ func (e *Engine) beginDraining(connID int64, why drainCause) ([]*session, dao.Da
 	// window in which a request joins the line after the sweep and before the
 	// mark, and nothing is left to tell it the connection is gone.
 	_, drained := e.sessions.beginDrainingTarget(connID, why)
+	// An open in flight was authorized by the lifecycle this drain ends.
+	delete(e.opening, connID)
 	pool, ok := e.conns[connID]
 	if !ok {
 		return drained, nil
@@ -591,6 +610,8 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 		return fmt.Errorf("exec: unknown capability profile %q (want %q or %q)",
 			profile, meta.ProfileV1Compat, meta.ProfileSession)
 	}
+	// A downgrade sets and clears the drain mark.
+	defer e.lifecycleOp()()
 	row, err := e.liveConnection(ctx, connID)
 	if err != nil {
 		return err
@@ -713,6 +734,8 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 	if ident.Role() != meta.RoleAdmin {
 		return false, auth.ErrDenied
 	}
+	// It sets the drain mark, and keeps it or clears it.
+	defer e.lifecycleOp()()
 	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
 	if err != nil {
 		return false, err
