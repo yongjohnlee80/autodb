@@ -1,7 +1,8 @@
 # Connection-holding policy
 
-How long a session may hold a production connection, how much of a target
-database this instance may claim, and what happens when it runs out.
+How long a session may hold a production connection, how much of a database
+server this instance may claim (its connection pools), and what happens when
+it runs out.
 
 This file exists so the code can point at something a reader can open. The
 design record lives in the team knowledge base, which a reader of this
@@ -18,7 +19,9 @@ here in full.
 | `exec.idle_in_tx_timeout` | **2 h** | Idle *inside* an open transaction |
 | `exec.max_tx_duration` | **8 h** | Total wall-clock life of one transaction |
 | `exec.max_tx_duration_ceiling` | **8 h** | Hard cap on the line above |
-| `exec.max_target_conns` | **no default** | Total sockets to targets, across every target |
+
+Socket budgets are not in this table: they are per connection pool, in the
+meta store (*Connection pools* below).
 
 **The two transaction bounds do different jobs.** The idle bound catches the
 *abandoned* transaction — someone opens one and walks away, and it is gone in
@@ -49,8 +52,11 @@ Every setting in the table above can be replaced without a restart:
 
 ```
 policy.show    <token>
-policy.reload  <token> <session_idle_ms> <idle_in_tx_ms> <max_tx_ms> <max_tx_ceiling_ms> <max_target_conns>
+policy.reload  <token> <session_idle_ms> <idle_in_tx_ms> <max_tx_ms> <max_tx_ceiling_ms>
 ```
+
+A client still sending a fifth value, `max_target_conns`, is refused with a
+message naming `pool.update`, which replaced it.
 
 `policy.show` needs only a valid token — an operator diagnosing "why did my
 transaction end" needs to see the bound that ended it. `policy.reload` is
@@ -59,7 +65,7 @@ production connection.
 
 Four things about a reload are worth knowing before you use one.
 
-**It replaces all five values at once.** There is no way to change one and
+**It replaces all four values at once.** There is no way to change one and
 leave the others, and that is deliberate: a partial update needs a way to say
 "leave this alone", and the difference between *unset* and *zero* is exactly
 where a safety bound goes missing. Read the current values with `policy.show`,
@@ -77,8 +83,8 @@ next deploy. If a stored policy has stopped being valid — because the pool's
 idle time or the janitor's interval moved underneath it — the daemon **refuses
 to start** rather than quietly running bounds nobody chose.
 
-**Lowering the budget does not close anything.** See *Lowering the budget
-drains* below; the same is true here.
+**It touches no socket budget.** Those are per pool, changed with
+`pool.update`.
 
 The audit row is `policy_reloaded` and records the generation, every value
 before and after, and the user who made the change.
@@ -109,109 +115,102 @@ elsewhere. At the two-hour bound the reclamation record is what fires, and the
 heartbeat that would otherwise coincide with it is suppressed — so an episode
 reads 30m, 60m, 90m, then the ending, in that order, every time.
 
-## The connection budget
+## Connection pools
 
-`exec.max_target_conns` is this instance's total production-connection budget:
-the number of sockets it may have open to target databases at once, across
-every target. Call it **C**. **C must be at least 2**, for the reason below.
+A **connection pool** (`db_pool_connections`) is the socket budget a group of
+connections shares: the sockets this instance holds to all of a pool's
+connections together never exceed the pool's `max_conns`. An admin creates
+pools to match database servers; autodb never assumes two connections share a
+server. Every connection starts in **`default`** (25), and an admin moves it.
+MySQL and SQLite connections are outside every pool and keep
+`exec.pool_max_conns` as their own cap.
 
-**It has no default and is required when the front door is enabled.** A
-default would have this process quietly claim a number nobody chose, against a
-database whose `max_connections` it cannot see. Choose at most half the target
-server's `max_connections`; that is guidance, not validation, and summing
-across several instances is the operator's job.
+```
+pool.list      <token>
+pool.create    <token> <name> <max_conns>         admin
+pool.update    <token> <pool_id> <max_conns>      admin
+pool.delete    <token> <pool_id>                  admin
+conn.set_pool  <token> <conn_id> <pool_id>        admin
+```
 
-**It is a runtime permit, not a sum of configured caps.** Summing each
-target's `pool_max_conns` pre-slices the budget: two targets configured at 8
-reserve 16 whether or not either is busy, so one queues while the other's
-slice sits idle and nothing can rebalance. A permit is taken when a socket is
-about to be dialled and released when it closes, so the budget is spent by
-connections that actually exist.
+`max_conns` is from 3 to 10000. **Choose at most what the server's
+`max_connections` leaves for this instance**: autodb cannot see that number,
+and summing across instances is the operator's job. The default pool and any
+pool a connection (archived ones included) belongs to cannot be deleted.
 
-**Per-target `pool_max_conns` remains a technical ceiling on one pool.** It is
-not an allocation, and two targets may each be allowed more than the budget —
-the ledger is what makes that safe.
+**It is a runtime permit, not a sum of configured caps.** A permit is taken
+when a socket is about to be dialled and released when it closes, so the
+budget is spent by connections that actually exist, on whichever of the pool's
+databases needs them.
 
-**It is not the per-source connection cap.** That is a different resource,
-limiting concurrent connections from one address, and the two must not move
-together.
+### The split
+
+A pool of **C** sockets is three parts:
+
+| Part | Size | Who uses it |
+| --- | ---: | --- |
+| front-door share | C − 1 − headroom | front-door sessions' backends |
+| headroom share | min(C / 2, 4) | the TUI, exec and autodb's own queries |
+| control lane | 1 | cancellations |
+
+A pool of 25 is 20, 4 and 1. Each share is bounded by itself, so a burst of
+exec work can't take the sockets front-door sessions were admitted against,
+and a full front door can't starve autodb's own queries.
+
+The session line at the front door admits as many front-door sessions as the
+front-door share, so an admitted session's backend always has its socket. A
+dial whose share is full **waits in that share's line**, first come first
+served, for as long as its caller does; a caller with no deadline waits up to
+the queue wait (90 s), then is refused as a capacity matter (`53300`).
+
+**No backend in a pool is reused.** Every release closes the socket, so its
+permit returns at once and no idle connection holds a pool's capacity. A
+connection whose caller gave up while it was being dialled is reaped in about
+a second.
 
 ### One slot is reserved for cancellation
 
 PostgreSQL does not cancel a statement on the session that issued it: it
-requires a **second connection** carrying the backend key. That second socket
-is dialled through the same path as ordinary work — so if ordinary work may
-take the whole budget, a cancellation is refused exactly when someone reaches
-for it, because a developer cancels a query when the system is busy, not when
-it is idle.
-
-So the last slot is reserved:
-
-- **ordinary limit = C − 1.** Ordinary dials stop one short.
-- **control limit = 1.** One holder at a time, serialized. A cancel is
-  connect, write sixteen bytes, close; one lane is enough, and more would be a
-  second budget nobody configured.
-- The control dial is **marked** before it is made, and only code inside the
-  engine can mark it, so ordinary traffic cannot help itself to the reserved
-  slot.
-- It is **exact-backend cancellation only** — that one statement, on that one
-  connection.
-
-**C ≥ 2** follows: at C = 1 the reserved slot consumes the whole budget and
-nothing is left for work.
+requires a **second connection** carrying the backend key. If the shares could
+take the whole budget, a cancellation would be refused exactly when someone
+reaches for it. So the last slot is the control lane's: one holder at a time,
+serialized, reachable only by a dial the engine marks, and for exact-backend
+cancellation only. It waits for the lane on its own deadline rather than being
+lost.
 
 ### The accounting
 
-Two occupancies are tracked separately:
-
 | Symbol | Meaning |
 | --- | --- |
-| **O** | ordinary sockets live or in flight |
+| **F** | front-door sockets live or in flight |
+| **O** | headroom (ordinary) sockets live or in flight |
 | **K** | control occupancy, 0 or 1 |
 
 | Quantity | Definition |
 | --- | --- |
-| `Outstanding` | **O + K** — every socket this instance holds |
-| `Effective` | **max(C, O + 1)** — the immediately exercisable ceiling |
-| `Draining` | **O > C − 1** |
+| `Outstanding` | **F + O + K** — every socket the pool holds |
+| `Effective` | **max(C, F + O + 1)** — the immediately exercisable ceiling |
+| `Draining` | a share above its current limit |
 
-**`Effective` uses O + 1, not Outstanding**, and the +1 applies whether or not
-a cancel is in flight. The reserved slot is part of the ceiling at all times,
-because a cancel may arrive at any moment. Defining it against `Outstanding`
-instead makes the number rise and fall as short-lived cancel traffic comes and
-goes — within a single drain generation it would read 49, then 50, then 49,
-and an operator would see a drain apparently reverse.
+**`Effective` counts the lane whether or not a cancel is in flight**, so the
+number can't rise and fall with short-lived cancel traffic inside one drain.
 
-**The cancellation is counted, never exempt.** It occupies a slot and appears
-in `Outstanding`. What it must not do is move the ceiling.
+### Lowering a pool drains; it does not kill
 
-### Lowering the budget drains; it does not kill
+With 49 sockets open and a pool lowered from 50 to 25, nothing is closed. New
+dials above the new shares wait; the number becomes true by attrition.
+Monotonicity is asserted per generation. The control lane is the one
+exception: it is never re-tested against the budget, because a drain is when
+cancelling matters most. Raising a pool serves both shares' lines at once, and
+no target's connection pool is rebuilt.
 
-With 50 sockets open and a new budget of 25, nothing is closed. Ordinary dials
-stop; the number becomes true by attrition. Closing live sessions to make a
-configured number true would turn a configuration edit into an outage.
-Monotonicity is therefore asserted per generation rather than absolutely, and
-`Effective` converges **downwards** to C as ordinary sockets retire — it never
-rises within a generation.
+### Moving a connection
 
-**The control lane is the one exception, and it is deliberate.** While
-draining, O is above the ordinary limit C − 1 by definition — O = C is already
-draining — so a control lane that re-tested
-against the budget would refuse a cancellation precisely because too much work
-is already running, which is the moment cancelling matters most. Ordinary and
-unmarked dials stop; the marked control dial may still proceed.
-
-Worked, for C dropping 50 → 25 with 49 ordinary sockets held:
-
-| State | O | K | Outstanding | Effective |
-| --- | ---: | ---: | ---: | ---: |
-| idle lane | 49 | 0 | 49 | 50 |
-| cancel in flight | 49 | **1** | **50** | 50 |
-| cancel released | 49 | 0 | 49 | 50 |
-
-`Effective` is 50 throughout: `max(25, 49 + 1)`. It does not move when the
-lane fills and empties, and it falls towards 25 only as the 49 ordinary
-sockets retire.
+`conn.set_pool` ends every session on the connection first, as a profile
+downgrade does, because a live socket can't change pools. Anyone connecting
+meanwhile is told the connection is being changed and to retry. A socket the
+bounded close outlives stays charged to the old pool, which granted it, until
+it closes.
 
 ## Charge classes
 
