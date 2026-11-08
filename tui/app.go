@@ -121,7 +121,11 @@ type Host struct {
 	userFormUserID      int64
 	userFormSeq         uint64
 	addresses           *manager[addressRow]
-	addressTrace        func(string) // test-only observation of the RPC scope a pinned load chose
+	pools               *manager[PoolInfo]
+	poolEditID          int64              // the pool the form sets the max of; 0 creates one
+	poolChoices         *tuidecl.ListModel // the connection form's pool picker
+	poolList            []PoolInfo         // what poolChoices was built from, in its order
+	addressTrace        func(string)       // test-only observation of the RPC scope a pinned load chose
 	addressGlobal       bool
 	addressUserID       int64
 	history             *manager[HistoryRow]
@@ -354,6 +358,8 @@ func newHost(session *Session, notesFor notes.NotesFactory, quit func(), opt Opt
 	h.userRoles = userRoleModel()
 	h.userConnections = tuidecl.NewListModel("key", "id", "label")
 	h.addresses = newAddressManager()
+	h.pools = newPoolsManager()
+	h.poolChoices = tuidecl.NewListModel("key", "id", "label")
 	h.history = newHistoryManager()
 	h.hist = newHistoryNav()
 	h.audit = newAuditManager()

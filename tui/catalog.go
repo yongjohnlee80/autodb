@@ -65,6 +65,7 @@ const (
 	cmdCACert           CommandID = "frontdoor.cacert"
 	cmdRefresh          CommandID = "explorer.refresh"
 	cmdAllowlist        CommandID = "ip.allowlist"
+	cmdPools            CommandID = "pool.manage"
 	cmdKeyslot          CommandID = "keyslot.manage"
 	cmdDismissTLS       CommandID = "warning.dismiss_cleartext"
 	cmdLogin            CommandID = "session.login"
@@ -318,6 +319,14 @@ func catalogCommands() []CommandOf[*Host] {
 			Leader: leader('I', "ip allowlist (admin)…", 190),
 			Menu: []MenuProjection{
 				{Parent: nodeSystem, Label: "Global IP addresses (admin)…", Hotkey: 'G', Order: 30},
+			},
+		},
+		{
+			ID: cmdPools, Audience: AudienceAdmin,
+			Run:    func(h *Host) { h.openPools() },
+			Leader: leader('b', "connection pools (admin)…", 195), // 'b': budgets; 'P' is Pressure's
+			Menu: []MenuProjection{
+				{Parent: nodeSystem, Label: "Connection pools (admin)…", Hotkey: 'O', Order: 35},
 			},
 		},
 		{

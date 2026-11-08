@@ -323,6 +323,7 @@ Every key command AutoDB declares, with its default keys:
 | `autodb.leader.frontdoor.cacert` | `autodb.leader` | K |
 | `autodb.leader.explorer.refresh` | `autodb.leader` | G |
 | `autodb.leader.ip.allowlist` | `autodb.leader` | Shift+I |
+| `autodb.leader.pool.manage` | `autodb.leader` | B |
 | `autodb.leader.keyslot.manage` | `autodb.leader` | Shift+K |
 | `autodb.leader.warning.dismiss_cleartext` | `autodb.leader` | ! |
 | `autodb.leader.session.login` | `autodb.leader` | Shift+L |

@@ -1,9 +1,11 @@
 // ConnectionForm.qml — add or edit a connection.
 //
-// Adding asks name, engine, DSN; editing asks name, proxy exposure and the
-// capability profile, each starting on what the connection has now. The
-// fields a mode does not use are hidden, not greyed. Editing sends only what
-// changed; opening the front door asks once more, after this closes.
+// Adding asks name, engine, DSN; editing asks name, proxy exposure, the
+// capability profile and, for a PostgreSQL connection, its connection pool,
+// each starting on what the connection has now. The fields a mode does not
+// use are hidden, not greyed. Editing sends only what changed; moving to
+// another pool and opening the front door each ask once more, after this
+// closes.
 
 Dialog {
     closeOnQ: true
@@ -26,7 +28,9 @@ Dialog {
         ComboBox { id: proxy; visible: App.connFormEditing; model: App.proxyChoices; textRole: "label"; valueRole: "id"; currentIndex: App.connFormProxy }
         Text { text: qsTrId("autodb.connectionForm.text5"); visible: App.connFormEditing }
         ComboBox { id: profile; visible: App.connFormEditing; model: App.profileChoices; textRole: "label"; valueRole: "id"; currentIndex: App.connFormProfile }
+        Text { text: qsTrId("autodb.connectionForm.pool"); visible: App.connFormPooled }
+        ComboBox { id: pool; visible: App.connFormPooled; model: App.poolChoices; textRole: "label"; valueRole: "id"; currentIndex: App.connFormPool }
     }
     onOpened: dsn.clear()
-    onAccepted: App.saveConnection(name.text, engine.currentValue, dsn.text, proxy.currentValue, profile.currentValue)
+    onAccepted: App.saveConnection(name.text, engine.currentValue, dsn.text, proxy.currentValue, profile.currentValue, pool.currentValue)
 }

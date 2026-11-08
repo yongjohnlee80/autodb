@@ -88,6 +88,8 @@ func connectionsState(h *Host) map[string]any {
 		"App.connFormEngine":    -1,
 		"App.connFormProxy":     -1,
 		"App.connFormProfile":   -1,
+		"App.connFormPool":      -1,
+		"App.connFormPooled":    false,
 		"App.attachTitle":       "",
 		"App.attachError":       "",
 		"App.attachWorkspaces":  h.attachWs,
@@ -113,6 +115,7 @@ func profileOrDefault(p string) string {
 
 // openConnections is conn.manage.
 func (h *Host) openConnections() {
+	h.loadPoolChoices()
 	openManager(h, h.conns)
 	h.open("connections")
 }
@@ -120,7 +123,7 @@ func (h *Host) openConnections() {
 // connectionAdd is App.connectionAdd: the form, adding.
 func (h *Host) connectionAdd() error {
 	h.connForm = connForm{}
-	h.showConnForm("new connection", "", -1, -1, -1)
+	h.showConnForm("new connection", "", -1, -1, -1, -1)
 	return nil
 }
 
@@ -137,20 +140,23 @@ func (h *Host) connectionEdit(i int) error {
 		proxy = 0
 	}
 	profile := slices.IndexFunc(connProfiles, func(r tuidecl.Row) bool { return r["id"] == profileOrDefault(c.Profile) })
-	h.showConnForm("edit "+c.Name, c.Name, -1, proxy, profile)
+	h.showConnForm("edit "+c.Name, c.Name, -1, proxy, profile, h.poolIndexOf(c.PoolID))
 	return nil
 }
 
 // showConnForm opens the form with its fields as given.
-func (h *Host) showConnForm(title, name string, engine, proxy, profile int) {
+func (h *Host) showConnForm(title, name string, engine, proxy, profile, pool int) {
 	adding := h.connForm.edit == nil
+	// Only a connection in a pool has one to move: MySQL and SQLite are
+	// outside every pool (pool id 0).
+	pooled := !adding && h.connForm.edit.PoolID != 0
 	state := map[string]any{
 		"App.connFormTitle": title, "App.connFormError": "",
-		"App.connFormAdding": adding, "App.connFormEditing": !adding,
+		"App.connFormAdding": adding, "App.connFormEditing": !adding, "App.connFormPooled": pooled,
 	}
 	// Through the empty value: a binding applies what changes, and the form
 	// must open on these even when it last opened on the same.
-	for k, v := range map[string]any{"App.connFormName": "", "App.connFormEngine": -1, "App.connFormProxy": -1, "App.connFormProfile": -1} {
+	for k, v := range map[string]any{"App.connFormName": "", "App.connFormEngine": -1, "App.connFormProxy": -1, "App.connFormProfile": -1, "App.connFormPool": -1} {
 		state[k] = v
 	}
 	if err := h.p.SetMany(state); err != nil {
@@ -159,6 +165,7 @@ func (h *Host) showConnForm(title, name string, engine, proxy, profile int) {
 	}
 	if err := h.p.SetMany(map[string]any{
 		"App.connFormName": name, "App.connFormEngine": engine, "App.connFormProxy": proxy, "App.connFormProfile": profile,
+		"App.connFormPool": pool,
 	}); err != nil {
 		h.keep(err)
 		return
@@ -173,8 +180,8 @@ func (h *Host) refuseConnForm(why string) error {
 	return nil
 }
 
-// saveConnection is App.saveConnection(name, engine, dsn, proxy, profile).
-func (h *Host) saveConnection(name, eng, dsn, proxy, profile string) error {
+// saveConnection is App.saveConnection(name, engine, dsn, proxy, profile, pool).
+func (h *Host) saveConnection(name, eng, dsn, proxy, profile, pool string) error {
 	m := h.conns
 	if h.connForm.edit == nil {
 		if name == "" || eng == "" || dsn == "" {
@@ -190,6 +197,9 @@ func (h *Host) saveConnection(name, eng, dsn, proxy, profile string) error {
 	if name == "" {
 		return h.refuseConnForm("a name is required")
 	}
+	// A pool the picker names other than the one the connection is in.
+	moveTo, _ := strconv.ParseInt(pool, 10, 64)
+	moving := sel.PoolID != 0 && moveTo != 0 && moveTo != sel.PoolID
 	apply := func() {
 		managerCall(h, m, "edit "+sel.Name, func(ctx context.Context, b *Bound) error {
 			if name != sel.Name {
@@ -203,27 +213,58 @@ func (h *Host) saveConnection(name, eng, dsn, proxy, profile string) error {
 				}
 			}
 			if proxy != "" && (proxy == "yes") != sel.FrontDoorExposed {
-				return b.SetConnectionExposure(ctx, sel.ID, proxy == "yes")
+				if err := b.SetConnectionExposure(ctx, sel.ID, proxy == "yes"); err != nil {
+					return err
+				}
+			}
+			if moving {
+				return b.SetConnectionPool(ctx, sel.ID, moveTo)
 			}
 			return nil
 		})
 	}
-	if proxy == "yes" && !sel.FrontDoorExposed {
-		target := sel.TargetDB
-		if target == "" {
-			target = "(none recorded — clients use the connection name)"
+	// MOVING ASKS FIRST: it ends every open session on the connection.
+	if moving {
+		then := apply
+		if proxy == "yes" && !sel.FrontDoorExposed {
+			// After the move's question has closed, the front door's.
+			then = func() { h.p.Post(func() { h.confirmExposure(sel, apply) }) }
 		}
-		// After the form has closed: its accepted handler is still running.
 		h.p.Post(func() {
-			h.confirm("open the front door on "+sel.Name+"?",
-				frontDoorProse+"\nClients would connect with Database = "+target+"\nor the connection name "+sel.Name+".",
-				"&Expose it", "&Leave it closed", apply)
+			h.confirm("move "+sel.Name+" to another pool?", movePoolProse, "&Move it", "&Keep its pool", then)
 		})
+		return nil
+	}
+	if proxy == "yes" && !sel.FrontDoorExposed {
+		// After the form has closed: its accepted handler is still running.
+		h.p.Post(func() { h.confirmExposure(sel, apply) })
 		return nil
 	}
 	apply()
 	return nil
 }
+
+// confirmExposure asks before a connection is put on the front door.
+func (h *Host) confirmExposure(sel ConnInfo, then func()) {
+	target := sel.TargetDB
+	if target == "" {
+		target = "(none recorded — clients use the connection name)"
+	}
+	h.confirm("open the front door on "+sel.Name+"?",
+		frontDoorProse+"\nClients would connect with Database = "+target+"\nor the connection name "+sel.Name+".",
+		"&Expose it", "&Leave it closed", then)
+}
+
+// movePoolProse is what an operator reads BEFORE moving a connection to
+// another pool.
+const movePoolProse = `This moves the connection's socket budget to another pool. A live
+socket can't change pools, so every open session on this connection
+ends first, as a profile downgrade's do; its clients reconnect into
+the new pool. Anyone connecting meanwhile is told the connection is
+being changed and to retry.
+
+The change is recorded in the audit log.
+`
 
 // frontDoorProse is what an operator reads BEFORE exposing a connection.
 const frontDoorProse = `This makes the connection reachable through the front door. It does

@@ -306,6 +306,7 @@ Window {
     Users { id: users }
     UserForm { id: userForm }
     Addresses { id: addresses }
+    Pools { id: pools }
     History { id: history }
     HistoryFilter { id: historyFilter }
     Audit { id: audit }

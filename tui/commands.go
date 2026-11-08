@@ -78,6 +78,11 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.addressAdd":             none(h.addressAdd),
 		"App.addressRemove":          oneNumber("App.addressRemove", "an IP row", h.addressRemove),
 		"App.addressSave":            twoStrings("App.addressSave", h.addressSave),
+		"App.poolsClosed":            none(h.poolsClosed),
+		"App.poolAdd":                none(h.poolAdd),
+		"App.poolEdit":               oneNumber("App.poolEdit", "a pool row", h.poolEdit),
+		"App.poolDelete":             oneNumber("App.poolDelete", "a pool row", h.poolDelete),
+		"App.poolSave":               twoStrings("App.poolSave", h.poolSave),
 		"App.historyClosed":          none(h.historyClosed),
 		"App.historyShow":            oneNumber("App.historyShow", "a history row", h.historyShow),
 		"App.historyLoad":            oneNumber("App.historyLoad", "a history row", h.historyLoad),
@@ -131,8 +136,8 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.connectionTest":          oneNumber("App.connectionTest", "a row's index", h.connectionTest),
 		"App.connectionDelete":        oneNumber("App.connectionDelete", "a row's index", h.connectionDelete),
 		"App.connectionAttach":        oneNumber("App.connectionAttach", "a row's index", h.connectionAttach),
-		"App.saveConnection": strings_("App.saveConnection", 5, func(v []string) error {
-			return h.saveConnection(v[0], v[1], v[2], v[3], v[4])
+		"App.saveConnection": strings_("App.saveConnection", 6, func(v []string) error {
+			return h.saveConnection(v[0], v[1], v[2], v[3], v[4], v[5])
 		}),
 		"App.attachConnection":       workspaceAndName(h.attachConnection),
 		"App.nameNote":               workspaceAndName(h.nameNote),
