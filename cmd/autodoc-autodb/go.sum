@@ -38,8 +38,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/yongjohnlee80/autodoc v0.1.59 h1:89iiz3kEoqw7LcpJh/cTRL8NuV3KVs8IC0/sK34raYs=
 github.com/yongjohnlee80/autodoc v0.1.59/go.mod h1:raDYXMkCHyfYhj7H3zUCkSO9HlRnBHBX9KaWJmI/TR8=
-github.com/yongjohnlee80/golib v0.8.38 h1:2bY1fGWc9pofebJjY5Pht7iKHYWkcoDcmx5W9mcMfB4=
-github.com/yongjohnlee80/golib v0.8.38/go.mod h1:GG9nwIgYc9a3hu2BkNjN0JeJyqZO5bmuT8/7OewDTsM=
+github.com/yongjohnlee80/golib v0.8.39 h1:KAhMfwJyJ3rNeU2IX0fOxVllUAnwQkmCHkLf+k0jEG8=
+github.com/yongjohnlee80/golib v0.8.39/go.mod h1:GG9nwIgYc9a3hu2BkNjN0JeJyqZO5bmuT8/7OewDTsM=
 golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
 golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
 golang.org/x/mod v0.42.0 h1:ICeL3t2L30ljSPHHxDnR4fqVcBt/zR2zJAb9juavmQg=
