@@ -154,46 +154,27 @@ func TestPoolResetPG_AnOrdinaryStatementsStateDoesNotReachAWireSession(t *testin
 	}
 }
 
-// WIRE → ORDINARY. The mirror image, and the one the release gate was already
-// responsible for — asserted from the ordinary side so that the gate's verdict is
-// not the only witness to its own work.
+// WIRE → ORDINARY. The mirror image, asserted from the ordinary side so that the
+// gate's verdict is not the only witness. A session's backend is destroyed at
+// close (golib since v0.8: see release_gate_pg_test.go's header), so the next
+// ordinary statement runs on a fresh backend and the session's backend is gone.
 func TestPoolResetPG_AWireSessionsStateDoesNotReachAnOrdinaryStatement(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name  string
-		plan  []resetStep
-		clean bool
-	}{
-		{"the whole reset removes it", nil, true},
-		{"removing its reset step makes it visible",
-			resetPlanWithout("session settings the borrower changed"), false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			lt := newLeakTarget(t)
-			lt.f.eng.setResetPlan(tc.plan)
+	lt := newLeakTarget(t)
 
-			b := lt.open(t)
-			b.run("SELECT set_config('autodb.wire_to_ordinary', 'taken', false)")
-			b.close()
+	b := lt.open(t)
+	b.run("SELECT set_config('autodb.wire_to_ordinary', 'taken', false)")
+	b.close()
 
-			pid := lt.poolScalar(t, "SELECT pg_backend_pid()::text")
-			if pid != b.pid {
-				t.Fatalf("the ordinary statement ran on backend %s and the session held %s, so "+
-					"this cell observed nothing", pid, b.pid)
-			}
-			got := lt.poolScalar(t,
-				"SELECT coalesce(current_setting('autodb.wire_to_ordinary', true), '')")
-			switch {
-			case tc.clean && got != "":
-				t.Fatalf("an ordinary statement inherited %q from a session it had nothing to "+
-					"do with", got)
-			case !tc.clean && got == "":
-				t.Fatal("the reset ran WITHOUT the step that resets settings and the ordinary " +
-					"statement still found nothing, so this cell is not testing what it claims")
-			}
-		})
+	if got := lt.poolScalar(t,
+		"SELECT coalesce(current_setting('autodb.wire_to_ordinary', true), '')"); got != "" {
+		t.Fatalf("an ordinary statement inherited %q from a session it had nothing to do with", got)
 	}
+	if pid := lt.poolScalar(t, "SELECT pg_backend_pid()::text"); pid == b.pid {
+		t.Fatalf("the ordinary statement ran on backend %s, the one the session left a setting "+
+			"on; a session's backend must be destroyed, not reused", pid)
+	}
+	requireBackendGone(t, func(q string) string { return lt.poolScalar(t, q) }, b.pid)
 }
 
 // A RESET THE TARGET REFUSES DESTROYS THE POOLED BACKEND, exactly as it destroys
