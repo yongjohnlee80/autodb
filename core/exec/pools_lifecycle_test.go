@@ -16,51 +16,69 @@ import (
 )
 
 // LIFECYCLE RACES. Each cell drives the competing write INSIDE the window it
-// could break (a hook), rather than running it alongside and hoping. A cell
-// whose competitor never got in proves nothing, so each one waits for the
-// competitor to finish or to block, and a guard that is missing lets it
-// finish.
+// could break (a hook), rather than running it alongside and hoping. The
+// schedule comes from the acquisition itself: lifecycleOp reports whether a
+// second writer found the guard free or held, before it waits. A writer that
+// found it free (no guard) is let run to the end while the first is held,
+// which is exactly the overtaking the guard exists to stop. Timers are
+// watchdogs only, never evidence.
 
-// overlapWindow is how long a cell lets a second lifecycle write run while
-// the first is held. With the guard the second blocks and the wait runs out;
-// without it the second finishes well inside the window.
-const overlapWindow = 2 * time.Second // not a timeout: a test's race window
+// watchdog bounds every wait in these cells.
+const watchdog = 10 * time.Second // not a timeout: a test's watchdog
 
-// heldStep holds the first `holds` lifecycle writes that reach step, the
-// n-th until release[n-1] is closed, and reports each arrival on arrived.
-// Later arrivals pass straight through.
-type heldStep struct {
+// recv waits for ch, failing the cell if the watchdog runs out first.
+func recv[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(watchdog):
+		t.Fatalf("waited %v for %s", watchdog, what)
+	}
+	panic("unreachable")
+}
+
+// lifecycleProbe holds the first `holds` lifecycle writes that reach step,
+// the n-th until release[n-1] is closed, and reports each arrival there on
+// arrived. Every acquisition of the guard is reported on free: true when the
+// guard was free, false when the writer found it held. Installed after a
+// cell's setup, so only the cell's own writes report.
+type lifecycleProbe struct {
 	n       atomic.Int32
 	arrived chan int32
+	free    chan bool
 	release []chan struct{}
 }
 
-func holdStep(e *Engine, step string, holds int) *heldStep {
-	h := &heldStep{arrived: make(chan int32, 4)}
+func probeLifecycle(e *Engine, step string, holds int) *lifecycleProbe {
+	p := &lifecycleProbe{arrived: make(chan int32, 4), free: make(chan bool, 4)}
 	for range holds {
-		h.release = append(h.release, make(chan struct{}))
+		p.release = append(p.release, make(chan struct{}))
 	}
 	e.hookInLifecycleOp = func(at string) {
-		if at != step {
-			return
-		}
-		n := h.n.Add(1)
-		h.arrived <- n
-		if int(n) <= len(h.release) {
-			<-h.release[n-1]
+		switch at {
+		case lifecycleAcquired:
+			p.free <- true
+		case lifecycleBlocked:
+			p.free <- false
+		case step:
+			n := p.n.Add(1)
+			p.arrived <- n
+			if int(n) <= len(p.release) {
+				<-p.release[n-1]
+			}
 		}
 	}
-	return h
+	return p
 }
 
-// letSecondRun gives a competing write the window to overtake the held one:
-// it returns when done closes (the competitor finished: no guard) or the
-// window runs out (it is blocked).
-func letSecondRun(done <-chan struct{}) {
-	select {
-	case <-done:
-	case <-time.After(overlapWindow):
+// first waits for the first writer to take the guard and reach step.
+func (p *lifecycleProbe) first(t *testing.T) {
+	t.Helper()
+	if !recv(t, p.free, "the first write to take the guard") {
+		t.Fatal("the first write found the guard held; nothing else should hold it")
 	}
+	recv(t, p.arrived, "the first write to reach its held step")
 }
 
 // AN OPEN THAT OUTLIVES A MOVE IS REBUILT ON THE CONNECTION'S POOL AFTER IT.
@@ -158,7 +176,7 @@ func TestTarget_AnOpenThatOutlivesAMoveIsRebuiltOnTheCurrentPool(t *testing.T) {
 			// Sampled until the statement's socket shows and the obsolete
 			// pool's probe socket has gone, or the window runs out.
 			var wantN, otherN int
-			for deadline := time.Now().Add(overlapWindow); time.Now().Before(deadline); {
+			for deadline := time.Now().Add(watchdog); time.Now().Before(deadline); {
 				wantN, otherN = poolOf(t, f, want).Ledger.Outstanding, poolOf(t, f, other).Ledger.Outstanding
 				if wantN > 0 && otherN == 0 {
 					break
@@ -187,17 +205,19 @@ func TestLifecycle_TwoUpdatesPublishInCommitOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	held := holdStep(f.eng, "pool.update committed", 1)
+	probe := probeLifecycle(f.eng, "pool.update committed", 1)
 
 	doneA, doneB := make(chan struct{}), make(chan struct{})
 	var errA, errB error
 	go func() { defer close(doneA); errA = f.eng.UpdatePool(ctx, f.rootTok, id, 95, testIP) }()
-	<-held.arrived
+	probe.first(t)
 	go func() { defer close(doneB); errB = f.eng.UpdatePool(ctx, f.rootTok, id, 3, testIP) }()
-	letSecondRun(doneB)
-	close(held.release[0])
-	<-doneA
-	<-doneB
+	if recv(t, probe.free, "the second update to reach the guard") {
+		recv(t, doneB, "the second update, which found the guard free, to finish")
+	}
+	close(probe.release[0])
+	recv(t, doneA, "the first update to finish")
+	recv(t, doneB, "the second update to finish")
 	if errA != nil || errB != nil {
 		t.Fatalf("UpdatePool: %v, %v", errA, errB)
 	}
@@ -253,26 +273,31 @@ func TestLifecycle_TwoMovesOfOneConnectionDoNotShareAFence(t *testing.T) {
 	}
 	// Both moves are held inside their drains: the first while the second
 	// tries to overtake it, the second while admission is read.
-	held := holdStep(f.eng, "conn.set_pool drained", 2)
+	probe := probeLifecycle(f.eng, "conn.set_pool drained", 2)
 
 	done1, done2 := make(chan struct{}), make(chan struct{})
 	var err1, err2 error
 	go func() { defer close(done1); err1 = f.eng.SetConnectionPool(ctx, f.rootTok, pg, b, testIP) }()
-	<-held.arrived
+	probe.first(t)
 	go func() { defer close(done2); err2 = f.eng.SetConnectionPool(ctx, f.rootTok, pg, c, testIP) }()
-	secondIn := make(chan struct{})
-	go func() { <-held.arrived; close(secondIn) }()
-	letSecondRun(secondIn)
-	close(held.release[0])
-	<-done1
-	<-secondIn // the second move is inside its drain now, and held there
+	if recv(t, probe.free, "the second move to reach the guard") {
+		// Found free: it drains alongside the first, which then finishes.
+		recv(t, probe.arrived, "the second move to reach its drain")
+		close(probe.release[0])
+		recv(t, done1, "the first move to finish")
+	} else {
+		close(probe.release[0])
+		recv(t, done1, "the first move to finish")
+		recv(t, probe.arrived, "the second move to reach its drain")
+	}
+	// The second move is inside its drain now, and held there.
 
 	if derr := f.eng.sessions.drainErr(pg); !errors.Is(derr, ErrConnectionDraining) {
 		t.Errorf("mid-move, admission answers %v, want ErrConnectionDraining: the other move "+
 			"lifted this one's fence", derr)
 	}
-	close(held.release[1])
-	<-done2
+	close(probe.release[1])
+	recv(t, done2, "the second move to finish")
 	if err1 != nil || err2 != nil {
 		t.Fatalf("SetConnectionPool: %v, %v", err1, err2)
 	}
@@ -297,17 +322,19 @@ func TestLifecycle_ADeleteAndAnAssignmentLeaveNoDanglingMembership(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	held := holdStep(f.eng, "pool.delete counted", 1)
+	probe := probeLifecycle(f.eng, "pool.delete counted", 1)
 
 	doneD, doneM := make(chan struct{}), make(chan struct{})
 	var errD, errM error
 	go func() { defer close(doneD); errD = f.eng.DeletePool(ctx, f.rootTok, p, testIP) }()
-	<-held.arrived
+	probe.first(t)
 	go func() { defer close(doneM); errM = f.eng.SetConnectionPool(ctx, f.rootTok, pg, p, testIP) }()
-	letSecondRun(doneM)
-	close(held.release[0])
-	<-doneD
-	<-doneM
+	if recv(t, probe.free, "the move to reach the guard") {
+		recv(t, doneM, "the move, which found the guard free, to finish")
+	}
+	close(probe.release[0])
+	recv(t, doneD, "the delete to finish")
+	recv(t, doneM, "the move to finish")
 	if errD != nil {
 		t.Fatalf("DeletePool: %v", errD)
 	}
