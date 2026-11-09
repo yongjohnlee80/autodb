@@ -178,6 +178,7 @@ func TestAdmitFD_AClientThatLeavesWhileQueuedLeavesTheLine(t *testing.T) {
 		t.Fatal("the login never reached the line")
 	}
 
+	peer := conn.LocalAddr().String()
 	_ = conn.Close()
 	select {
 	case depth := <-left:
@@ -198,7 +199,7 @@ func TestAdmitFD_AClientThatLeavesWhileQueuedLeavesTheLine(t *testing.T) {
 	if n := eventsOf(l.events(), "fd.session_open", ""); n != 1 {
 		t.Errorf("%d sessions opened, want only the holder's", n)
 	}
-	endedSilently(t, l.lis, l.events)
+	endedSilently(t, l.lis, l.events, peer)
 }
 
 // loginRaw starts a login on addr and answers the password prompt with frames
@@ -330,7 +331,9 @@ func TestAdmitFD_InputSentBeforeTheLoginMaySpeakIsRefused(t *testing.T) {
 		l := pgLoopFull(t, exec.WithWaiterQueued(func() { queued <- struct{}{} }))
 		shareOfOne(t, l)
 		busyHolder(t, l.addr, l.secret, l.database, 4*time.Second)
+		var peer string
 		got := loginRaw(t, l.addr, l.secret, l.database, nil, nil, func(conn *tls.Conn) {
+			peer = conn.LocalAddr().String()
 			select {
 			case <-queued:
 			case <-time.After(10 * time.Second):
@@ -341,7 +344,7 @@ func TestAdmitFD_InputSentBeforeTheLoginMaySpeakIsRefused(t *testing.T) {
 		if got.authOK || got.ready {
 			t.Fatal("a login that spoke while it waited was admitted")
 		}
-		endedAsInput(t, l.lis, l.events)
+		endedAsInput(t, l.lis, l.events, peer)
 	})
 }
 
@@ -386,10 +389,11 @@ func TestAdmitFD_TheWatchDecidesAtTheHandoff(t *testing.T) {
 			waitFor(t, "the admitted session's close", func() bool {
 				return closedFor(t, l, c.reason) == 1
 			})
+			peer := client.Load().LocalAddr().String()
 			if c.reason == "protocol-violation" {
-				endedAsInput(t, lis, events)
+				endedAsInput(t, lis, events, peer)
 			} else {
-				endedSilently(t, lis, events)
+				endedSilently(t, lis, events, peer)
 			}
 		})
 	}
@@ -418,13 +422,26 @@ func eventsOf(evs []Event, kind, reason string) int {
 	return n
 }
 
+// connectionEnded waits for the listener to finish with the connection from
+// peer: its fd.conn_close is the last thing the connection's handler records, so
+// a refusal or a charge for it cannot land after this returns.
+func connectionEnded(t *testing.T, events func() []Event, peer string) {
+	t.Helper()
+	waitFor(t, "the connection's close", func() bool {
+		for _, e := range events() {
+			if e.Kind == "fd.conn_close" && e.Peer == peer {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 // endedAsInput asserts a login whose input ended its admission was refused as a
 // protocol violation exactly once, and charged exactly once.
-func endedAsInput(t *testing.T, lis *Listener, events func() []Event) {
+func endedAsInput(t *testing.T, lis *Listener, events func() []Event, peer string) {
 	t.Helper()
-	waitFor(t, "the protocol refusal", func() bool {
-		return eventsOf(events(), "fd.auth_denied", string(reasonPreAuthProtocolViolation)) >= 1
-	})
+	connectionEnded(t, events, peer)
 	if n := eventsOf(events(), "fd.auth_denied", ""); n != 1 {
 		t.Errorf("%d login refusals recorded, want exactly the one protocol violation", n)
 	}
@@ -434,9 +451,11 @@ func endedAsInput(t *testing.T, lis *Listener, events func() []Event) {
 }
 
 // endedSilently asserts a login whose client left was neither refused nor
-// charged: nobody was there to tell, and leaving is not grinding.
-func endedSilently(t *testing.T, lis *Listener, events func() []Event) {
+// charged: nobody was there to tell, and leaving is not grinding. Sampled only
+// once the departed connection has ended, so a late refusal cannot slip past.
+func endedSilently(t *testing.T, lis *Listener, events func() []Event, peer string) {
 	t.Helper()
+	connectionEnded(t, events, peer)
 	if n := eventsOf(events(), "fd.auth_denied", ""); n != 0 {
 		t.Errorf("a departed client's login recorded %d refusals, want none", n)
 	}

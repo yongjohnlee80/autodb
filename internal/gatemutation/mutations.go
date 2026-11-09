@@ -1499,6 +1499,15 @@ func All() []Mutation {
 			Guarantee:   "that a client hanging up while queued takes its login out of the line at once",
 		},
 		{
+			Name: "a-departure-is-not-a-protocol-refusal", Package: "./frontdoor/", File: "frontdoor/admit.go",
+			// A client that hung up is answered and charged as one that spoke too early.
+			Anchor:      "\t\tl.closeAdmitted(admitted, peer, \"peer-closed\")\n\t\treturn authOutcome{Failure: outcomeID(OutcomeAdmitPeerGone)}, errAdmitPeerGone\n",
+			Replacement: "\t\tl.closeAdmitted(admitted, peer, \"peer-closed\")\n\t\t_ = errAdmitPeerGone\n\t\treturn authOutcome{Denied: reasonPreAuthProtocolViolation}, nil\n",
+			Test:        "TestAdmitFD_AClientThatLeavesWhileQueuedLeavesTheLine",
+			Fails:       "a departed client's login recorded",
+			Guarantee:   "that a client leaving while its login waits is neither refused nor charged",
+		},
+		{
 			Name: "each-login-phase-declares-only-what-it-reaches", Package: "./frontdoor/", File: "frontdoor/outcomes.go",
 			// The whole union back under the credential phase.
 			Anchor:      "\treturn append(out, engineDenials(exec.AuthorizeDenials())...)\n",
