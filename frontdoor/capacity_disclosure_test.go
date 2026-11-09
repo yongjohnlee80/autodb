@@ -60,27 +60,27 @@ func TestCapacityDisclosure_TheTruthTable(t *testing.T) {
 		why     string
 	}{
 		{
-			"authorized capacity", PhaseAuthenticateAndOpen, exec.DenyLeaseCap,
+			"authorized capacity", PhaseAuthenticate, exec.DenyLeaseCap,
 			outcome.Capacity, true, CapacitySQLState,
 			"the one case that may disclose: the caller proved who they are and the system was full",
 		},
 		{
-			"unwitnessed capacity", PhaseAuthenticateAndOpen, exec.DenyLeaseCap,
+			"unwitnessed capacity", PhaseAuthenticate, exec.DenyLeaseCap,
 			outcome.Capacity, false, DenialSQLState,
 			"a capacity oracle for a peer who has proved nothing is what the uniform denial exists to prevent",
 		},
 		{
-			"authorized credential", PhaseAuthenticateAndOpen, exec.DenyBadCredential,
+			"authorized credential", PhaseAuthenticate, exec.DenyBadCredential,
 			outcome.Credential, true, DenialSQLState,
 			"authorization proves the caller, not the cause; this is a credential failure and must read as one",
 		},
 		{
-			"authorized none", PhaseAuthenticateAndOpen, exec.DenyNoGrant,
+			"authorized none", PhaseAuthenticate, exec.DenyNoGrant,
 			outcome.None, true, DenialSQLState,
 			"a missing grant is our stored state, not our load; telling them we are full is simply false",
 		},
 		{
-			"authorized profile refusal", PhaseAuthenticateAndOpen, exec.DenyProfileRefuses,
+			"authorized profile refusal", PhaseAuthenticate, exec.DenyProfileRefuses,
 			outcome.None, true, DenialSQLState,
 			"the connection does not admit front-door use at all, which has nothing to do with capacity",
 		},
@@ -125,7 +125,7 @@ func TestCapacityDisclosure_TheTruthTable(t *testing.T) {
 func TestCapacityDisclosure_TheDisclosedMessageCarriesNoCause(t *testing.T) {
 	t.Parallel()
 	for _, reason := range []string{exec.DenyLeaseCap, exec.DenySessionCap, exec.DenyResidentBudget} {
-		occ := occurrenceFor(t, PhaseAuthenticateAndOpen, reason, true)
+		occ := occurrenceFor(t, PhaseAuthenticate, reason, true)
 		frame := denialForOccurrence(occ)
 		if frame.Code != CapacitySQLState {
 			t.Fatalf("%s: code = %q, want the capacity state", reason, frame.Code)

@@ -84,6 +84,10 @@ type deadlines struct {
 	// measures a peer that has not started a message, this measures one that
 	// started and stopped mid-frame.
 	frameStall time.Duration
+	// reply bounds writing a front-door login's answer after its wait in line:
+	// the success sequence or a refusal. The credential deadline is long past by
+	// then, so the answer has a budget of its own.
+	reply time.Duration
 }
 
 func defaultDeadlines() deadlines {
@@ -91,7 +95,8 @@ func defaultDeadlines() deadlines {
 		tls:     TLSHandshakeDeadline,
 		startup: StartupDeadline,
 		auth:    AuthDeadline,
-		idle:    IdleDeadline, outputStall: timeouts.OutputStall, frameStall: timeouts.FrameStall}
+		idle:    IdleDeadline, outputStall: timeouts.OutputStall, frameStall: timeouts.FrameStall,
+		reply: timeouts.HandshakeReserve}
 }
 
 // Protocol version constants. autodb speaks 3.0 and negotiates 3.x down to

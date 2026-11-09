@@ -36,6 +36,12 @@ func newBlockingAuth() *blockingAuth {
 	return &blockingAuth{entered: make(chan struct{}, 256), release: make(chan struct{})}
 }
 
+// AuthorizeWire decides the whole open now, as this double's
+// OpenWireSessionWith does, and hands back a pre-admitted authorization.
+func (b *blockingAuth) AuthorizeWire(ctx context.Context, req exec.WireOpen) (*exec.WireAuthorization, error) {
+	return authorizeByOpening(ctx, req, b.OpenWireSessionWith)
+}
+
 // OpenWireSessionWith delegates: this fake is about worker occupancy.
 func (b *blockingAuth) OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error) {
 	return b.OpenWireSession(ctx, req.PAT, req.StartupUser, req.Database, req.IP)

@@ -123,10 +123,10 @@ func TestRunner_AnExactlyOncePhaseRefusesToRunTwice(t *testing.T) {
 	runs := 0
 	body := func() Outcome { runs++; return Continue() }
 
-	if _, err := lc.run(PhaseAuthenticateAndOpen, body); err != nil {
+	if _, err := lc.run(PhaseAuthenticate, body); err != nil {
 		t.Fatalf("the first run was refused: %v", err)
 	}
-	if _, err := lc.run(PhaseAuthenticateAndOpen, body); err == nil {
+	if _, err := lc.run(PhaseAuthenticate, body); err == nil {
 		t.Fatal("an exactly-once phase ran twice; for this phase that is a second session " +
 			"for one connection")
 	}
@@ -232,7 +232,7 @@ func TestRunner_TheWitnessReachesTheOccurrenceOnlyWhenGiven(t *testing.T) {
 		// the code.
 		lc := testLifecycle(t)
 		out := c.out
-		res, err := lc.run(PhaseAuthenticateAndOpen, func() Outcome { return out })
+		res, err := lc.run(PhaseAuthenticate, func() Outcome { return out })
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -253,8 +253,8 @@ func TestRunner_TheWitnessReachesTheOccurrenceOnlyWhenGiven(t *testing.T) {
 func TestPhases_EveryDeclarationIsComplete(t *testing.T) {
 	t.Parallel()
 	phases := lifecyclePhases()
-	if len(phases) != 6 {
-		t.Fatalf("%d phases declared, want the six the code actually has", len(phases))
+	if len(phases) != 7 {
+		t.Fatalf("%d phases declared, want the seven the code actually has", len(phases))
 	}
 	seen := map[PhaseName]bool{}
 	for _, p := range phases {
@@ -426,7 +426,8 @@ func TestPhases_EveryRaisedReasonIsDeclaredByItsPhase(t *testing.T) {
 	t.Parallel()
 
 	byFile := map[string]outcome.ProducerID{
-		"auth.go":     ProducerAuthOpen,
+		"auth.go":     ProducerAuthenticate,
+		"admit.go":    ProducerAdmit,
 		"startup.go":  ProducerStartup,
 		"params.go":   ProducerStartup,
 		"listener.go": ProducerAccept,
@@ -539,12 +540,13 @@ func TestPhases_EveryPhaseHasItsOwnProducer(t *testing.T) {
 	t.Parallel()
 
 	want := map[PhaseName]outcome.ProducerID{
-		PhaseAccept:              ProducerAccept,
-		PhaseStartup:             ProducerStartup,
-		PhaseCancel:              ProducerCancel,
-		PhaseAuthenticateAndOpen: ProducerAuthOpen,
-		PhaseHandshake:           ProducerHandshake,
-		PhaseServe:               ProducerServe,
+		PhaseAccept:       ProducerAccept,
+		PhaseStartup:      ProducerStartup,
+		PhaseCancel:       ProducerCancel,
+		PhaseAuthenticate: ProducerAuthenticate,
+		PhaseAdmit:        ProducerAdmit,
+		PhaseHandshake:    ProducerHandshake,
+		PhaseServe:        ProducerServe,
 	}
 
 	phases := lifecyclePhases()
@@ -621,12 +623,12 @@ func TestPhases_EachScenarioRunsItsExactPrefix(t *testing.T) {
 		{
 			"a denial stops after the credential exchange",
 			"auth-denied",
-			[]PhaseName{PhaseAccept, PhaseStartup, PhaseAuthenticateAndOpen},
+			[]PhaseName{PhaseAccept, PhaseStartup, PhaseAuthenticate},
 		},
 		{
 			"a served connection runs all of them",
 			"handshake-write-and-normal-close",
-			[]PhaseName{PhaseAccept, PhaseStartup, PhaseAuthenticateAndOpen, PhaseHandshake, PhaseServe},
+			[]PhaseName{PhaseAccept, PhaseStartup, PhaseAuthenticate, PhaseAdmit, PhaseHandshake, PhaseServe},
 		},
 	} {
 		var sc baselineScenario
@@ -745,44 +747,74 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"accept", "frontdoor/pre-auth-connection-cap", outcome.Refusal, outcome.Capacity},
 		{"accept", "frontdoor/source-connection-cap", outcome.Refusal, outcome.Capacity},
 		{"accept", "frontdoor/source-ip-throttled", outcome.Refusal, outcome.Credential},
-		{"authenticate-and-open", "auth-read-failed", outcome.Operational, outcome.Protocol},
-		{"authenticate-and-open", "auth-setup-failed", outcome.Operational, outcome.None},
-		{"authenticate-and-open", "auth-worker-unavailable", outcome.Operational, outcome.None},
-		{"authenticate-and-open", "frontdoor/auth-not-yet-available", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/auth-store-error", outcome.Operational, outcome.None},
-		{"authenticate-and-open", "frontdoor/startup-connection-unavailable", outcome.Operational, outcome.None},
-		{"authenticate-and-open", "frontdoor/startup-connection-unusable", outcome.Operational, outcome.None},
-		{"authenticate-and-open", "frontdoor/bad-credential", outcome.Refusal, outcome.Credential},
-		{"authenticate-and-open", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},
-		{"authenticate-and-open", "frontdoor/lease-cap-exceeded", outcome.Refusal, outcome.Capacity},
+		// The admission phase: an authorized login's wait and finalization. It
+		// calls the engine, so it declares the engine's identities and the shared
+		// startup and store endings; its own is a client that left while waiting.
+		{"admit", "admit-peer-gone", outcome.Operational, outcome.None},
+		{"admit", "frontdoor/auth-store-error", outcome.Operational, outcome.None},
+		{"admit", "frontdoor/startup-connection-unavailable", outcome.Operational, outcome.None},
+		{"admit", "frontdoor/startup-connection-unusable", outcome.Operational, outcome.None},
+		{"admit", "frontdoor/bad-credential", outcome.Refusal, outcome.Credential},
+		{"admit", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},
+		{"admit", "frontdoor/lease-cap-exceeded", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/queue-timeout", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/all-capacity-in-transaction", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/target-removed-while-waiting", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/connection-changing", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/target-budget-exhausted", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/instance-shutting-down", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/lease-encoding", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/no-grant", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/no-such-database", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/pat-allowed-ips", outcome.Refusal, outcome.Credential},
+		{"admit", "frontdoor/pat-cleartext-debug-in-tls", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/pat-not-cleartext-debug", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/pat-unscoped", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/pre-auth-protocol-violation", outcome.Refusal, outcome.Protocol},
+		{"admit", "frontdoor/profile-not-front-door", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/resident-budget-exceeded", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/session-cap-exceeded", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/startup-guc-refused", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/startup-user-mismatch", outcome.Refusal, outcome.Credential},
+		{"authenticate", "auth-read-failed", outcome.Operational, outcome.Protocol},
+		{"authenticate", "auth-setup-failed", outcome.Operational, outcome.None},
+		{"authenticate", "auth-worker-unavailable", outcome.Operational, outcome.None},
+		{"authenticate", "frontdoor/auth-not-yet-available", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/auth-store-error", outcome.Operational, outcome.None},
+		{"authenticate", "frontdoor/startup-connection-unavailable", outcome.Operational, outcome.None},
+		{"authenticate", "frontdoor/startup-connection-unusable", outcome.Operational, outcome.None},
+		{"authenticate", "frontdoor/bad-credential", outcome.Refusal, outcome.Credential},
+		{"authenticate", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},
+		{"authenticate", "frontdoor/lease-cap-exceeded", outcome.Refusal, outcome.Capacity},
 		// The four answers the admission line can give. Three of them follow a
 		// wait; all-capacity-in-transaction is deliberately the opposite --
 		// it is decided BEFORE the request joins the line, because nothing is
 		// going to be released and waiting would end in the same answer. None
 		// is charged: the caller presented nothing wrong, and charging them
 		// would ban a developer for their patience.
-		{"authenticate-and-open", "frontdoor/queue-timeout", outcome.Refusal, outcome.Capacity},
-		{"authenticate-and-open", "frontdoor/all-capacity-in-transaction", outcome.Refusal, outcome.Capacity},
-		{"authenticate-and-open", "frontdoor/target-removed-while-waiting", outcome.Refusal, outcome.Capacity},
+		{"authenticate", "frontdoor/queue-timeout", outcome.Refusal, outcome.Capacity},
+		{"authenticate", "frontdoor/all-capacity-in-transaction", outcome.Refusal, outcome.Capacity},
+		{"authenticate", "frontdoor/target-removed-while-waiting", outcome.Refusal, outcome.Capacity},
 		// A connection being moved to another pool or downgraded, and a pin
 		// that waited out its pool's front-door share: capacity, never charged.
-		{"authenticate-and-open", "frontdoor/connection-changing", outcome.Refusal, outcome.Capacity},
-		{"authenticate-and-open", "frontdoor/target-budget-exhausted", outcome.Refusal, outcome.Capacity},
-		{"authenticate-and-open", "frontdoor/instance-shutting-down", outcome.Refusal, outcome.Capacity},
-		{"authenticate-and-open", "frontdoor/lease-encoding", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/no-grant", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/no-such-database", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/pat-allowed-ips", outcome.Refusal, outcome.Credential},
-		{"authenticate-and-open", "frontdoor/pat-cleartext-debug-in-tls", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/pat-not-cleartext-debug", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/pat-unscoped", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/pre-auth-protocol-violation", outcome.Refusal, outcome.Protocol},
-		{"authenticate-and-open", "frontdoor/profile-not-front-door", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/resident-budget-exceeded", outcome.Refusal, outcome.Capacity},
-		{"authenticate-and-open", "frontdoor/session-cap-exceeded", outcome.Refusal, outcome.Capacity},
-		{"authenticate-and-open", "frontdoor/startup-guc-refused", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/startup-user-mismatch", outcome.Refusal, outcome.Credential},
+		{"authenticate", "frontdoor/connection-changing", outcome.Refusal, outcome.Capacity},
+		{"authenticate", "frontdoor/target-budget-exhausted", outcome.Refusal, outcome.Capacity},
+		{"authenticate", "frontdoor/instance-shutting-down", outcome.Refusal, outcome.Capacity},
+		{"authenticate", "frontdoor/lease-encoding", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/no-grant", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/no-such-database", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/pat-allowed-ips", outcome.Refusal, outcome.Credential},
+		{"authenticate", "frontdoor/pat-cleartext-debug-in-tls", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/pat-not-cleartext-debug", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/pat-unscoped", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/pre-auth-protocol-violation", outcome.Refusal, outcome.Protocol},
+		{"authenticate", "frontdoor/profile-not-front-door", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/resident-budget-exceeded", outcome.Refusal, outcome.Capacity},
+		{"authenticate", "frontdoor/session-cap-exceeded", outcome.Refusal, outcome.Capacity},
+		{"authenticate", "frontdoor/startup-guc-refused", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/startup-user-mismatch", outcome.Refusal, outcome.Credential},
 		{"cancel", "fd.cancel_applied", outcome.Control, outcome.None},
 		{"cancel", "fd.cancel_received", outcome.Control, outcome.None},
 		{"cancel", "fd.cancel_stale", outcome.Control, outcome.None},
@@ -1016,21 +1048,21 @@ func TestCharging_TheRegisteredClassIsTheOnlyAuthority(t *testing.T) {
 		charge bool
 		why    string
 	}{
-		{"the peer abandoned the exchange", PhaseAuthenticateAndOpen, OutcomeAuthReadFailed, true,
+		{"the peer abandoned the exchange", PhaseAuthenticate, OutcomeAuthReadFailed, true,
 			"leaving mid-exchange is the same act as grinding a credential, one step earlier"},
-		{"a frame that is not a password", PhaseAuthenticateAndOpen, string(reasonPreAuthProtocolViolation), true,
+		{"a frame that is not a password", PhaseAuthenticate, string(reasonPreAuthProtocolViolation), true,
 			"an unambiguous protocol violation before authentication"},
-		{"a bad credential", PhaseAuthenticateAndOpen, exec.DenyBadCredential, true,
+		{"a bad credential", PhaseAuthenticate, exec.DenyBadCredential, true,
 			"the peer presented something wrong"},
-		{"no worker to spare", PhaseAuthenticateAndOpen, OutcomeAuthWorkerBusy, false,
+		{"no worker to spare", PhaseAuthenticate, OutcomeAuthWorkerBusy, false,
 			"OUR capacity; the peer presented something we never looked at"},
-		{"the exchange could not be set up", PhaseAuthenticateAndOpen, OutcomeAuthSetupFailed, false,
+		{"the exchange could not be set up", PhaseAuthenticate, OutcomeAuthSetupFailed, false,
 			"ours, before the peer did anything at all"},
-		{"the store would not answer", PhaseAuthenticateAndOpen, string(reasonAuthStoreError), false,
+		{"the store would not answer", PhaseAuthenticate, string(reasonAuthStoreError), false,
 			"throttling a peer for our own outage turns one incident into two"},
-		{"the pool is full", PhaseAuthenticateAndOpen, exec.DenyLeaseCap, false,
+		{"the pool is full", PhaseAuthenticate, exec.DenyLeaseCap, false,
 			"CAPACITY IS NOT A CREDENTIAL FAILURE -- charging it is what banned a developer"},
-		{"a missing grant", PhaseAuthenticateAndOpen, exec.DenyNoGrant, false,
+		{"a missing grant", PhaseAuthenticate, exec.DenyNoGrant, false,
 			"our stored state, met by a caller who has already proved who they are"},
 		{"a refused startup parameter", PhaseStartup, string(reasonStartupParamRefus), true,
 			"probing the startup surface repeatedly is how an attacker maps it"},
@@ -1302,7 +1334,7 @@ func TestRunner_AVerdictThatContradictsItsDeclarationIsRefused(t *testing.T) {
 	}{
 		{
 			"a refusal built from an operational identity",
-			PhaseAuthenticateAndOpen,
+			PhaseAuthenticate,
 			func() Outcome { return Refuse(outcomeID(OutcomeAuthReadFailed)) },
 		},
 		{
@@ -1344,7 +1376,7 @@ func TestRunner_AVerdictThatContradictsItsDeclarationIsRefused(t *testing.T) {
 	}{
 		{"a refusal from a refusal identity", PhaseStartup,
 			func() Outcome { return Refuse(outcomeID(string(reasonUnsupportedMajor))) }},
-		{"an operational from an operational identity", PhaseAuthenticateAndOpen,
+		{"an operational from an operational identity", PhaseAuthenticate,
 			func() Outcome { return Operational(outcomeID(OutcomeAuthReadFailed), errors.New("x")) }},
 		{"a control from a control identity", PhaseCancel,
 			func() Outcome { return TerminalControl(outcomeID(EventCancelApplied)) }},
@@ -1380,7 +1412,7 @@ func TestRunner_ALifecycleFaultResolvesThroughItsProducer(t *testing.T) {
 	// AND NO PHASE MAY CLAIM IT. Filing our own defect under the phase it
 	// interrupted puts our bugs into that phase's vocabulary, and an operator
 	// counting startup failures would count them.
-	for _, phase := range []PhaseName{PhaseAccept, PhaseStartup, PhaseAuthenticateAndOpen,
+	for _, phase := range []PhaseName{PhaseAccept, PhaseStartup, PhaseAuthenticate, PhaseAdmit,
 		PhaseHandshake, PhaseServe} {
 		if _, err := lc.run(phase, func() Outcome {
 			return Operational(outcomeID(OutcomeInternalError), errors.New("x"))
@@ -1591,7 +1623,7 @@ func TestCharging_OurWorkerShortfallIsNotChargedToThePeer(t *testing.T) {
 	if lc == nil {
 		t.Fatal("no lifecycle recorded")
 	}
-	concluded, ran := lc.concluded(PhaseAuthenticateAndOpen)
+	concluded, ran := lc.concluded(PhaseAuthenticate)
 	if !ran {
 		t.Fatal("the credential phase did not run")
 	}
