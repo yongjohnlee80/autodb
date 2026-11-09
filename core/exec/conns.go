@@ -642,7 +642,7 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 	// appears to succeed. This is capability cleanup, not an exposure change:
 	// the exposure property and transition lock remain untouched.
 	if was == meta.ProfileSession && profile != meta.ProfileSession {
-		e.closeSessionsFor(ctx, connID, ip, "profile-downgraded", drainChanged)
+		e.closeSessionsFor(ctx, connID, ip, reasonProfileDowngraded, drainChanged)
 		e.sessions.clearDraining(connID)
 	}
 	return nil
@@ -756,7 +756,7 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 	// closeSessionsFor now owns the whole sequence — the mark and the pool
 	// detach are one atomic step, so nothing can obtain a pool in between —
 	// and it closes the detached pool once the sessions are gone.
-	e.closeSessionsFor(ctx, connID, ip, "connection-deleted", drainRemoved)
+	e.closeSessionsFor(ctx, connID, ip, reasonConnectionDeleted, drainRemoved)
 
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.store.Connections.On(tx).With(meta.ConnID, connID).Delete(); err != nil {
@@ -950,3 +950,13 @@ func (e *Engine) RenameConnection(ctx context.Context, token string, connID int6
 // exposure was turned off. A login being finalized on it reads this reason and is
 // refused as the connection refusing the front door (closedBeneath).
 const reasonExposureDisabled = "exposure-disabled"
+
+// The reasons closeSessionsFor closes a connection's sessions with. A login being
+// finalized on it reads them (closedBeneath) and is answered as the line answers
+// a waiter swept by the same change: a deleted connection is gone, a moved or
+// downgraded one is changing.
+const (
+	reasonConnectionDeleted     = "connection-deleted"
+	reasonProfileDowngraded     = "profile-downgraded"
+	reasonConnectionPoolChanged = "connection-pool-changed"
+)

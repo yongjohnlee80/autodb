@@ -187,7 +187,7 @@ func (e *Engine) SetConnectionPool(ctx context.Context, token string, connID, po
 		return nil
 	}
 
-	e.closeSessionsFor(ctx, connID, ip, "connection-pool-changed", drainChanged)
+	e.closeSessionsFor(ctx, connID, ip, reasonConnectionPoolChanged, drainChanged)
 	// A failed write leaves the connection where it was, and usable.
 	defer e.sessions.clearDraining(connID)
 	e.atLifecycleStep("conn.set_pool drained")
