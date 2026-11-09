@@ -56,16 +56,52 @@ const (
 	// bytes, before it stops holding a statement open.
 	MemoryLaneWait = 30 * time.Second
 	// ReclaimGrace is how long a session must have been silent before a
-	// waiting login may end it to take its place. A pooled client sends its
-	// first statement a moment after the session opens, and a request's
-	// statements a moment apart; ending a session inside that gap hands the
-	// client a dead connection, and the burst that caused the wait turns into
-	// failed requests.
+	// waiting login may end it to take its slot.
 	//
-	// SHORTER THAN A FRONT-DOOR LOGIN'S WAIT, which is CredentialExchange less
-	// PinAllowance and HandshakeReserve (6 s). A login that arrives just as
-	// every holder went quiet can still be served by the one that stays quiet
-	// longest; a guard test holds the two apart.
+	// WHAT IT PROTECTS. When a pool's front-door share is full, a waiting
+	// login may reclaim a session that is doing nothing: no statement
+	// running, no transaction open. Without a minimum silence, "doing
+	// nothing" included a session opened a moment earlier whose client had
+	// not yet sent its first statement, and one between two statements of
+	// the same request. A pooled client (database/sql, a JDBC pool) holds
+	// exactly those sessions. In a burst past the share, every waiting login
+	// ended the session opened just before it; the client was handed a dead
+	// connection, retried, and gave up. Measured through a real client: 20 of
+	// 40 concurrent requests failed, and 25 of 30 in the reproduction
+	// (TestHarness_ABurstPastTheShareWaitsAndEveryRequestRuns).
+	//
+	// WHAT IT MEASURES. Only the client's silence: the time from autodb
+	// finishing the session's last statement (or the session opening) to the
+	// client's next message. Time on the database is not silence, because a
+	// session running a statement is busy and never reclaimable, so a slow
+	// query or a distant database server spends none of it. Time waiting in
+	// the line is not silence either: the clock restarts when the login
+	// opens.
+	//
+	// WHY 3 SECONDS. Bounded on both sides:
+	//
+	//   - Above a client's working gap. That gap is one network round trip
+	//     between client and autodb plus the client's own processing, about
+	//     0.2 s even from Asia to North America. 3 s is over ten times that,
+	//     so a client in the middle of its work is not ended.
+	//   - Below what a front-door login can wait. The wait runs inside the
+	//     credential exchange: CredentialExchange less PinAllowance and
+	//     HandshakeReserve, 6 s. Serving a login by reclamation takes this
+	//     grace and then the victim's goodbye write (GoodbyeWrite, 2 s):
+	//     3 s + 2 s fits, so a login that arrives just as every holder went
+	//     quiet can still be served. A longer grace would refuse that login
+	//     with 53300 before any slot could be freed for it.
+	//
+	// A session quiet for 3 s or more under a waiting login is idle for this
+	// purpose and may be ended: a pooled connection resting between
+	// requests included. Its client is told why, and retries on another
+	// connection.
+	//
+	// FIXED, NOT A SETTING, because it is only correct relative to the fixed
+	// constants above: TestReclaimGrace_FitsInsideAFrontDoorLoginsWait fails
+	// if the sum stops fitting, and a policy whose session_idle_timeout is not
+	// longer than this is refused. docs/front-door/connection-holding-policy.md
+	// describes the behaviour for operators.
 	ReclaimGrace = 3 * time.Second
 )
 
