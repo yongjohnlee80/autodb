@@ -13,9 +13,10 @@ import (
 	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
 )
 
-// Protocol is the AutoDB wire protocol this plugin speaks: the one that has the session cursor
-// verbs. A server of another protocol refuses the hello.
-const Protocol int64 = 14
+// Protocol is the AutoDB wire protocol this plugin speaks: the one that has the connection pool
+// verbs (and, before them, the session cursor verbs). A server of another protocol refuses the
+// hello, so this moves with rpc.Protocol; TestTheProtocolAndCodesAreAutoDBs holds the two equal.
+const Protocol int64 = 15
 
 // The AutoDB error codes the plugin acts on. Each is AutoDB's own number on the wire.
 const (
