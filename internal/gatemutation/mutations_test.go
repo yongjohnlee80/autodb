@@ -273,6 +273,8 @@ func expectedControls() map[string][3]string {
 		"a-clamp-and-its-audit-row-are-one-transaction":           {"core/exec/policy.go", "./core/exec/", "TestLoadDurablePolicy_AClampWhoseAuditFailsStoresNothing"},
 		"a-holder-inside-its-grace-is-not-ended":                  {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_AHolderInsideItsGraceIsNotEnded"},
 		"the-janitor-asks-again-once-a-holder-passes-its-grace":   {"core/exec/session_timeout.go", "./core/exec/", "TestDemandRetry_TheJanitorAsksAgainOnceAHolderPassesItsGrace"},
+		"an-ask-is-armed-for-the-end-of-a-grace":                  {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandRetry_AWaitingLoginIsServedTheMomentAHolderPassesItsGrace"},
+		"an-idle-timeout-must-outlast-the-reclaim-grace":          {"core/exec/policy.go", "./core/exec/", "TestReloadPolicy_RefusesASessionIdleInsideTheReclaimGrace"},
 		"release-serves-the-line":                                 {"core/exec/session.go", "./core/exec/", "TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting"},
 		"expired-wait-names-its-blocker":                          {"core/exec/wire_session.go", "./core/exec/", "TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal"},
 		"the-wait-arm-comes-first":                                {"core/exec/wire_session.go", "./core/exec/", "TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn"},

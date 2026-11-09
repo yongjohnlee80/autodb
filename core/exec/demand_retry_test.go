@@ -376,6 +376,8 @@ func TestDemandRetry_TheJanitorAsksAgainOnceAHolderPassesItsGrace(t *testing.T) 
 	holder.gen = e.sessions.genSeq
 	r := e.sessions
 	seen := queuedAt(r)
+	// The armed retry never fires here: this cell is about the sweep alone.
+	r.afterFunc = func(time.Duration, func()) func() bool { return func() bool { return true } }
 
 	knocked := make(chan struct{}, 1)
 	holder.wake = func() {
@@ -412,5 +414,82 @@ func TestDemandRetry_TheJanitorAsksAgainOnceAHolderPassesItsGrace(t *testing.T) 
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the reclaimed lease never reached the request that was waiting for it")
+	}
+}
+
+// A WAITING LOGIN IS SERVED THE MOMENT A HOLDER PASSES ITS GRACE.
+//
+// A front-door login waits about six seconds. The ask at arrival finds the
+// holder inside its grace, so an ask has to be armed for the instant that grace
+// ends; waiting for the janitor's next sweep could take longer than the login
+// has.
+func TestDemandRetry_AWaitingLoginIsServedTheMomentAHolderPassesItsGrace(t *testing.T) {
+	start := time.Now()
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()) }
+
+	holder := demandHolder("quiet-for-a-second", 1, 7, start.Add(-time.Second))
+	e := New(nil, nil, WithNow(now))
+	e.sessions.pools = fixedLeases(1)
+	if err := e.sessions.admitWithLease(holder, holder.connID, 0); err != nil {
+		t.Fatalf("seeding the holder: %v", err)
+	}
+	e.sessions.genSeq++
+	holder.gen = e.sessions.genSeq
+	r := e.sessions
+	seen := queuedAt(r)
+
+	type armed struct {
+		d    time.Duration
+		fire func()
+	}
+	arms := make(chan armed, 8)
+	r.afterFunc = func(d time.Duration, f func()) func() bool {
+		arms <- armed{d, f}
+		return func() bool { return true }
+	}
+	knocked := make(chan struct{}, 1)
+	holder.wake = func() {
+		select {
+		case knocked <- struct{}{}:
+		default:
+		}
+	}
+
+	waiterDone := make(chan error, 1)
+	waiter := schedSession("arrived-while-the-holder-was-in-its-grace", 2, 7)
+	go func() { waiterDone <- r.admitWithLeaseOrWait(context.Background(), waiter, 7, 0) }()
+	awaitSeq(t, seen)
+
+	var a armed
+	select {
+	case a = <-arms:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ask was armed for the instant the holder's grace ends; the login waits " +
+			"for the janitor, which can be longer than a front-door login has")
+	}
+	if want := timeouts.ReclaimGrace - time.Second; a.d != want {
+		t.Errorf("the ask was armed %v from now, want %v: when the holder's grace ends", a.d, want)
+	}
+	if holder.get() != sessOpen {
+		t.Fatal("the holder was reserved inside its grace")
+	}
+
+	clock.Store(start.Add(a.d).UnixNano())
+	a.fire()
+	select {
+	case <-knocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the armed ask did not ask the holder to leave once its grace had ended")
+	}
+	r.remove(holder)
+	select {
+	case err := <-waiterDone:
+		if err != nil {
+			t.Fatalf("the queued login was not served by the reclaimed lease: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reclaimed lease never reached the login that was waiting for it")
 	}
 }

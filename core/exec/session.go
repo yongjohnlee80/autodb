@@ -468,6 +468,12 @@ type sessionRegistry struct {
 	// allowed only while more requests are waiting than reclamations are
 	// already coming.
 	demandPromised map[leaseKey]map[SessionID]struct{}
+	// demandRetry is, per target, the one ask armed for the instant a holder
+	// finishes its ReclaimGrace (retryDemandAt). Guarded by demandMu.
+	demandRetry map[leaseKey]demandRetry
+	// afterFunc arms a retry; nil is time.AfterFunc. A cell replaces it to
+	// fire the retry on its own clock.
+	afterFunc func(d time.Duration, f func()) (stop func() bool)
 
 	// resident is the global weighted memory budget.
 	// The session's FIXED OVERHEAD is charged here as the fourth member of

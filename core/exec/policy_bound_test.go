@@ -141,3 +141,25 @@ func TestLoadDurablePolicy_AFailedRewriteRunsUnderTheStoredGeneration(t *testing
 		t.Error("a failed write stored a policy")
 	}
 }
+
+// AN IDLE TIMEOUT INSIDE THE RECLAIM GRACE IS REFUSED. Every quiet session
+// would be ended by the timeout before a waiting login could reclaim one.
+func TestReloadPolicy_RefusesASessionIdleInsideTheReclaimGrace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := policyFixture(t)
+	before := f.eng.Settings()
+
+	spec := goodSpec()
+	spec.SessionIdleTimeout = timeouts.ReclaimGrace
+	_, err := f.eng.ReloadPolicy(ctx, f.rootTok, spec, testIP)
+	if !errors.Is(err, ErrPolicyInvalid) {
+		t.Fatalf("err = %v, want ErrPolicyInvalid for session_idle_timeout = ReclaimGrace", err)
+	}
+	if !strings.Contains(err.Error(), "reclaim grace") {
+		t.Errorf("the refusal does not name the reclaim grace: %v", err)
+	}
+	if got := f.eng.Settings(); !reflect.DeepEqual(got, before) {
+		t.Errorf("a refused spec moved the live settings:\n before %+v\n after  %+v", before, got)
+	}
+}

@@ -187,6 +187,14 @@ func (e *Engine) validatePolicy(s PolicySpec) error {
 			"closed it, so unused pools could never shrink to zero against the target",
 			ErrPolicyInvalid, s.SessionIdleTimeout, e.poolMaxConnIdleTime)
 	}
+	// An idle session must outlast the reclaim grace. Below it, the idle
+	// timeout would end every quiet session before a waiting login could be
+	// served by reclaiming one, and demand would never act.
+	if s.SessionIdleTimeout <= timeouts.ReclaimGrace {
+		return fmt.Errorf("%w: session_idle_timeout (%v) is not longer than the reclaim grace (%v), "+
+			"so no idle session could ever be reclaimed for a waiting login",
+			ErrPolicyInvalid, s.SessionIdleTimeout, timeouts.ReclaimGrace)
+	}
 	// The sweep is what enforces every bound above. A deadline shorter than
 	// the interval between sweeps is a deadline nothing looks at in time, and
 	// the janitor's interval is fixed at startup -- so it is the reload that

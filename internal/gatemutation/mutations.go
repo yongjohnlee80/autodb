@@ -1313,8 +1313,8 @@ func All() []Mutation {
 		},
 		{
 			Name: "a-holder-inside-its-grace-is-not-ended", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
-			Anchor:      " &&\n\t\t\tnow.Sub(s.lastUsed) >= timeouts.ReclaimGrace\n",
-			Replacement: "\n",
+			Anchor:      "\t\teligible := s.askableLocked() && now.Sub(s.lastUsed) >= timeouts.ReclaimGrace\n",
+			Replacement: "\t\teligible := s.askableLocked()\n",
 			Test:        "TestDemandReclaim_AHolderInsideItsGraceIsNotEnded",
 			Fails:       "inside ReclaimGrace",
 			Guarantee:   "that a waiting login never ends a session its client is about to use",
@@ -1326,6 +1326,22 @@ func All() []Mutation {
 			Test:        "TestDemandRetry_TheJanitorAsksAgainOnceAHolderPassesItsGrace",
 			Fails:       "did not ask the holder to leave",
 			Guarantee:   "that a login queued behind holders in their grace is served once one has been silent for ReclaimGrace",
+		},
+		{
+			Name: "an-ask-is-armed-for-the-end-of-a-grace", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
+			Anchor:      "\t\tif at, ok := e.sessions.nextReclaimable(key); ok {\n\t\t\te.sessions.retryDemandAt(key, at, at.Sub(now))\n\t\t}\n",
+			Replacement: "",
+			Test:        "TestDemandRetry_AWaitingLoginIsServedTheMomentAHolderPassesItsGrace",
+			Fails:       "no ask was armed",
+			Guarantee:   "that a front-door login waiting on a holder in its grace is served when the grace ends, within the login's wait",
+		},
+		{
+			Name: "an-idle-timeout-must-outlast-the-reclaim-grace", Package: "./core/exec/", File: "core/exec/policy.go",
+			Anchor:      "\tif s.SessionIdleTimeout <= timeouts.ReclaimGrace {\n",
+			Replacement: "\tif false && s.SessionIdleTimeout <= timeouts.ReclaimGrace {\n",
+			Test:        "TestReloadPolicy_RefusesASessionIdleInsideTheReclaimGrace",
+			Fails:       "want ErrPolicyInvalid",
+			Guarantee:   "that no policy lets the idle timeout end every quiet session before demand could reclaim one",
 		},
 	}
 }
