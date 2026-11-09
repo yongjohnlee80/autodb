@@ -20,9 +20,13 @@ const (
 	// ProducerCancel is the cancel-request branch: terminal, and it never
 	// authenticates.
 	ProducerCancel = outcome.ProducerID("cancel")
-	// ProducerAuthOpen is the credential exchange this package drives around
-	// the engine's single open call.
-	ProducerAuthOpen = outcome.ProducerID("authenticate-and-open")
+	// ProducerAuthenticate is the credential exchange: the password read and
+	// the engine's authorization, inside an auth worker under the credential
+	// deadline.
+	ProducerAuthenticate = outcome.ProducerID("authenticate")
+	// ProducerAdmit is an authorized login's wait for its pool and the engine's
+	// finalization, after the credential phase has ended (admit.go).
+	ProducerAdmit = outcome.ProducerID("admit")
 	// ProducerHandshake is the success sequence and the transition into the
 	// session.
 	ProducerHandshake = outcome.ProducerID("handshake")
@@ -76,10 +80,14 @@ const (
 	// we could not spare presented something we never looked at.
 	OutcomeAuthWorkerBusy  = "auth-worker-unavailable"
 	OutcomeAuthSetupFailed = "auth-setup-failed"
-	OutcomeHandshakeWrite  = "handshake-write-failed"
-	OutcomeDeadlineArm     = "deadline"
-	OutcomeSessionError    = "session-error"
-	OutcomePeerClosed      = "peer-closed"
+	// OutcomeAdmitPeerGone is an authorized login whose client left while it
+	// waited for its pool: nobody is listening, so nothing is written, and the
+	// peer did nothing wrong by giving up a wait, so it is not charged.
+	OutcomeAdmitPeerGone  = "admit-peer-gone"
+	OutcomeHandshakeWrite = "handshake-write-failed"
+	OutcomeDeadlineArm    = "deadline"
+	OutcomeSessionError   = "session-error"
+	OutcomePeerClosed     = "peer-closed"
 	// OutcomeDialFailed is a request whose backend connection could not be
 	// opened, at any stage: the name, the socket, the TLS handshake, the
 	// startup exchange, the credential autodb presents upstream, or the
@@ -290,7 +298,8 @@ func Outcomes() []outcome.Registration {
 			control(EventCancelApplied),
 			control(EventCancelStale),
 		}},
-		{Producer: ProducerAuthOpen, Outcomes: credentialOutcomes(refusal, operational)},
+		{Producer: ProducerAuthenticate, Outcomes: authenticateOutcomes(refusal, operational)},
+		{Producer: ProducerAdmit, Outcomes: admitOutcomes(refusal)},
 		{Producer: ProducerHandshake, Outcomes: []outcome.Decl{
 			// A write that failed is OURS or the network's, never a thing the
 			// peer did wrong, so none of these is charged.
@@ -346,7 +355,16 @@ func Outcomes() []outcome.Registration {
 	}
 }
 
-// credentialOutcomes is what the credential phase can end on.
+// authenticateOutcomes is what the credential phase can end on, and
+// admitOutcomes what the admission phase can. Both call the engine, so both
+// declare the engine's identities, and both share engineSideOutcomes: the
+// startup and store endings that reach the wire from whichever phase's engine
+// call raised them.
+//
+// credential-phase only: the read, the worker, the setup and the missing store.
+// admission-phase only: a client that left while waiting.
+// both: the protocol violation (the pre-auth type check; input sent while the
+// login waited) and the engine's own registration.
 //
 // IT DECLARES THE ENGINE'S IDENTITIES AS WELL AS ITS OWN, and that is the case
 // that forced membership onto the producer rather than onto the reason. The
@@ -359,11 +377,45 @@ func Outcomes() []outcome.Registration {
 // would fail is the worst available: a refusal the engine raises and this
 // phase has not declared is refused by the runner as a programming error --
 // during an incident, on the path that was already refusing somebody.
-func credentialOutcomes(
+func authenticateOutcomes(
 	refusal func(denialReason, outcome.Charge) outcome.Decl,
 	operational func(denialReason) outcome.Decl,
 ) []outcome.Decl {
 	out := []outcome.Decl{
+		// A listener with no credential store behind it yet is a DECISION not
+		// to serve, taken before anything failed.
+		refusal(reasonNoCredentialStore, outcome.None),
+		// A credential exchange the peer abandoned mid-way, and a fault in our
+		// own phase wiring. Neither is a refusal; both end the connection.
+		// CHARGED, because it is the peer's doing. The registry is the only
+		// place that decides this now.
+		{ID: OutcomeAuthReadFailed, Kind: outcome.Operational, Charge: outcome.Protocol},
+		{ID: OutcomeAuthWorkerBusy, Kind: outcome.Operational, Charge: outcome.None},
+		{ID: OutcomeAuthSetupFailed, Kind: outcome.Operational, Charge: outcome.None},
+		// THEIRS: a frame that is not a password where a password belongs.
+		// This is the credential exchange being spoken wrongly, which is the
+		// same kind of thing as grinding it.
+		refusal(reasonPreAuthProtocolViolation, outcome.Protocol),
+	}
+	return append(append(out, engineSideOutcomes()...), exec.Registration().Outcomes...)
+}
+
+func admitOutcomes(refusal func(denialReason, outcome.Charge) outcome.Decl) []outcome.Decl {
+	out := []outcome.Decl{
+		// THEIRS, for the same reason as in the credential phase: a login that
+		// speaks before it was told it may is the credential exchange spoken
+		// wrongly, whether its frame arrived with the password or during the wait.
+		refusal(reasonPreAuthProtocolViolation, outcome.Protocol),
+		{ID: OutcomeAdmitPeerGone, Kind: outcome.Operational, Charge: outcome.None},
+	}
+	return append(append(out, engineSideOutcomes()...), exec.Registration().Outcomes...)
+}
+
+// engineSideOutcomes are the endings an engine call can produce that are not
+// the engine's own denials: a store that would not answer, and a target that is
+// unavailable or unusable. Either phase that calls the engine can end on them.
+func engineSideOutcomes() []outcome.Decl {
+	return []outcome.Decl{
 		// OURS: the store would not answer, or there is no credential store
 		// behind this listener yet. A peer holding a perfectly good token
 		// meets these through no fault of their own, so neither is charged.
@@ -386,20 +438,5 @@ func credentialOutcomes(
 		// exists to fix. Neither is charged: the peer did nothing.
 		{ID: outcomeID(OutcomeStartupConnectionUnavailable), Kind: outcome.Operational, Charge: outcome.None},
 		{ID: outcomeID(OutcomeStartupConnectionUnusable), Kind: outcome.Operational, Charge: outcome.None},
-		// A listener with no credential store behind it yet is a DECISION not
-		// to serve, taken before anything failed.
-		refusal(reasonNoCredentialStore, outcome.None),
-		// A credential exchange the peer abandoned mid-way, and a fault in our
-		// own phase wiring. Neither is a refusal; both end the connection.
-		// CHARGED, because it is the peer's doing. The registry is the only
-		// place that decides this now.
-		{ID: OutcomeAuthReadFailed, Kind: outcome.Operational, Charge: outcome.Protocol},
-		{ID: OutcomeAuthWorkerBusy, Kind: outcome.Operational, Charge: outcome.None},
-		{ID: OutcomeAuthSetupFailed, Kind: outcome.Operational, Charge: outcome.None},
-		// THEIRS: a frame that is not a password where a password belongs.
-		// This is the credential exchange being spoken wrongly, which is the
-		// same kind of thing as grinding it.
-		refusal(reasonPreAuthProtocolViolation, outcome.Protocol),
 	}
-	return append(out, exec.Registration().Outcomes...)
 }

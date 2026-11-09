@@ -68,6 +68,12 @@ func (f *fakeAuth) OpenWireSession(ctx context.Context, presented, startupUser, 
 	return f.result, nil
 }
 
+// AuthorizeWire decides the whole open now, as this double's
+// OpenWireSessionWith does, and hands back a pre-admitted authorization.
+func (f *fakeAuth) AuthorizeWire(ctx context.Context, req exec.WireOpen) (*exec.WireAuthorization, error) {
+	return authorizeByOpening(ctx, req, f.OpenWireSessionWith)
+}
+
 // OpenWireSessionWith is the call the listener makes. It records the label as
 // well, so a cell can assert the accepted application_name reached the ENGINE
 // and not merely the echo — row 3.1's #session-audit claim is about what the
@@ -774,6 +780,12 @@ type holdingAuth struct {
 	release chan struct{}
 }
 
+// AuthorizeWire decides the whole open now, as this double's
+// OpenWireSessionWith does, and hands back a pre-admitted authorization.
+func (h *holdingAuth) AuthorizeWire(ctx context.Context, req exec.WireOpen) (*exec.WireAuthorization, error) {
+	return authorizeByOpening(ctx, req, h.OpenWireSessionWith)
+}
+
 // OpenWireSessionWith delegates: this fake is about the HOLD, not the label.
 func (h *holdingAuth) OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error) {
 	return h.OpenWireSession(ctx, req.PAT, req.StartupUser, req.Database, req.IP)
@@ -966,6 +978,12 @@ type blockingCloseAuth struct {
 	once    sync.Once
 }
 
+// AuthorizeWire decides the whole open now, as this double's
+// OpenWireSessionWith does, and hands back a pre-admitted authorization.
+func (b *blockingCloseAuth) AuthorizeWire(ctx context.Context, req exec.WireOpen) (*exec.WireAuthorization, error) {
+	return authorizeByOpening(ctx, req, b.OpenWireSessionWith)
+}
+
 // OpenWireSessionWith delegates: this fake is about the CLOSE.
 func (b *blockingCloseAuth) OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error) {
 	return b.OpenWireSession(ctx, req.PAT, req.StartupUser, req.Database, req.IP)
@@ -978,4 +996,17 @@ func (b *blockingCloseAuth) OpenWireSession(context.Context, string, string, str
 func (b *blockingCloseAuth) CloseWireSession(context.Context, exec.SessionID, int64, string, string) {
 	b.once.Do(func() { close(b.entered) })
 	<-b.release
+}
+
+// authorizeByOpening adapts a test double whose OpenWireSessionWith decides the
+// whole open. It runs that decision at authorization time, so a denial lands in
+// the credential phase as the real engine's authorization denials do, and a
+// success is admitted, already decided, in the admission phase.
+func authorizeByOpening(ctx context.Context, req exec.WireOpen,
+	open func(context.Context, exec.WireOpen) (exec.WireSessionResult, error)) (*exec.WireAuthorization, error) {
+	res, err := open(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return exec.PreAdmitted(func(context.Context) (exec.WireSessionResult, error) { return res, nil }), nil
 }

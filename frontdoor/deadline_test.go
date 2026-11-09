@@ -49,10 +49,15 @@ func TestDeadlines_DefaultsMatchTheMatrix(t *testing.T) {
 	// are §9's: TLS/startup/auth at 10s and the between-messages idle budget at
 	// 30m. Every one of the six is now pinned by a matrix line, so a change to any
 	// of them is a change to the spec rather than a drift in a constant.
+	//
+	// reply is the budget for writing a login's answer after it waited for its
+	// pool, when the credential deadline is long past: timeouts.HandshakeReserve.
 	want := deadlines{tls: 10 * time.Second, startup: 10 * time.Second, auth: 10 * time.Second,
-		idle: 30 * time.Minute, outputStall: 30 * time.Second, frameStall: 30 * time.Second}
+		idle: 30 * time.Minute, outputStall: 30 * time.Second, frameStall: 30 * time.Second,
+		reply: 2 * time.Second}
 	if got != want {
-		t.Errorf("defaults = %+v, want %+v (matrix §9: TLS/startup/auth 10s; between-messages idle 30m)", got, want)
+		t.Errorf("defaults = %+v, want %+v (matrix §9: TLS/startup/auth 10s; between-messages idle 30m; "+
+			"a waited login's answer 2s)", got, want)
 	}
 }
 

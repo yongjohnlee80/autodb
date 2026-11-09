@@ -141,6 +141,13 @@ type Listener struct {
 	// reader is per-connection and owned by the session goroutine.
 	testReaderReady func(*frameReader)
 
+	// testAfterAdmit runs after the engine has handed an admission its open
+	// session and before the client watch is joined: the handoff window a cell
+	// injects input or a hang-up into. testWatchRead runs when the watch's read
+	// returns, with the bytes it read, so the cell knows the watch saw it.
+	testAfterAdmit func()
+	testWatchRead  func(n int)
+
 	// testSegmentMsgs and testSegmentBytes lower the extended segment's caps so a
 	// cell can reach them without sending 96 MiB.
 	testSegmentMsgs  *int
@@ -320,6 +327,9 @@ type Options struct {
 
 	// testReaderReady publishes the per-session reader to a cell.
 	testReaderReady func(*frameReader)
+	// testAfterAdmit and testWatchRead: see Options.
+	testAfterAdmit func()
+	testWatchRead  func(n int)
 
 	// testLifecycleReady publishes each connection's lifecycle to a cell, so
 	// the phases it ran can be asserted.
@@ -500,6 +510,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.queries = opt.Queries
 	l.testOutputCap = opt.testOutputCap
 	l.testReaderReady = opt.testReaderReady
+	l.testAfterAdmit, l.testWatchRead = opt.testAfterAdmit, opt.testWatchRead
 	l.testLifecycleReady = opt.testLifecycleReady
 	l.testHandshakeFail = opt.testHandshakeFail
 	l.testBeforeDeadlineArm = opt.testBeforeDeadlineArm
@@ -1079,46 +1090,16 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 		}
 		be := pgproto3.NewBackend(fr, stream)
 		be.SetMaxBodyLen(PreAuthMaxBodyLen)
-		// THE CREDENTIAL PHASE, wrapped whole.
-		//
-		// It is ONE phase because it is one call: the engine verifies the PAT,
-		// takes the atomic reservation, pins the backend, applies encoding and
-		// settings, and publishes the session without returning in between.
-		// Naming "credential" and "session open" as separate phases would
-		// describe a structure the code does not have, and giving them a real
-		// boundary needs its own token, lock and rollback design -- a
-		// behaviour change, and not this.
+		// TWO PHASES, AROUND THE ENGINE'S TWO CALLS. The credential phase runs
+		// the password read and the engine's authorization inside an auth worker
+		// under the credential deadline, and reserves nothing. The admission
+		// phase then waits for the login's pool -- after the worker and the
+		// pre-auth slot are back -- and the engine finalizes it (admit.go).
 		var aerr error
 		var perr error
-		credential, perr = lc.run(PhaseAuthenticateAndOpen, func() Outcome {
+		credential, perr = lc.run(PhaseAuthenticate, func() Outcome {
 			outcome, aerr = l.runAuth(ctx, stream, be, fr, out.Params, out.GUCs, peer)
-			switch {
-			case aerr != nil:
-				// THE IDENTITY AND THE RESPONSE THE SOURCE CHOSE, neither
-				// picked here.
-				//
-				// runAuth knows which of these happened -- the peer left, we
-				// had no worker, the store would not answer -- and whether the
-				// peer is owed an answer. This used to hard-code the peer's
-				// identity while the throttle consulted the one runAuth had
-				// actually selected, so one event was recorded as two
-				// different things and only one of them decided the charge.
-				return Operational(outcome.Failure, aerr, RespondWith(outcome.Respond))
-			case outcome.Denied != "":
-				// THE WITNESS TRAVELS HERE. It came from the engine, which
-				// sets it only at a raise site reached with a verified
-				// credential and a checked grant already in hand -- and it is
-				// carried rather than re-derived, so a capacity check moved
-				// above either gate produces no witness and the surface stays
-				// uniform instead of leaking.
-				if outcome.Disclosable {
-					return Refuse(outcomeID(outcome.Denied.String()), WithWitness(),
-						WithOutcomeDetail(outcome.Detail), RespondWith(WireUniformDenial))
-				}
-				return Refuse(outcomeID(outcome.Denied.String()),
-					WithOutcomeDetail(outcome.Detail), RespondWith(WireUniformDenial))
-			}
-			return Continue()
+			return credentialPhaseOutcome(outcome, aerr)
 		})
 		if perr != nil {
 			// FAIL CLOSED, BUT STILL ANSWER. An unauthenticated connection
@@ -1132,88 +1113,46 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			// costs nothing and closing without it would turn a one-line
 			// declaration mistake into a client that hangs on a read.
 			closeReason = OutcomeInternalError
-			l.lifecycleFault(lc, PhaseAuthenticateAndOpen, peer, faultDuringCredential, stream, false, perr)
+			l.lifecycleFault(lc, PhaseAuthenticate, peer, faultDuringCredential, stream, false, perr)
 			return
 		}
 		if aerr != nil {
-			closeReason = string(outcome.Failure)
-			// THE IDENTITY AND THE SAFE DETAIL, NEVER THE ERROR.
-			//
-			// This printed %v of whatever the engine returned. For the endings
-			// this package raises itself that is harmless, and that is exactly
-			// what made it easy to miss: the arm it also serves is the generic
-			// one, where the value is an arbitrary error from another package
-			// and this code cannot know what is inside it. Measured on the
-			// configuration path, an error of that shape carried the target
-			// host, a query-parameter password and a PAT. A log is copied into
-			// tickets and shipped to aggregators, so it gets the same closed
-			// vocabulary the audit row does.
-			if outcome.Detail != "" {
-				l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s ended as %s: %s",
-					peer, outcome.Failure, outcome.Detail))
-			} else {
-				l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s ended as %s",
-					peer, outcome.Failure))
-			}
-			// CHARGED FROM THE RETAINED OCCURRENCE. Not re-resolved: the
-			// phase already validated this identity, and resolving it a second
-			// time is a second chance to resolve it differently.
-			if credential.Occurrence.Charges() {
-				l.admit.noteFailure(peer)
-			}
-			// AND ANSWERED AS THE PHASE SAID, not as the kind implies. A store
-			// outage is error-driven and still owes the caller the uniform
-			// denial; a peer that went away is owed nothing and could not read
-			// it anyway.
-			if credential.Outcome.Wire() == WireUniformDenial {
-				if derr := l.denyWithOccurrence(stream, credential.Occurrence); derr != nil {
-					l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
-				}
-			}
-			// A SESSION THAT COULD NOT START FOR OUR REASONS SAYS SO, FATALLY.
-			//
-			// The caller's credential verified; there is simply no session for
-			// it to have. The uniform denial would tell them the opposite and
-			// charge their address for our outage, which is the lockout this
-			// work exists to fix. The frame's code comes from the identity, so
-			// an identity with no row writes NOTHING rather than letting this
-			// invent one -- the peer is closed on, which is the safe answer.
-			if credential.Outcome.Wire() == WireStartupFatal {
-				sent, derr := sendStartupFatal(stream, credential.Occurrence.Reason)
-				if derr != nil {
-					l.onLog(fmt.Sprintf("frontdoor: writing the startup failure to %s: %v", peer, derr))
-				}
-				if !sent {
-					l.onLog(fmt.Sprintf("frontdoor: no startup frame is registered for %q; "+
-						"the peer was closed on rather than told something this package "+
-						"made up", credential.Occurrence.Reason))
-				}
-			}
-			// THE CLIENT IS TOLD FIRST AND THE OPERATOR SECOND, here as on
-			// every other refusal path, and parked on the same gate so the
-			// window is observable. Without the gate this ending would be the
-			// one path whose ordering nothing checked.
-			if l.testPostDenialAuditGate != nil {
-				<-l.testPostDenialAuditGate
-			}
-			// ITS OWN EVENT KIND. An error-driven ending in the credential
-			// exchange is not a credential denial, and filing it as one
-			// inflates the number an operator watches for credential attacks
-			// with events that are our fault.
-			safely(func() {
-				// THE DETAIL IS THE SAFE DIAGNOSTIC OR NOTHING. A startup that
-				// failed for our reasons now says which check failed and on
-				// which connection id, so the trail is actionable rather than
-				// a bare identity -- and it says it from the closed set, so
-				// this row cannot become the place a DSN escapes.
-				l.onEvent(Event{Kind: EventAuthOperational, Reason: string(outcome.Failure),
-					Peer: peer, Detail: outcome.Detail})
-			})
+			l.endOperational(stream, peer, credential, outcome, &closeReason)
 			return
 		}
 		if outcome.Denied == "" {
-			l.serveSession(ctx, lc, stream, fr, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
-			return
+			// NO LONGER ANONYMOUS: the login proved who it is, so it gives back
+			// the slot that bounds anonymous peers before it waits.
+			tkt.leavePreAuth()
+			authz := outcome.Authorization
+			// THE ADMITTED SESSION'S OWNER, FROM THE MOMENT THE ENGINE HANDS IT
+			// OVER until serveSession takes it: a guard installed before the
+			// admission runs, so a lost watch, a lifecycle fault, a refusal
+			// written after the open, or a panic closes it exactly once.
+			var admitted *exec.WireSessionResult
+			defer l.closeAdmitted(&admitted, peer, "admit-aborted")
+			credential, perr = lc.run(PhaseAdmit, func() Outcome {
+				outcome, aerr = l.runAdmit(stream, fr, authz, peer, &admitted)
+				return credentialPhaseOutcome(outcome, aerr)
+			})
+			if perr != nil {
+				closeReason = OutcomeInternalError
+				l.lifecycleFault(lc, PhaseAdmit, peer, faultDuringCredential, stream, false, perr)
+				return
+			}
+			if aerr != nil {
+				l.endOperational(stream, peer, credential, outcome, &closeReason)
+				return
+			}
+			if outcome.Denied == "" {
+				// THE TRANSFER. serveSession installs its close-and-revoke defer
+				// before it runs the handshake, so ownership passes here and is
+				// never unheld.
+				sess := *admitted
+				admitted = nil
+				l.serveSession(ctx, lc, stream, fr, be, tkt, sess, out.Params, out.Notes, peer, &closeReason)
+				return
+			}
 		}
 	}
 
@@ -1500,4 +1439,116 @@ func (l *Listener) postAuthBodyLen() int {
 		n = PostAuthMaxBodyCeiling
 	}
 	return n
+}
+
+// credentialPhaseOutcome is what a login phase reports to the lifecycle runner,
+// for the credential and admission phases alike: the identity and the response
+// the phase chose, or Continue.
+func credentialPhaseOutcome(outcome authOutcome, aerr error) Outcome {
+	switch {
+	case aerr != nil:
+		// THE IDENTITY AND THE RESPONSE THE SOURCE CHOSE, neither
+		// picked here.
+		//
+		// runAuth knows which of these happened -- the peer left, we
+		// had no worker, the store would not answer -- and whether the
+		// peer is owed an answer. This used to hard-code the peer's
+		// identity while the throttle consulted the one runAuth had
+		// actually selected, so one event was recorded as two
+		// different things and only one of them decided the charge.
+		return Operational(outcome.Failure, aerr, RespondWith(outcome.Respond))
+	case outcome.Denied != "":
+		// THE WITNESS TRAVELS HERE. It came from the engine, which
+		// sets it only at a raise site reached with a verified
+		// credential and a checked grant already in hand -- and it is
+		// carried rather than re-derived, so a capacity check moved
+		// above either gate produces no witness and the surface stays
+		// uniform instead of leaking.
+		if outcome.Disclosable {
+			return Refuse(outcomeID(outcome.Denied.String()), WithWitness(),
+				WithOutcomeDetail(outcome.Detail), RespondWith(WireUniformDenial))
+		}
+		return Refuse(outcomeID(outcome.Denied.String()),
+			WithOutcomeDetail(outcome.Detail), RespondWith(WireUniformDenial))
+	}
+	return Continue()
+}
+
+// endOperational ends a login on an error-driven outcome from either login
+// phase: logged with its safe detail, charged from the retained occurrence,
+// answered as the phase said, and recorded as its own event kind.
+func (l *Listener) endOperational(stream net.Conn, peer string, credential PhaseResult, outcome authOutcome, closeReason *string) {
+	*closeReason = string(outcome.Failure)
+	// THE IDENTITY AND THE SAFE DETAIL, NEVER THE ERROR.
+	//
+	// This printed %v of whatever the engine returned. For the endings
+	// this package raises itself that is harmless, and that is exactly
+	// what made it easy to miss: the arm it also serves is the generic
+	// one, where the value is an arbitrary error from another package
+	// and this code cannot know what is inside it. Measured on the
+	// configuration path, an error of that shape carried the target
+	// host, a query-parameter password and a PAT. A log is copied into
+	// tickets and shipped to aggregators, so it gets the same closed
+	// vocabulary the audit row does.
+	if outcome.Detail != "" {
+		l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s ended as %s: %s",
+			peer, outcome.Failure, outcome.Detail))
+	} else {
+		l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s ended as %s",
+			peer, outcome.Failure))
+	}
+	// CHARGED FROM THE RETAINED OCCURRENCE. Not re-resolved: the
+	// phase already validated this identity, and resolving it a second
+	// time is a second chance to resolve it differently.
+	if credential.Occurrence.Charges() {
+		l.admit.noteFailure(peer)
+	}
+	// AND ANSWERED AS THE PHASE SAID, not as the kind implies. A store
+	// outage is error-driven and still owes the caller the uniform
+	// denial; a peer that went away is owed nothing and could not read
+	// it anyway.
+	if credential.Outcome.Wire() == WireUniformDenial {
+		if derr := l.denyWithOccurrence(stream, credential.Occurrence); derr != nil {
+			l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
+		}
+	}
+	// A SESSION THAT COULD NOT START FOR OUR REASONS SAYS SO, FATALLY.
+	//
+	// The caller's credential verified; there is simply no session for
+	// it to have. The uniform denial would tell them the opposite and
+	// charge their address for our outage, which is the lockout this
+	// work exists to fix. The frame's code comes from the identity, so
+	// an identity with no row writes NOTHING rather than letting this
+	// invent one -- the peer is closed on, which is the safe answer.
+	if credential.Outcome.Wire() == WireStartupFatal {
+		sent, derr := sendStartupFatal(stream, credential.Occurrence.Reason)
+		if derr != nil {
+			l.onLog(fmt.Sprintf("frontdoor: writing the startup failure to %s: %v", peer, derr))
+		}
+		if !sent {
+			l.onLog(fmt.Sprintf("frontdoor: no startup frame is registered for %q; "+
+				"the peer was closed on rather than told something this package "+
+				"made up", credential.Occurrence.Reason))
+		}
+	}
+	// THE CLIENT IS TOLD FIRST AND THE OPERATOR SECOND, here as on
+	// every other refusal path, and parked on the same gate so the
+	// window is observable. Without the gate this ending would be the
+	// one path whose ordering nothing checked.
+	if l.testPostDenialAuditGate != nil {
+		<-l.testPostDenialAuditGate
+	}
+	// ITS OWN EVENT KIND. An error-driven ending in the credential
+	// exchange is not a credential denial, and filing it as one
+	// inflates the number an operator watches for credential attacks
+	// with events that are our fault.
+	safely(func() {
+		// THE DETAIL IS THE SAFE DIAGNOSTIC OR NOTHING. A startup that
+		// failed for our reasons now says which check failed and on
+		// which connection id, so the trail is actionable rather than
+		// a bare identity -- and it says it from the closed set, so
+		// this row cannot become the place a DSN escapes.
+		l.onEvent(Event{Kind: EventAuthOperational, Reason: string(outcome.Failure),
+			Peer: peer, Detail: outcome.Detail})
+	})
 }

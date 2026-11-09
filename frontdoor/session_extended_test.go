@@ -999,14 +999,14 @@ func TestExtCaps_ReadAheadInOneWriteChargesEachFrameToItsOwnSegment(t *testing.T
 	t.Fatal("no refusal for the oversized Describe in its own segment")
 }
 
-// The queue must survive the AUTH boundary.
+// A FRAME WRITTEN WITH THE PASSWORD NEVER REACHES THE SESSION.
 //
-// Auth shares this reader and its Backend. A post-auth frame can arrive in the
-// same socket write as the password and be framed while auth is still running,
-// so its header exists before the session loop does. A design that only began
-// accounting when the loop installed something never charged that frame at all —
-// the first frame of the session, which is a good one to be unable to refuse.
-func TestExtCaps_AFrameReadAheadDuringAuthIsStillCharged(t *testing.T) {
+// A post-auth frame can arrive in the same socket write as the password. The
+// credential boundary hands pgproto3 the password frame alone, so the frame
+// stays in the frame reader, and the admission phase refuses the login as a
+// protocol violation. The oversized Describe is never charged because it is
+// never admitted: no readiness is written and no extended message is dispatched.
+func TestExtCaps_AFrameSentWithThePasswordNeverReachesTheSession(t *testing.T) {
 	t.Parallel()
 	q := okQueries()
 	q.extMsgs = []exec.WireMessage{{Kind: "ParameterDescription"}, {Kind: "NoData"}}
@@ -1032,25 +1032,21 @@ func TestExtCaps_AFrameReadAheadDuringAuthIsStillCharged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sawReady := false
-	for range 24 {
+	for {
 		m, err := fe.Receive()
 		if err != nil {
-			t.Fatalf("after auth: %v", err)
+			t.Fatalf("the login closed without a refusal: %v", err)
 		}
-		if _, ok := m.(*pgproto3.ReadyForQuery); ok && !sawReady {
-			sawReady = true // the auth sequence's own readiness
-			continue
-		}
-		if e, ok := m.(*pgproto3.ErrorResponse); ok {
-			if e.Detail != ruleSegmentCap {
-				t.Fatalf("refusal = %s/%s, want %s", e.Code, e.Detail, ruleSegmentCap)
+		switch m := m.(type) {
+		case *pgproto3.AuthenticationOk, *pgproto3.ReadyForQuery:
+			t.Fatalf("%T: a login that sent a Describe with its password was admitted", m)
+		case *pgproto3.ErrorResponse:
+			if m.Code != "28000" {
+				t.Fatalf("refusal = %s/%s, want the uniform login refusal 28000", m.Code, m.Detail)
 			}
 			return
 		}
 	}
-	t.Fatalf("the oversized Describe that arrived in the same write as the password was ADMITTED — "+
-		"its header was framed while auth held the reader, and nothing charged it (cap %d)", capBytes)
 }
 
 // matrix §1.5 STAGE TWO decides on its own, and this is the only cell where it does.

@@ -460,6 +460,32 @@ func (r *frameReader) allow(h frameHeader) { r.deliverable += 1 + h.declared }
 // setBounded turns the delivery boundary on. runSession only.
 func (r *frameReader) setBounded(on bool) { r.bounded = on }
 
+// buffered reports whether the reader holds input it has read from the socket
+// but not delivered: a framed header, a frame part-way through, or raw bytes.
+// Before a front-door login is told it may speak, any of these is input sent
+// too early.
+func (r *frameReader) buffered() bool {
+	return len(r.pending) > 0 || r.midMessage() || len(r.buf) > 0
+}
+
+// waitByte blocks for at most one byte from the socket and KEEPS it, scanned
+// and buffered, the way waitHeader keeps a header. The admission watch uses it:
+// a byte that arrives while a login waits is evidence of a protocol violation,
+// and swallowing it would split the stream.
+func (r *frameReader) waitByte() (int, error) {
+	tmp := make([]byte, 1)
+	n, err := r.src.Read(tmp)
+	if n > 0 {
+		chunk := append([]byte(nil), tmp[:n]...)
+		if serr := r.scan(chunk); serr != nil {
+			r.deferred = serr
+			return n, nil
+		}
+		r.buf = append(r.buf, chunk...)
+	}
+	return n, err
+}
+
 // wasSkipped reports whether the last admission decision was a refusal, so the
 // loop does not allow a frame it just skipped.
 func (r *frameReader) wasSkipped() bool {

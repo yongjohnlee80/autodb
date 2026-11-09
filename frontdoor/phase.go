@@ -33,9 +33,13 @@ const (
 	// PhaseCancel is the cancel-request branch: terminal, and it never
 	// authenticates.
 	PhaseCancel PhaseName = "cancel"
-	// PhaseAuthenticateAndOpen is the engine's single atomic call, wrapped
-	// whole.
-	PhaseAuthenticateAndOpen PhaseName = "authenticate-and-open"
+	// PhaseAuthenticate is the credential exchange: the password read and the
+	// engine's authorization, inside an auth worker under the credential
+	// deadline. It reserves nothing.
+	PhaseAuthenticate PhaseName = "authenticate"
+	// PhaseAdmit is an authorized login's wait for its pool and the engine's
+	// finalization, after the credential phase has ended.
+	PhaseAdmit PhaseName = "admit"
 	// PhaseHandshake is the pre-loop transition into the session.
 	PhaseHandshake PhaseName = "handshake"
 	// PhaseServe is the session loop and its teardown.
@@ -358,9 +362,17 @@ func lifecyclePhases() []Phase {
 			Replay: ExactlyOnce,
 		},
 		{
-			Name: PhaseAuthenticateAndOpen, Producer: ProducerAuthOpen,
-			// The engine call is given a deadline derived from the phase
-			// budget and honours it.
+			Name: PhaseAuthenticate, Producer: ProducerAuthenticate,
+			// The engine call is given the credential deadline and honours it.
+			Cancel: CancelByContext,
+			// It charges the failure throttle and records a denial, so a rerun
+			// is not free.
+			Replay: ExactlyOnce,
+		},
+		{
+			Name: PhaseAdmit, Producer: ProducerAdmit,
+			// The engine call is given the admission context, which the client
+			// watch cancels when the client leaves.
 			Cancel: CancelByContext,
 			// It takes an atomic reservation and publishes a session. A rerun
 			// is a second session for one connection.

@@ -1412,24 +1412,20 @@ func readUntilReadySoft(t *testing.T, fe *pgproto3.Frontend) byte {
 	}
 }
 
-// The reader is shared with auth, and auth's Backend
-// reads ahead exactly as the session's does.
+// A HALF-SENT FRAME WRITTEN WITH THE PASSWORD IS REFUSED, NOT WAITED ON.
 //
 // A client that writes its PasswordMessage and the START of a Query in ONE TLS
-// write lets runAuth's Receive consume the Query's type byte and length while
-// the message-start callback is still nil. The loop then arms the idle budget
-// unconditionally and the type byte cannot re-trigger — so a half-sent message
-// waits under the budget for a client that is not asking, instead of the one for
-// a client that went slow mid-message.
-//
-// This is the assumption I flagged as most worth attacking when I sent the PR.
-// It was worth attacking.
-func TestLoop_AFrameReadAheadDuringAuthStillGetsTheFrameStallBudget(t *testing.T) {
+// write spoke before it was told it may. The credential boundary hands pgproto3
+// the password frame alone, so the Query's header stays in the frame reader,
+// where the admission phase sees it and refuses the login as a protocol
+// violation: no readiness, and no budget -- idle or frame-stall -- is spent on a
+// message the session will never read.
+func TestLoop_AHalfFrameSentWithThePasswordIsRefused(t *testing.T) {
 	t.Parallel()
 	dl := defaultDeadlines()
-	dl.idle = 3 * time.Second // long: nothing here may be charged to idleness
-	dl.frameStall = 300 * time.Millisecond
-	events, addr := deadlineLoopListener(t, dl, okQueries())
+	dl.idle = 3 * time.Second
+	dl.frameStall = 3 * time.Second
+	_, addr := deadlineLoopListener(t, dl, okQueries())
 
 	conn, fe := startupTo(t, addr, defaultParams())
 	defer func() { _ = conn.Close() }()
@@ -1438,7 +1434,7 @@ func TestLoop_AFrameReadAheadDuringAuthStillGetsTheFrameStallBudget(t *testing.T
 	}
 
 	// ONE write: the password, then a Query header promising a body that never
-	// comes. Auth's Receive will take the password and read ahead into the Query.
+	// comes.
 	var one []byte
 	one = append(one, 'p')
 	pw := []byte("good\x00")
@@ -1450,43 +1446,25 @@ func TestLoop_AFrameReadAheadDuringAuthStillGetsTheFrameStallBudget(t *testing.T
 		t.Fatalf("the combined write: %v", err)
 	}
 
+	start := time.Now()
 	for {
 		msg, err := fe.Receive()
 		if err != nil {
-			t.Fatalf("the success sequence: %v", err)
+			t.Fatalf("the login closed without a refusal: %v", err)
 		}
-		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
-			break
-		}
-	}
-
-	start := time.Now()
-	msg, err := fe.Receive()
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("the stalled frame was closed without a frame: %v", err)
-	}
-	e, ok := msg.(*pgproto3.ErrorResponse)
-	if !ok {
-		t.Fatalf("frame = %T, want ErrorResponse", msg)
-	}
-	if e.Detail != ruleFrameStall {
-		t.Fatalf("DETAIL = %q, want %q — a message half-read during AUTH is still a message "+
-			"in progress, and charging it to idleness tells an operator the client went quiet "+
-			"when it went slow", e.Detail, ruleFrameStall)
-	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("the stall took %v, which is the %v IDLE budget rather than the %v frame-stall "+
-			"budget: the frame read ahead during auth lost its budget entirely", elapsed, dl.idle, dl.frameStall)
-	}
-	waitFor(t, "the stall to be audited under its own cause", func() bool {
-		for _, ev := range events() {
-			if ev.Kind == "fd.conn_close" && ev.Reason == ruleFrameStall {
-				return true
+		switch m := msg.(type) {
+		case *pgproto3.AuthenticationOk, *pgproto3.ReadyForQuery:
+			t.Fatalf("%T: a login that sent a frame with its password was admitted", m)
+		case *pgproto3.ErrorResponse:
+			if m.Code != "28000" {
+				t.Fatalf("refusal = %s/%s, want the uniform login refusal 28000", m.Code, m.Detail)
 			}
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Fatalf("the refusal took %v: the half-sent frame was waited on rather than refused", elapsed)
+			}
+			return
 		}
-		return false
-	})
+	}
 }
 
 // Matrix row 3.1:application_name#session-audit — the front door's half: the

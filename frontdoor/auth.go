@@ -60,14 +60,14 @@ const CancelKeyLen = 4
 // listener's dependency is exactly the calls it makes. A concrete engine
 // here would let a later change reach for anything on it.
 type Authenticator interface {
-	// OpenWireSessionWith is the call this listener makes (#58's seam). It
-	// carries the startup parameters the session must remember — today the
-	// accepted application_name, which row 3.1 requires on the session and on
-	// every audit row for a wire unit (claim #session-audit).
-	OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error)
-	// OpenWireSession is kept because it is what the fakes implement and what
-	// the engine still exposes; it opens with no application_name.
-	OpenWireSession(ctx context.Context, presented, startupUser, database, ip string) (exec.WireSessionResult, error)
+	// AuthorizeWire is the credential phase's call: the credential and
+	// authorization checks, run inside an auth worker under the credential
+	// deadline. It reserves nothing. The authorization it returns is admitted
+	// later, after the worker is released, by its own Admit (the admission
+	// phase). The request carries the startup parameters the session must
+	// remember -- the accepted application_name (row 3.1, claim #session-audit)
+	// and the startup settings.
+	AuthorizeWire(ctx context.Context, req exec.WireOpen) (*exec.WireAuthorization, error)
 	CloseWireSession(ctx context.Context, id exec.SessionID, userID int64, ip, reason string)
 }
 
@@ -104,6 +104,10 @@ type CancelExecutor interface {
 // authOutcome is what the credential exchange produced. Exactly one of
 // Session and Denied is meaningful.
 type authOutcome struct {
+	// Authorization is the credential phase's success: an authorized login,
+	// not yet admitted.
+	Authorization *exec.WireAuthorization
+	// Session is the admission phase's success: the opened session.
 	Session exec.WireSessionResult
 	Denied  denialReason
 	// Failure names an ERROR-DRIVEN ending -- a read that broke, a worker we
@@ -201,12 +205,27 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	if err := conn.SetDeadline(authDeadline); err != nil {
 		return authOutcome{Failure: outcomeID(OutcomeAuthSetupFailed)}, err
 	}
+	// THE PASSWORD FRAME AND NOTHING MORE REACHES pgproto3. Its chunk reader
+	// reads as far ahead as its buffer allows, so a password and a Query arriving
+	// in one TCP read would leave the Query inside pgproto3, out of every later
+	// check -- and after this phase the login waits, with nothing reading. The
+	// frame reader's boundary admits exactly this one frame; any byte past it
+	// stays in the reader or the socket, where the admission phase sees it.
+	if fr != nil {
+		fr.setBounded(true)
+		if fr.waitHeader() {
+			if h, ok := fr.peekHeader(); ok {
+				fr.allow(h)
+			}
+		}
+	}
 	msg, err := be.Receive()
 	// The queue advances for auth's own frames too: it is shared with the session
 	// loop, and a Receive that does not pop leaves every later header attributed
 	// to the wrong frame.
 	if fr != nil {
 		fr.consumeHeader()
+		fr.setBounded(false) // runSession turns it on again for the session loop
 	}
 	if err != nil {
 		// A read failure is not a denial: nothing was presented. It closes
@@ -242,7 +261,7 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// draws. Its registered class is None, so nothing is counted.
 		return authOutcome{Failure: outcomeID(OutcomeAuthWorkerBusy)}, werr
 	}
-	res, aerr := l.authn.OpenWireSessionWith(authCtx, exec.WireOpen{
+	authz, aerr := l.authn.AuthorizeWire(authCtx, exec.WireOpen{
 		PAT: pm.Password, StartupUser: params["user"], Database: params["database"],
 		IP: hostOf(peer),
 		// The listener knows its own transport; the engine must not have to
@@ -260,95 +279,104 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	})
 	release()
 	if aerr != nil {
-		if reason := exec.DenialReason(aerr); reason != "" {
-			return authOutcome{
-				Denied:      denialReason(reason),
-				Disclosable: exec.DenialDisclosable(aerr),
-				// Bounded operator diagnosis carried by the denial itself --
-				// which cap held a request that waited, for instance. It rides
-				// into the ONE occurrence this refusal becomes rather than
-				// being written as a second audit row beside it.
-				Detail: exec.DenialDetail(aerr),
-			}, nil
-		}
-		// A LOCKED STORE DOES ARRIVE HERE, AND THIS PACKAGE SAID IT COULD NOT.
-		//
-		// The claim that stood here was that, for an engine that does not
-		// speak the PostgreSQL wire, OpenWireSessionWith never opens a target,
-		// so for that engine the DSN is decrypted at the first statement and a
-		// locked store lets a client authenticate and refuses its query. That
-		// much is true of a non-wire engine such as SQLite. It is FALSE of the
-		// ones this front door is for: OpenWireSessionWith
-		// pins the backend for a PostgreSQL-wire connection before the client
-		// is ever told the session is ready, so decrypting the DSN -- and
-		// resolving the target, and asserting the driver's capabilities --
-		// all happen INSIDE the credential phase.
-		//
-		// The cell that was supposed to guard the claim used a SQLite fixture,
-		// which never reaches the pin, so it proved the claim on the one
-		// engine the claim happens to hold for and said nothing about the
-		// others. A guard that cannot fail on the case it guards is not a
-		// guard; correcting that cell is part of this change.
-		//
-		// WHAT THE OLD CODE DID WITH IT. Everything that was not a denial
-		// became an auth-store error answered with the uniform credential
-		// denial, so a developer holding a verified token, against a
-		// connection whose secret store was locked, was told their CREDENTIAL
-		// was wrong.
-		//
-		// WHETHER THOSE RETRIES WERE ALSO CHARGED IS NOT ASSERTED HERE. An
-		// earlier version of this comment said they were, and that claim was
-		// never traced to a commit or to a charging occurrence -- the
-		// auth-store identity is registered ChargeNone, so the charge would
-		// have had to come from somewhere else, and nobody established where.
-		// What IS established, and is what this branch is for, is the wrong
-		// answer above. The throttling behaviour of the identity now selected
-		// is proved by the repetition cell in locked_store_test.go rather
-		// than asserted in prose.
-		//
-		// So the two are branched before the generic arm, each with its own
-		// registered identity and its own safe FATAL frame. The caller learns
-		// that the connection is unavailable or misconfigured, which is true,
-		// costs them no failure budget, and tells them nothing about why.
-		if startup, detail := startupFailure(aerr); startup != "" {
-			// THE SAFE DIAGNOSTIC, AND NOT THE CAUSE, EVEN HERE.
-			//
-			// This used to log "%v" of the error, on the reasoning that a log
-			// is the operator's and the wire is the caller's. That reasoning
-			// does not survive contact with what a log actually is: it is
-			// copied into tickets, pasted into chat and shipped to
-			// aggregators. Measured, the cause for a DSN failure carried the
-			// target host, a password passed as a query parameter, and a
-			// PAT-shaped token in the username position -- pgx redacts the
-			// userinfo password and nothing else. The safe diagnostic names
-			// the stage, the connection's opaque id and which check failed,
-			// which is what an operator needs to find the row.
-			l.onLog(fmt.Sprintf("frontdoor: no wire session for %s: %s", peer, detail))
-			return authOutcome{Failure: startup, Detail: detail, Respond: WireStartupFatal}, aerr
-		}
-		// A store failure. The wire still gets the uniform denial — telling
-		// a caller that our database is unreachable is an answer they have
-		// not earned either — but the audit says what it was, and the
-		// address is NOT charged for our outage.
-		// THE SAME RULE FOR THE GENERIC ARM. What reaches here is whatever
-		// the engine returned, and this package cannot know what is in it, so
-		// it says which phase failed and nothing else. An operator with the
-		// peer and the timestamp can find the engine's own record.
-		l.onLog(fmt.Sprintf("frontdoor: authenticating %s: the credential store did not "+
-			"complete the exchange", peer))
-		// OURS, AND ERROR-DRIVEN, AND STILL OWED AN ANSWER. Three separate
-		// facts, carried separately: the identity is operational, the charge
-		// is none, and the peer gets the uniform denial because telling them
-		// our database is unreachable is an answer they have not earned
-		// either.
-		//
-		// It was briefly declared a refusal purely because it writes bytes,
-		// which conflated the wire with the kind and filed a store outage
-		// under the number an operator watches for credential attacks.
-		return authOutcome{Failure: outcomeID(string(reasonAuthStoreError)),
-			Respond: WireUniformDenial}, aerr
+		return l.engineOutcome(aerr, peer)
 	}
-	return authOutcome{Session: res}, nil
+	return authOutcome{Authorization: authz}, nil
+}
+
+// engineOutcome is what an engine error ends a front-door login as, in either
+// phase that calls the engine: a denial (with the engine's disclosure witness),
+// a startup failure the caller is told about, or a store failure answered with
+// the uniform denial. One mapping, so the credential and admission phases cannot
+// answer the same engine error two ways.
+func (l *Listener) engineOutcome(aerr error, peer string) (authOutcome, error) {
+	if reason := exec.DenialReason(aerr); reason != "" {
+		return authOutcome{
+			Denied:      denialReason(reason),
+			Disclosable: exec.DenialDisclosable(aerr),
+			// Bounded operator diagnosis carried by the denial itself --
+			// which cap held a request that waited, for instance. It rides
+			// into the ONE occurrence this refusal becomes rather than
+			// being written as a second audit row beside it.
+			Detail: exec.DenialDetail(aerr),
+		}, nil
+	}
+	// A LOCKED STORE DOES ARRIVE HERE, AND THIS PACKAGE SAID IT COULD NOT.
+	//
+	// The claim that stood here was that, for an engine that does not
+	// speak the PostgreSQL wire, OpenWireSessionWith never opens a target,
+	// so for that engine the DSN is decrypted at the first statement and a
+	// locked store lets a client authenticate and refuses its query. That
+	// much is true of a non-wire engine such as SQLite. It is FALSE of the
+	// ones this front door is for: OpenWireSessionWith
+	// pins the backend for a PostgreSQL-wire connection before the client
+	// is ever told the session is ready, so decrypting the DSN -- and
+	// resolving the target, and asserting the driver's capabilities --
+	// all happen INSIDE the credential phase.
+	//
+	// The cell that was supposed to guard the claim used a SQLite fixture,
+	// which never reaches the pin, so it proved the claim on the one
+	// engine the claim happens to hold for and said nothing about the
+	// others. A guard that cannot fail on the case it guards is not a
+	// guard; correcting that cell is part of this change.
+	//
+	// WHAT THE OLD CODE DID WITH IT. Everything that was not a denial
+	// became an auth-store error answered with the uniform credential
+	// denial, so a developer holding a verified token, against a
+	// connection whose secret store was locked, was told their CREDENTIAL
+	// was wrong.
+	//
+	// WHETHER THOSE RETRIES WERE ALSO CHARGED IS NOT ASSERTED HERE. An
+	// earlier version of this comment said they were, and that claim was
+	// never traced to a commit or to a charging occurrence -- the
+	// auth-store identity is registered ChargeNone, so the charge would
+	// have had to come from somewhere else, and nobody established where.
+	// What IS established, and is what this branch is for, is the wrong
+	// answer above. The throttling behaviour of the identity now selected
+	// is proved by the repetition cell in locked_store_test.go rather
+	// than asserted in prose.
+	//
+	// So the two are branched before the generic arm, each with its own
+	// registered identity and its own safe FATAL frame. The caller learns
+	// that the connection is unavailable or misconfigured, which is true,
+	// costs them no failure budget, and tells them nothing about why.
+	if startup, detail := startupFailure(aerr); startup != "" {
+		// THE SAFE DIAGNOSTIC, AND NOT THE CAUSE, EVEN HERE.
+		//
+		// This used to log "%v" of the error, on the reasoning that a log
+		// is the operator's and the wire is the caller's. That reasoning
+		// does not survive contact with what a log actually is: it is
+		// copied into tickets, pasted into chat and shipped to
+		// aggregators. Measured, the cause for a DSN failure carried the
+		// target host, a password passed as a query parameter, and a
+		// PAT-shaped token in the username position -- pgx redacts the
+		// userinfo password and nothing else. The safe diagnostic names
+		// the stage, the connection's opaque id and which check failed,
+		// which is what an operator needs to find the row.
+		l.onLog(fmt.Sprintf("frontdoor: no wire session for %s: %s", peer, detail))
+		return authOutcome{Failure: startup, Detail: detail, Respond: WireStartupFatal}, aerr
+	}
+	// A store failure. The wire still gets the uniform denial — telling
+	// a caller that our database is unreachable is an answer they have
+	// not earned either — but the audit says what it was, and the
+	// address is NOT charged for our outage.
+	// THE SAME RULE FOR THE GENERIC ARM. What reaches here is whatever
+	// the engine returned, and this package cannot know what is in it, so
+	// it says which phase failed and nothing else. An operator with the
+	// peer and the timestamp can find the engine's own record.
+	l.onLog(fmt.Sprintf("frontdoor: authenticating %s: the credential store did not "+
+		"complete the exchange", peer))
+	// OURS, AND ERROR-DRIVEN, AND STILL OWED AN ANSWER. Three separate
+	// facts, carried separately: the identity is operational, the charge
+	// is none, and the peer gets the uniform denial because telling them
+	// our database is unreachable is an answer they have not earned
+	// either.
+	//
+	// It was briefly declared a refusal purely because it writes bytes,
+	// which conflated the wire with the kind and filed a store outage
+	// under the number an operator watches for credential attacks.
+	return authOutcome{Failure: outcomeID(string(reasonAuthStoreError)),
+		Respond: WireUniformDenial}, aerr
 }
 
 // acquireAuthWorker takes one of the credential-phase slots, or gives up when
@@ -551,6 +579,9 @@ func startupFailure(err error) (outcome.ReasonID, string) {
 	// frame, never 53300 and never the credential denial.
 	if errors.Is(err, exec.ErrBackendOpenTimeout) {
 		return outcomeID(OutcomeStartupConnectionUnavailable), string(exec.DetailBackendOpenTimeout)
+	}
+	if errors.Is(err, exec.ErrAdmitFinalizeTimeout) {
+		return outcomeID(OutcomeStartupConnectionUnavailable), string(exec.DetailAdmitFinalizeTimeout)
 	}
 	return "", ""
 }

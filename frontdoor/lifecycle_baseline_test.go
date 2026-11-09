@@ -90,6 +90,12 @@ func (e *traceEngine) OpenWireSession(ctx context.Context, presented, startupUse
 	})
 }
 
+// AuthorizeWire decides the whole open now, as this double's
+// OpenWireSessionWith does, and hands back a pre-admitted authorization.
+func (e *traceEngine) AuthorizeWire(ctx context.Context, req exec.WireOpen) (*exec.WireAuthorization, error) {
+	return authorizeByOpening(ctx, req, e.OpenWireSessionWith)
+}
+
 func (e *traceEngine) OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error) {
 	// THE CREDENTIAL IS NOT RECORDED, not even in a test artifact that is
 	// about to be committed. What the trace needs is that an open happened
