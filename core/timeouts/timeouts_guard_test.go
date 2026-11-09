@@ -131,7 +131,7 @@ func TestFixedTimeoutsAreWithinMaxBound(t *testing.T) {
 	for name, d := range map[string]time.Duration{
 		"TLSHandshake": TLSHandshake, "StartupPacket": StartupPacket, "CredentialExchange": CredentialExchange,
 		"QueueWait": QueueWait, "HandshakeReserve": HandshakeReserve, "PinAllowance": PinAllowance,
-		"MemoryLaneWait": MemoryLaneWait, "IdleBetweenMessages": IdleBetweenMessages,
+		"MemoryLaneWait": MemoryLaneWait, "ReclaimGrace": ReclaimGrace, "IdleBetweenMessages": IdleBetweenMessages,
 		"ServerBeltMargin": ServerBeltMargin, "IdleHoldingState": IdleHoldingState,
 		"StrayBackendIdle": StrayBackendIdle, "BackendReset": BackendReset, "BackendConnect": BackendConnect,
 		"CancelDialFallback": CancelDialFallback, "OutputStall": OutputStall, "FrameStall": FrameStall,

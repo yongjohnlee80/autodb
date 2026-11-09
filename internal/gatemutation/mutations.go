@@ -1311,5 +1311,21 @@ func All() []Mutation {
 			Fails:       "the blob was stored without its policy_clamped row",
 			Guarantee:   "that a clamped policy is never stored without its policy_clamped audit row",
 		},
+		{
+			Name: "a-holder-inside-its-grace-is-not-ended", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
+			Anchor:      " &&\n\t\t\tnow.Sub(s.lastUsed) >= timeouts.ReclaimGrace\n",
+			Replacement: "\n",
+			Test:        "TestDemandReclaim_AHolderInsideItsGraceIsNotEnded",
+			Fails:       "inside ReclaimGrace",
+			Guarantee:   "that a waiting login never ends a session its client is about to use",
+		},
+		{
+			Name: "the-janitor-asks-again-once-a-holder-passes-its-grace", Package: "./core/exec/", File: "core/exec/session_timeout.go",
+			Anchor:      "\te.sessions.pressOwedDemand()\n",
+			Replacement: "",
+			Test:        "TestDemandRetry_TheJanitorAsksAgainOnceAHolderPassesItsGrace",
+			Fails:       "did not ask the holder to leave",
+			Guarantee:   "that a login queued behind holders in their grace is served once one has been silent for ReclaimGrace",
+		},
 	}
 }

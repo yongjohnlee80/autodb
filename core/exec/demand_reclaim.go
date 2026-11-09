@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // WHEN NOBODY IS GOING TO RELEASE, SOMEBODY IS ASKED TO LEAVE.
@@ -147,13 +149,18 @@ func (r *sessionRegistry) reserveDemandVictim(key leaseKey, now time.Time) (dema
 		// statements or portals is precisely the holder whose backend cannot be
 		// handed to anyone else, which is why the answer for them is a framed
 		// ending rather than a silent handover.
+		//   - silent for less than ReclaimGrace -> the client is between two
+		//     statements, or has just opened the session and is about to send
+		//     its first. Ending it hands a pooled client a dead connection, and
+		//     in a burst every new login would end the one opened just before.
 		//   - no knock registered -> there is nothing to make the owner's read
 		//     return, so the notice would sit unread and the lease would be
 		//     stranded by a session that is closing and serves nobody. Checked
 		//     here AS WELL AS in OfferReceive, because the two guard different
 		//     mistakes: that one stops a live offer existing without a knock,
 		//     and this one stops a reservation committing against one anyway.
-		eligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil
+		eligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil &&
+			now.Sub(s.lastUsed) >= timeouts.ReclaimGrace
 		// THE DEMAND UNIT IS SPENT HERE, NOT WHERE IT WAS CHECKED.
 		//
 		// pressDemand's check is an optimisation and nothing more. Two receive
@@ -604,6 +611,32 @@ func (r *sessionRegistry) pressDemand(key leaseKey) bool {
 		return false
 	}
 	return demand(key)
+}
+
+// pressOwedDemand asks again on every target where a request is still waiting
+// for a reclamation.
+//
+// THE JANITOR CALLS IT, because a holder can become reclaimable with no event
+// at all: it only has to stay silent past ReclaimGrace. The asks at arrival and
+// at each receive offer find nothing while every holder is still inside its
+// grace, and without a later ask the request would wait out its whole bound
+// beside a holder that became reclaimable seconds after it arrived.
+func (r *sessionRegistry) pressOwedDemand() {
+	if r == nil {
+		return
+	}
+	r.demandMu.Lock()
+	owed := make([]leaseKey, 0, len(r.demandWanted))
+	for key, n := range r.demandWanted {
+		if n > len(r.demandPromised[key]) {
+			owed = append(owed, key)
+		}
+	}
+	r.demandMu.Unlock()
+	// Outside demandMu: pressing selects a victim and knocks on a socket.
+	for _, key := range owed {
+		r.pressDemand(key)
+	}
 }
 
 // promisedCount reports how many reclamations are already coming for a target.

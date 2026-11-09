@@ -55,6 +55,14 @@ const (
 	// MemoryLaneWait bounds a front-door request's wait for memory-lane
 	// bytes, before it stops holding a statement open.
 	MemoryLaneWait = 30 * time.Second
+	// ReclaimGrace is how long a session must have been silent before a
+	// waiting login may end it to take its place. A pooled client sends its
+	// first statement a moment after the session opens, and a request's
+	// statements a moment apart; ending a session inside that gap hands the
+	// client a dead connection, and the burst that caused the wait turns into
+	// failed requests. A login waiting behind sessions that really are idle is
+	// served within ReclaimGrace and one janitor sweep.
+	ReclaimGrace = 10 * time.Second
 )
 
 // Idle sessions.

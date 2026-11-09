@@ -3,8 +3,11 @@ package exec
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // demandEngineWith builds an engine whose registry holds these wire sessions,
@@ -347,5 +350,67 @@ func TestDemandRetry_AnOfferAfterTheWaiterHasGoneReservesNobody(t *testing.T) {
 	}
 	if n := r.promisedCount(connKey(7)); n != 0 {
 		t.Errorf("%d promises recorded with no waiter, want 0", n)
+	}
+}
+
+// THE JANITOR ASKS AGAIN ONCE A HOLDER HAS BEEN SILENT LONG ENOUGH.
+//
+// A holder becomes reclaimable by staying quiet, which is no event at all. The
+// ask at arrival found it inside its grace, it publishes no new offer while it
+// waits for its client, so only the janitor's sweep can ask again. Without
+// that ask the request waits out its whole bound beside a holder that became
+// reclaimable seconds after it arrived.
+func TestDemandRetry_TheJanitorAsksAgainOnceAHolderPassesItsGrace(t *testing.T) {
+	start := time.Now()
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()) }
+
+	holder := demandHolder("quiet-since-its-last-statement", 1, 7, start.Add(-time.Second))
+	e := New(nil, nil, WithNow(now))
+	e.sessions.pools = fixedLeases(1)
+	if err := e.sessions.admitWithLease(holder, holder.connID, 0); err != nil {
+		t.Fatalf("seeding the holder: %v", err)
+	}
+	e.sessions.genSeq++
+	holder.gen = e.sessions.genSeq
+	r := e.sessions
+	seen := queuedAt(r)
+
+	knocked := make(chan struct{}, 1)
+	holder.wake = func() {
+		select {
+		case knocked <- struct{}{}:
+		default:
+		}
+	}
+
+	waiterDone := make(chan error, 1)
+	waiter := schedSession("arrived-while-the-holder-was-in-its-grace", 2, 7)
+	go func() { waiterDone <- r.admitWithLeaseOrWait(context.Background(), waiter, 7, 0) }()
+	awaitSeq(t, seen)
+	if holder.get() != sessOpen {
+		t.Fatal("the holder was reserved inside its grace; the premise of this cell is that " +
+			"the arrival ask finds nobody")
+	}
+
+	clock.Store(start.Add(timeouts.ReclaimGrace).UnixNano())
+	e.reapExpired(context.Background(), now())
+
+	select {
+	case <-knocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sweep did not ask the holder to leave once it had been silent for " +
+			"ReclaimGrace; the queued request waits out its whole bound")
+	}
+	// Removed directly, as in the cells above: what is claimed is the ask.
+	r.remove(holder)
+	select {
+	case err := <-waiterDone:
+		if err != nil {
+			t.Fatalf("the queued request was not served by the reclaimed lease: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reclaimed lease never reached the request that was waiting for it")
 	}
 }

@@ -225,6 +225,9 @@ func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 			acted++
 		}
 	}
+	// After the sweep, so a session it closed has already released its lease
+	// to the line rather than being counted as a holder to reclaim.
+	e.sessions.pressOwedDemand()
 	return acted
 }
 
