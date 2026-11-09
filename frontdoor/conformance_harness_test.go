@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // THE CONFORMANCE HARNESS (matrix §10): the listener on a
@@ -393,6 +396,69 @@ func TestHarness_TheApprovedDriversStayTestOnly(t *testing.T) {
 		t.Fatalf("lib/pq and sqlx are approved as TEST-ONLY dependencies, and these production "+
 			"files import them: %v — the approval was for a conformance harness, and a driver "+
 			"in the shipped binary is a different decision that has not been made", offenders)
+	}
+}
+
+// A BURST PAST THE POOL'S FRONT-DOOR SHARE WAITS ITS TURN, AND EVERY REQUEST
+// RUNS. This is LM's own client shape: database/sql over lib/pq, open
+// connections uncapped and two kept idle, so a burst opens one connection per
+// request and closes the extras as they come back. The connections past the
+// share have to queue at login and then serve their request.
+//
+// A request that fails here was handed a connection the front door ended before
+// the client could use it. database/sql reads that as a bad connection, retries
+// a few times and gives up, so a burst turns into failed requests while the
+// pool still had capacity coming back.
+func TestHarness_ABurstPastTheShareWaitsAndEveryRequestRuns(t *testing.T) {
+	l := pgLoopFull(t)
+	const poolMax, burst = 10, 30
+	if err := l.eng.UpdatePool(opCtx(t), l.rootTok, meta.DefaultPoolID, poolMax, "127.0.0.1"); err != nil {
+		t.Fatalf("shrinking the default pool to %d: %v", poolMax, err)
+	}
+
+	host, port, ok := strings.Cut(l.addr, ":")
+	if !ok {
+		t.Fatalf("listener address %q is not host:port", l.addr)
+	}
+	db, err := sql.Open("postgres", fmt.Sprintf(
+		"host=%s port=%s user=root password=%s dbname=%s sslmode=require",
+		host, port, l.secret, l.database))
+	if err != nil {
+		t.Fatalf("opening lib/pq against the front door: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxIdleConns(2) // LM's PG_MAX_IDLE_CONNS default; open is uncapped
+
+	ctx := opCtx(t)
+	var wg sync.WaitGroup
+	errs := make(chan error, burst)
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Held long enough that the share is full while the rest arrive.
+			var n int
+			if err := db.QueryRowContext(ctx, "SELECT 1 FROM pg_sleep(0.2)").Scan(&n); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	var failed []string
+	for err := range errs {
+		failed = append(failed, err.Error())
+	}
+	if len(failed) > 0 {
+		// The listener's own record says why each connection ended; the
+		// client sees only a reset or a bad connection.
+		tally := map[string]int{}
+		for _, ev := range l.events() {
+			tally[ev.Kind+"/"+ev.Reason]++
+		}
+		t.Fatalf("%d of %d requests failed past a front-door share of pool %d; first: %v; listener events: %v",
+			len(failed), burst, poolMax, failed[:min(3, len(failed))], tally)
 	}
 }
 

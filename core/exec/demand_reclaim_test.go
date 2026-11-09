@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // WHAT THESE CELLS ARE FOR: demand reclamation ends a real person's session so
@@ -421,7 +423,7 @@ func TestDemandReclaim_AReservationAlwaysCarriesItsNotice(t *testing.T) {
 // honouring it would let one read's outcome close a later read's window.
 func TestDemandReclaim_AStaleReceiveTokenIsIgnored(t *testing.T) {
 	now := time.Now()
-	s := demandHolder("holder", 1, 7, now)
+	s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
 	r := demandRegistry(t, s)
 	e := &Engine{sessions: r}
 
@@ -807,5 +809,32 @@ func TestDemandReclaim_NothingCanSlipBetweenJudgingAndClaiming(t *testing.T) {
 			"a statement arriving in that gap makes the session active, and it is then "+
 			"reserved for teardown after it has started work — the one thing the "+
 			"predicate exists to prevent", strings.TrimSpace(window))
+	}
+}
+
+// A HOLDER INSIDE ITS GRACE IS NOT ENDED, and one past it is.
+//
+// A pooled client opens a session and sends its first statement a moment
+// later, and runs a request's statements a moment apart. Ending a session in
+// that gap hands the client a dead connection; in a burst, every waiting login
+// ended the session opened just before it, and the requests failed while the
+// pool's own capacity was still coming back.
+func TestDemandReclaim_AHolderInsideItsGraceIsNotEnded(t *testing.T) {
+	now := time.Now()
+	opened := demandHolder("opened-a-moment-ago", 1, 7, now)
+	paused := demandHolder("between-two-statements", 2, 7, now.Add(time.Second-timeouts.ReclaimGrace))
+	r := demandRegistry(t, opened, paused)
+
+	if v, ok := r.reserveDemandVictim(connKey(7), now); ok {
+		t.Fatalf("ended %q, silent for %v, inside ReclaimGrace (%v); its client was about to use it",
+			v.s.id, now.Sub(v.s.lastUsed), timeouts.ReclaimGrace)
+	}
+	later := now.Add(time.Second)
+	v, ok := r.reserveDemandVictim(connKey(7), later)
+	if !ok {
+		t.Fatalf("nothing was ended one second later, when %q had been silent for ReclaimGrace", paused.id)
+	}
+	if v.s != paused {
+		t.Errorf("ended %q, want %q, the only holder past its grace", v.s.id, paused.id)
 	}
 }
