@@ -1353,9 +1353,9 @@ func All() []Mutation {
 		},
 		{
 			// Needs TEST_PGURL: a live front door with its production login deadline.
-			Name: "a-session-is-quiet-from-when-it-opens", Package: "./frontdoor/", File: "core/exec/wire_session.go",
-			Anchor:      "\ts.mu.Lock()\n\ts.lastUsed = e.now()\n\ts.mu.Unlock()\n\te.admitStep(ctx, admitStepNote)\n",
-			Replacement: "\te.admitStep(ctx, admitStepNote)\n",
+			Name: "a-session-is-quiet-from-when-it-opens", Package: "./frontdoor/", File: "core/exec/session.go",
+			Anchor:      "\ts.busy = false\n\ts.lastUsed = time.Now()\n",
+			Replacement: "\ts.busy = false\n",
 			Test:        "TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds",
 			Fails:       "before it had said anything",
 			Guarantee:   "that a login which waited in line is not reclaimed for the next one before its first statement",
@@ -1411,8 +1411,11 @@ func All() []Mutation {
 		},
 		{
 			Name: "admission-is-reached-only-through-authorization", Package: "./core/exec/", File: "core/exec/wire_session.go",
-			Anchor:      "\treturn a.Admit(ctx)\n}\n",
-			Replacement: "\treturn e.admitWire(ctx, a)\n}\n",
+			// A real bypass, not a respelling: the login is admitted with an
+			// authorization AuthorizeWire never issued. Calling admitWire on the
+			// authorization AuthorizeWire returned is equivalent and stays green.
+			Anchor:      "\ta, err := e.AuthorizeWire(ctx, req)\n\tif err != nil {\n\t\treturn WireSessionResult{}, err\n\t}\n\treturn a.Admit(ctx)\n}\n",
+			Replacement: "\treturn e.admitWire(ctx, &WireAuthorization{req: req})\n}\n",
 			Test:        "TestDisclosureWitness_IsUnreachableBeforeBothGates",
 			Fails:       "not every path into admitWire passes it",
 			Guarantee:   "that a capacity answer after the wait is reachable only through a checked credential and grant",
