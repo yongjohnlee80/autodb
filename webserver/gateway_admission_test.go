@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -437,7 +438,8 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	// cause by what the request carries.
 	delay := bound + timingControlMargin
 	t.Run("the harness can catch a username-existence leak", func(t *testing.T) {
-		got := abs(timingControl(t, daemon, []byte("nobody-at-all"), delay, unknownName, wrongPassword))
+		// The unknown name is in its own cause's request alone: one per round.
+		got := abs(timingControl(t, daemon, []byte("nobody-at-all"), timingRounds, delay, unknownName, wrongPassword))
 		if got <= bound {
 			t.Fatalf("with %v injected into the unknown-name path alone — %v past the %v bound "+
 				"this run accepted — the existence statistic resolved only %v. It cannot see a "+
@@ -446,7 +448,11 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 		}
 	})
 	t.Run("the harness can catch a credential-validity leak", func(t *testing.T) {
-		got := abs(timingControl(t, daemon, []byte(adminPass), delay, rightPassword, wrongPassword))
+		// The admin's passphrase is carried by the right-password cause AND by the
+		// unknown-name one (timingCauses), so it delays two requests per round;
+		// the credential statistic compares right against wrong, which only the
+		// first of the two moves.
+		got := abs(timingControl(t, daemon, []byte(adminPass), 2*timingRounds, delay, rightPassword, wrongPassword))
 		if got <= bound {
 			t.Fatalf("with %v injected into the correct-password path alone — %v past the %v "+
 				"bound this run accepted — the credential statistic resolved only %v. It cannot "+
@@ -459,11 +465,22 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 // timingControl measures through a proxy that delays only the requests whose
 // payload carries `match`, and returns the SAME paired statistic the
 // assertions use.
-func timingControl(t *testing.T, daemon string, match []byte, delay time.Duration, a, b string) time.Duration {
+//
+// THE INJECTION IS COUNTED BEFORE THE STATISTIC IS JUDGED. A control whose delay
+// reached only some of its cause's requests resolves part of the delay, and
+// that reads exactly like a harness too weak to see a leak. So the proxy counts
+// the requests it delayed, and anything but the expected count fails here,
+// naming the shortfall, rather than as a power failure it is not.
+func timingControl(t *testing.T, daemon string, match []byte, want int64, delay time.Duration, a, b string) time.Duration {
 	t.Helper()
-	proxy := delayingProxy(t, daemon, match, delay)
+	proxy, delayed := delayingProxy(t, daemon, match, delay)
 	base, _ := startGateway(t, proxy)
-	return pairedDifference(sampleInterleaved(t, base, timingCauses(), timingRounds), a, b)
+	got := pairedDifference(sampleInterleaved(t, base, timingCauses(), timingRounds), a, b)
+	if n := delayed.Load(); n != want {
+		t.Fatalf("the control's delay reached %d requests, want %d: the injection, not the "+
+			"harness, is what this run measured", n, want)
+	}
+	return got
 }
 
 // pairedDifference is the median of the per-ROUND differences between two
@@ -568,7 +585,13 @@ func timingCauses() []timingCause {
 // is entirely test-owned: it perturbs the wire, which is where the harness
 // measures anyway, and it can select a cause by what the request carries
 // because the name and the passphrase both travel in it.
-func delayingProxy(t *testing.T, upstream string, match []byte, delay time.Duration) string {
+//
+// A MATCH MAY STRADDLE TWO READS. TCP owes the proxy no message boundaries,
+// and under load or -race a request's bytes arrive split often enough that a
+// per-read search missed the match and left that request undelayed. Each read
+// is searched together with the tail of the one before it -- len(match)-1
+// bytes, too short to hold a whole match, so none is counted twice.
+func delayingProxy(t *testing.T, upstream string, match []byte, delay time.Duration) (string, *atomic.Int64) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -576,6 +599,7 @@ func delayingProxy(t *testing.T, upstream string, match []byte, delay time.Durat
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
+	delayed := &atomic.Int64{}
 	go func() {
 		for {
 			client, aerr := ln.Accept()
@@ -591,11 +615,19 @@ func delayingProxy(t *testing.T, upstream string, match []byte, delay time.Durat
 				defer func() { _ = server.Close() }()
 				go func() { _, _ = io.Copy(client, server) }()
 				buf := make([]byte, 32*1024)
+				var tail []byte
 				for {
 					n, rerr := client.Read(buf)
 					if n > 0 {
-						if bytes.Contains(buf[:n], match) {
+						window := append(tail, buf[:n]...)
+						if bytes.Contains(window, match) {
+							delayed.Add(1)
 							time.Sleep(delay)
+							tail = nil // the match is spent; a new one starts here
+						} else if keep := len(match) - 1; len(window) > keep {
+							tail = append([]byte(nil), window[len(window)-keep:]...)
+						} else {
+							tail = window
 						}
 						if _, werr := server.Write(buf[:n]); werr != nil {
 							return
@@ -608,7 +640,7 @@ func delayingProxy(t *testing.T, upstream string, match []byte, delay time.Durat
 			}()
 		}
 	}()
-	return ln.Addr().String()
+	return ln.Addr().String(), delayed
 }
 
 // timingFloor is the smallest bound this cell will use, so an unusually quiet
