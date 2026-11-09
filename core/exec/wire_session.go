@@ -487,15 +487,55 @@ func (e *Engine) OpenWireSession(ctx context.Context, presented, startupUser, da
 	return e.OpenWireSessionWith(ctx, WireOpen{PAT: presented, StartupUser: startupUser, Database: database, IP: ip})
 }
 
-// OpenWireSessionWith authenticates a front-door client, admits the session,
-// and — for postgres targets — PINS the session's backend connection at open,
-// so the target's reported ParameterStatus set can be handed to the loop before
-// its first frame and the row-3.1 lease rule (UTF8) is enforced before any
-// statement runs. Pinning at open rather than at the first statement is what
-// makes matrix §3.3 satisfiable at all: the set is a property of the connection.
+// OpenWireSessionWith authorizes and admits a front-door client under ONE
+// context: AuthorizeWire, then Admit. The front door calls the two halves
+// itself, so that the wait in line runs after its credential phase has ended;
+// this composition is for callers with a single deadline.
 func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSessionResult, error) {
+	a, err := e.AuthorizeWire(ctx, req)
+	if err != nil {
+		return WireSessionResult{}, err
+	}
+	return a.Admit(ctx)
+}
+
+// WireAuthorization is a front-door login that passed every credential and
+// authorization check, as of the moment it was checked. It holds no lease, no
+// lock and no backend; admitWire consumes it once.
+type WireAuthorization struct {
+	pat   *meta.PAT
+	owner *meta.User
+	// connRow is the connection as authorized. It names the pool the login waits
+	// in; finalization re-reads it fresh, because exposure, the grant and the
+	// target may all change during the wait.
+	connRow *meta.Connection
+	src     auth.AdmissionSource
+	req     WireOpen
+	// admitter is what Admit runs: the engine's admitWire for this authorization,
+	// or a decided result for a PreAdmitted one.
+	admitter func(ctx context.Context) (WireSessionResult, error)
+}
+
+// Admit waits in the pool's line and finalizes this login (admitWire), under the
+// caller's admission context. It is how the front door, which holds only the
+// authorization, reaches the engine that issued it.
+func (a *WireAuthorization) Admit(ctx context.Context) (WireSessionResult, error) {
+	return a.admitter(ctx)
+}
+
+// PreAdmitted is an authorization whose admission is already decided: Admit
+// returns what admit returns. It exists for an authenticator that settles the
+// whole open at authorization time -- a test double standing in for the engine
+// -- so the front door keeps one path for both.
+func PreAdmitted(admit func(ctx context.Context) (WireSessionResult, error)) *WireAuthorization {
+	return &WireAuthorization{admitter: admit}
+}
+
+// AuthorizeWire runs a front-door login's credential and authorization checks.
+// It reserves nothing and takes no lock: everything a wait could change is
+// checked again, fresh, after the wait (finalizeWire).
+func (e *Engine) AuthorizeWire(ctx context.Context, req WireOpen) (*WireAuthorization, error) {
 	presented, startupUser, database, ip := req.PAT, req.StartupUser, req.Database, req.IP
-	var out WireSessionResult
 
 	// 1. The credential. VerifyPAT already collapses unknown/wrong/revoked/
 	// expired/disabled-owner into one error and does comparable work across
@@ -503,10 +543,10 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	pat, err := e.auth.VerifyPAT(ctx, presented)
 	if err != nil {
 		if errors.Is(err, auth.ErrPATInvalid) {
-			return out, deny(DenyBadCredential)
+			return nil, deny(DenyBadCredential)
 		}
 		// A store failure is not a bad credential.
-		return out, err
+		return nil, err
 	}
 
 	// 2. The startup `user` must be the token's owner. Identity comes from
@@ -514,10 +554,10 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	// client that names someone else is either confused or probing.
 	owner, err := e.store.Users.OnCtx(ctx).With(meta.UserID, pat.UserID).Get()
 	if err != nil {
-		return out, err
+		return nil, err
 	}
 	if !strings.EqualFold(owner.Name, startupUser) {
-		return out, deny(DenyUserMismatch)
+		return nil, deny(DenyUserMismatch)
 	}
 
 	// 3a. THE CREDENTIAL CLASS MUST MATCH THE LISTENER.
@@ -539,13 +579,13 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		// Turning cleartext ON refuses every ordinary token in the install.
 		// That is the point: a normal credential must never cross a wire that
 		// does not protect it.
-		return out, deny(DenyPATNotCleartextDebug)
+		return nil, deny(DenyPATNotCleartextDebug)
 	case !req.Cleartext && debugToken:
 		// A debug token's allowed_ips was never checked against its owner's
 		// perimeter, so honouring it here would import that relaxation into
 		// production. This refusal is what confines the widening to the mode
 		// it was minted for.
-		return out, deny(DenyPATCleartextDebugInTLS)
+		return nil, deny(DenyPATCleartextDebugInTLS)
 	}
 
 	// 3b. IP admission.
@@ -563,16 +603,16 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		var aerr error
 		src, aerr = e.auth.IPAllowedForUser(ctx, nil, pat.UserID, ip)
 		if aerr != nil {
-			return out, aerr
+			return nil, aerr
 		}
 		if src == auth.NotAdmitted {
-			return out, deny(DenyIPNotAdmitted)
+			return nil, deny(DenyIPNotAdmitted)
 		}
 	} else if strings.TrimSpace(pat.AllowedIPs) == "" {
-		return out, deny(DenyPATIPNarrowed)
+		return nil, deny(DenyPATIPNarrowed)
 	}
 	if !auth.PATAllowsIP(pat.AllowedIPs, ip) {
-		return out, deny(DenyPATIPNarrowed)
+		return nil, deny(DenyPATIPNarrowed)
 	}
 
 	// 4. THE TARGET COMES FROM THE CREDENTIAL, NOT FROM THE CLIENT.
@@ -589,13 +629,22 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	// constant-time compare, so it cannot become a timing oracle for which
 	// selectors exist.
 	if pat.ConnID == 0 {
-		return out, deny(DenyPATUnscoped)
+		return nil, deny(DenyPATUnscoped)
 	}
-	// Hold the transition read lock through reservation, target pinning and
-	// publication. A disabling writer therefore either closes this fully
-	// initialized session, or commits first and makes this open read closed.
-	e.exposureMu.RLock()
-	defer e.exposureMu.RUnlock()
+	connRow, err := e.authorizedConnection(ctx, pat, database)
+	if err != nil {
+		return nil, err
+	}
+	a := &WireAuthorization{pat: pat, owner: owner, connRow: connRow, src: src, req: req}
+	a.admitter = func(ctx context.Context) (WireSessionResult, error) { return e.admitWire(ctx, a) }
+	return a, nil
+}
+
+// authorizedConnection reads the token's connection and checks what a login
+// needs of it: it exists, the owner holds a grant on it, it is exposed to the
+// front door, and the client's database name agrees. Authorization runs it once;
+// finalization runs it again, fresh, after the wait.
+func (e *Engine) authorizedConnection(ctx context.Context, pat *meta.PAT, database string) (*meta.Connection, error) {
 	connRow, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, pat.ConnID).Get()
 	if err != nil {
 		if errors.Is(err, dao.ErrNoRows) {
@@ -604,24 +653,24 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 			// table), so this is the guard that makes a dangling reference
 			// LOUD rather than silent, and it is why this reason survived the
 			// binding change instead of being collapsed into the mismatch.
-			return out, deny(DenyNoSuchDatabase)
+			return nil, deny(DenyNoSuchDatabase)
 		}
-		return out, err
+		return nil, err
 	}
 	// A grant on that connection. Read is the floor for holding a session;
 	// what the session may then RUN is decided per statement.
 	if aerr := e.auth.AuthorizeUser(ctx, pat.UserID, connRow.ID, auth.ActionRead); aerr != nil {
 		if errors.Is(aerr, auth.ErrDenied) {
-			return out, deny(DenyNoGrant)
+			return nil, deny(DenyNoGrant)
 		}
-		return out, aerr
+		return nil, aerr
 	}
 	// And the connection must admit front-door use at all. Opt-in per
 	// connection: no target is reachable through this surface
 	// by default, so adding the listener does not silently expose every
 	// database the daemon knows about.
 	if !connectionFrontDoorExposed(connRow) {
-		return out, deny(DenyProfileRefuses)
+		return nil, deny(DenyProfileRefuses)
 	}
 	// 4c. The `database` field is now a CONSISTENCY CHECK, not a lookup key
 	// (as ruled).
@@ -630,76 +679,178 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	// mismatch row: a reader of the audit trail would take that row as
 	// evidence the connection exists.
 	if !wireDatabaseAgrees(database, connRow) {
-		return out, deny(DenyDatabaseMismatch)
+		return nil, deny(DenyDatabaseMismatch)
 	}
 
-	// 5. ONE atomic reservation: per-user slot, global slot, target lease,
-	// and this session's fixed overhead.
+	return connRow, nil
+}
+
+// ErrClientGone is the cause a front-door admission is cancelled with when its
+// client closes, resets, or sends input before it was told it may: nobody is
+// listening for an answer, so none is written.
+var ErrClientGone = errors.New("exec: the client left while its login was being admitted")
+
+// ErrAdmitFinalizeTimeout means a granted login could not finish opening within
+// timeouts.AdmitFinalize: a stalled meta store or target. The front door answers
+// it as startup-unavailable (57P03), never as a capacity refusal.
+var ErrAdmitFinalizeTimeout = errors.New("exec: the login could not finish opening in time")
+
+// reasonAdmitAborted closes a granted session whose finalization did not hand it
+// to the front door.
+const reasonAdmitAborted = "admit-aborted"
+
+// Admission steps reported to hookAdmitStep, in the order they are reached.
+const (
+	admitStepGranted   = "admit.granted"     // the lease is granted; finalization not begun
+	admitStepGate      = "finalize.gate"     // the exposure gate is held
+	admitStepStanding  = "finalize.standing" // about to re-check the login's standing
+	admitStepPinned    = "finalize.pinned"   // the backend is pinned
+	admitStepNote      = "finalize.note"     // about to note the PAT's use
+	admitStepFinalized = "admit.finalized"   // finalization returned; not yet arbitrated
+)
+
+// admitWire waits in the pool's line for an authorized login, then finalizes it:
+// the fresh checks, the pin, the startup settings and publication.
+//
+// ctx is the front door's ADMISSION context. It has no deadline (the line's
+// bound is QueueWait, applied by answerBy), and the front door cancels it with
+// cause ErrClientGone when the client leaves.
+func (e *Engine) admitWire(ctx context.Context, a *WireAuthorization) (WireSessionResult, error) {
 	id, err := newSessionID()
 	if err != nil {
-		return out, err
+		return WireSessionResult{}, err
 	}
 	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s := &session{
 		// The authority is the TOKEN, named by its row id. A zero sentinel
 		// here is what made the janitor read every wire session as revoked.
-		id: id, userID: pat.UserID, authority: auth.PATAuthority(pat.ID), connID: connRow.ID,
+		id: id, userID: a.pat.UserID, authority: auth.PATAuthority(a.pat.ID), connID: a.connRow.ID,
 		ctx: sctx, cancel: cancel, lastUsed: e.now(),
 		// The holder's identity for the idle-in-transaction heartbeat, taken
 		// here because here is where it is known. owner.Name is the CANONICAL
 		// name, not the client's spelling of it, and pat.ID is the token's row
 		// -- never the token.
-		holderUser: owner.Name, holderIP: ip, patID: pat.ID, acquiredAt: e.now(),
+		holderUser: a.owner.Name, holderIP: a.req.IP, patID: a.pat.ID, acquiredAt: e.now(),
 	}
 	if h := e.hookBeforeWireAdmit; h != nil {
 		h()
 	}
-	// WAITS ITS TURN RATHER THAN BEING REFUSED, when waiting could cure it.
-	// The refusals below are still reachable and still framed the same way --
-	// this changes only WHEN they are issued, and a capacity refusal now means
-	// the instance really had nothing coming rather than nothing at that
-	// instant. See scheduler.go.
-	// The lease is counted under the connection's pool, so the pools must know
-	// it before the first admission, loaded or not.
-	e.pools.ensurePoolOf(connRow)
-	if rerr := e.sessions.admitWithLeaseOrWait(ctx, s, connRow.ID, WireSessionOverhead); rerr != nil {
+	// WAITS ITS TURN RATHER THAN BEING REFUSED, when waiting could cure it, and
+	// OUTSIDE EVERY ENGINE LOCK: the wait can last QueueWait. The lease is
+	// counted under the connection's pool, so the pools must know it before the
+	// first admission, loaded or not.
+	e.pools.ensurePoolOf(a.connRow)
+	if rerr := e.sessions.admitWithLeaseOrWait(ctx, s, a.connRow.ID, WireSessionOverhead); rerr != nil {
 		cancel()
-		// AUTHORIZED HERE, WHERE IT WAS ESTABLISHED. This is the reservation
-		// phase, reached only with a verified PAT bound to this connection and
-		// a checked grant, so the caller may be told the system is full rather
-		// than handed the uniform denial that reads as "your credential is
-		// wrong" -- which is what sent a developer hunting a password problem
-		// that did not exist on 2026-09-15. The stamp is applied at the site
-		// that did the verifying rather than inside the classifier.
+		// AUTHORIZED HERE, WHERE IT WAS ESTABLISHED: the caller may be told the
+		// system is full rather than handed the uniform denial that reads as
+		// "your credential is wrong".
 		if reason, detail, ok := admissionAnswer(rerr); ok {
-			return out, denyAfterAuthorizationWithDetail(reason, detail)
+			return WireSessionResult{}, denyAfterAuthorizationWithDetail(reason, detail)
 		}
-		return out, rerr
+		return WireSessionResult{}, rerr
 	}
-
 	s.mu.Lock()
-	s.appName, s.wire = req.ApplicationName, true
+	s.appName, s.wire = a.req.ApplicationName, true
 	s.mu.Unlock()
+	e.admitStep(ctx, admitStepGranted)
+
+	fctx, cancelF := context.WithTimeout(ctx, e.admitFinalize)
+	defer cancelF()
+	// THE GRANT IS OWNED BY THIS GUARD until the result is handed back. It runs on
+	// an error and on a panic alike (a panic then continues to the front door's
+	// recover), and after runFinalize's own deferred endRun and finish, so
+	// closeSession's quiesce never joins a run this goroutine still holds.
+	// beginClose is the one atomic claim: if a closer already owns s this loses
+	// quietly; otherwise finishClosing releases s.pc through the backend gate and
+	// only then the reservation.
+	handed := false
+	defer func() {
+		if !handed {
+			e.closeSession(context.WithoutCancel(ctx), s, a.req.IP, reasonAdmitAborted)
+		}
+	}()
+	res, ferr := e.runFinalize(fctx, s, a)
+	if h := e.hookAdmitStep; h != nil {
+		h(fctx, admitStepFinalized)
+	}
+	// THE SUCCESS COMMIT POINT. Every result, a nil error included, is judged from
+	// the sources that carry the reason. The run context's own stop arrives
+	// through context.AfterFunc on another goroutine, so it can lag fctx, and an
+	// engine closer can claim s after finalizeWire's last check.
+	if err := e.finalizeOutcome(ctx, fctx, s, ferr); err != nil {
+		return WireSessionResult{}, err
+	}
+	handed = true
+	return res, nil
+}
+
+// runFinalize runs finalizeWire as s's in-flight run, exactly as a statement is
+// run: begin marks it busy and runContext registers runCancel, so a closer that
+// claims s meanwhile (an exposure sweep, a shutdown) quiesces it -- cancelInFlight,
+// then joinInFlight -- before it detaches s.pc. endRun and finish are DEFERRED, so
+// a panic cannot leave the slot busy.
+func (e *Engine) runFinalize(fctx context.Context, s *session, a *WireAuthorization) (WireSessionResult, error) {
+	release, _, err := e.claimSession(fctx, s) // no demotion close reaches a login
+	if err != nil {
+		return WireSessionResult{}, err
+	}
+	defer release()
+	rctx, endRun := s.runContext(fctx) // a stop, not a cause: finalizeOutcome decides why
+	defer endRun()
+	return e.finalizeWire(rctx, s, a)
+}
+
+// finalizeWire re-checks a granted login and opens it, holding the exposure gate
+// for reading -- the gate a disabling writer takes. ctx is the RUN context: it
+// says "stop", not why; every early return just stops, and finalizeOutcome
+// decides what the client is told.
+func (e *Engine) finalizeWire(ctx context.Context, s *session, a *WireAuthorization) (WireSessionResult, error) {
+	if err := e.exposure.RLock(ctx); err != nil {
+		return WireSessionResult{}, err
+	}
+	defer e.exposure.RUnlock()
+	e.admitStep(ctx, admitStepGate)
+	// A DISABLE THAT RAN IN THE GAP between the grant and the gate committed, then
+	// closed every registered wire session on the connection, this one included.
+	// The close path owns it now: touch nothing.
+	if s.get() != sessOpen {
+		return WireSessionResult{}, errClosedBeneath
+	}
+	pat, ip := a.pat, a.req.IP
+	connRow, err := e.authorizedConnection(ctx, pat, a.req.Database)
+	if err != nil {
+		return WireSessionResult{}, err
+	}
+	e.admitStep(ctx, admitStepStanding)
+	v, err := e.resolveStanding(ctx, auth.PATAuthority(pat.ID), pat.UserID, connRow.ID)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return WireSessionResult{}, err // a stopped run is not a pass
+	case err != nil:
+		// A store failure is not a revocation (revokeExpiredAuthority's rule):
+		// the login opens on the verdict it was authorized with.
+		e.logf("session %s: re-checking standing failed, opening on the authorization's verdict: %v", s.id, err)
+	case !v.Standing:
+		return WireSessionResult{}, deny(DenyNoGrant)
+	}
 
 	var statuses map[string]string
 	if connRow.Engine.SpeaksPostgresWire() {
-		// The pin and the startup parameters run under their own bound, which
-		// leaves the reply its reserve before the credential deadline.
-		pinCtx, cancelPin := context.WithDeadline(ctx, answerBy(ctx, e.now(), handshakeReserve))
+		pinCtx, cancelPin := context.WithTimeout(ctx, pinAllowance)
 		defer cancelPin()
-		// Pin now. The admitted session is withdrawn on failure. A pin that
-		// waited out its share is a capacity refusal, framed like admission's;
-		// anything else (a slow or unreachable target) is returned for the
-		// front door's startup classification.
+		// Pin now. A pin that waited out its share is a capacity refusal, framed
+		// like admission's; anything else (a slow or unreachable target) is
+		// returned for the front door's startup classification. On any refusal
+		// below, admitWire's guard closes the session and releases what is pinned.
 		pc, perr := e.pinWireSession(pinCtx, s, connRow)
 		if perr != nil {
-			e.sessions.remove(s)
-			cancel()
 			if reason, detail, ok := admissionAnswer(perr); ok {
-				return out, denyAfterAuthorizationWithDetail(reason, detail)
+				return WireSessionResult{}, denyAfterAuthorizationWithDetail(reason, detail)
 			}
-			return out, perr
+			return WireSessionResult{}, perr
 		}
+		e.admitStep(ctx, admitStepPinned)
 		// Row 3.1 fails CLOSED: no reporter, no statuses, or either encoding
 		// key missing is a refusal, not an acceptance — the lease's encoding
 		// must be ESTABLISHED as UTF8, not merely not-known-to-be-otherwise.
@@ -708,66 +859,115 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		}
 		if enc, ok := leaseEncodingRefusal(statuses); ok {
 			// Row 3.1: the lease is pinned UTF8; autodb does not transcode.
-			e.auditBounded(ctx, pat.UserID, ip, "wire_lease_encoding_refused",
+			e.auditBounded(context.WithoutCancel(ctx), pat.UserID, ip, "wire_lease_encoding_refused",
 				fmt.Sprintf("conn %d: session %s: target reports %s", connRow.ID, s.id, enc))
 			// Nothing has run on this backend — the refusal is about what the
 			// target reported at startup, not about anything this session did
-			// — so it is given back untouched. A pool backend is then closed
-			// by pgxpool's release hook (reusesBackend), never reused.
+			// — so it is given back untouched, before the guard's close. A pool
+			// backend is then closed by pgxpool's release hook (reusesBackend).
 			pc.Discard()
 			s.mu.Lock()
 			s.pc = nil
 			s.mu.Unlock()
-			e.sessions.remove(s)
-			cancel()
-			return out, deny(DenyLeaseEncoding)
+			return WireSessionResult{}, deny(DenyLeaseEncoding)
 		}
-		// Startup GUCs: judged by the SAME denylist a SET from
-		// this session meets, then applied to the pinned backend so the
-		// reported ParameterStatus set the client receives already reflects
-		// them. Any refusal — ours or the target's — withdraws the session.
-		if len(req.StartupGUCs) > 0 {
-			if gerr := e.applyStartupGUCs(pinCtx, s, pc, req.StartupGUCs, pat.UserID, ip, connRow.ID); gerr != nil {
-				// A refusal partway through leaves the settings that were
-				// already applied ON the backend, so this is not a fresh
-				// connection that can simply be handed back — it goes through
-				// the release gate like any other used one, and reaches the
-				// pool only if the reset proves it carries none of them.
-				e.noteBackendFate(ctx, s, ip, e.releaseBackend(ctx, s, pc, nil))
-				s.mu.Lock()
-				s.pc = nil
-				s.mu.Unlock()
-				e.sessions.remove(s)
-				cancel()
-				return out, deny(DenyStartupGUC)
+		// Startup GUCs: judged by the SAME denylist a SET from this session
+		// meets, then applied to the pinned backend so the reported
+		// ParameterStatus set the client receives already reflects them. A
+		// refusal partway through leaves settings ON the backend, so it is not
+		// handed back here: the guard's close sends it through the release gate
+		// like any other used backend.
+		if len(a.req.StartupGUCs) > 0 {
+			if gerr := e.applyStartupGUCs(pinCtx, s, pc, a.req.StartupGUCs, pat.UserID, ip, connRow.ID); gerr != nil {
+				return WireSessionResult{}, deny(DenyStartupGUC)
 			}
 			if r, ok := e.reporterFor(pc).(golibpg.ParameterStatusReporter); ok {
 				statuses = r.ReportedParameterStatuses() // live: reflects the SETs
 			}
 		}
-	} else if len(req.StartupGUCs) > 0 {
+	} else if len(a.req.StartupGUCs) > 0 {
 		// A non-PostgreSQL target has no session to apply a GUC to. Refuse
 		// rather than pretend: an accepted setting that silently did nothing
 		// is the behaviour a client cannot detect.
-		e.auditBounded(ctx, pat.UserID, ip, "wire_startup_guc_refused",
+		e.auditBounded(context.WithoutCancel(ctx), pat.UserID, ip, "wire_startup_guc_refused",
 			fmt.Sprintf("conn %d: session %s: target engine %q has no session settings", connRow.ID, s.id, connRow.Engine))
-		e.sessions.remove(s)
-		cancel()
-		return out, deny(DenyStartupGUC)
+		return WireSessionResult{}, deny(DenyStartupGUC)
 	}
-	// THE SESSION'S SILENCE STARTS NOW, when its client can first use it. It
-	// was stamped when the session was built, before the wait in line and the
-	// pin, so a login that waited would open already past its ReclaimGrace and
-	// be the next waiting login's victim before sending its first statement.
+	// THE SESSION'S SILENCE STARTS NOW, when its client can first use it. It was
+	// stamped when the session was built, before the wait in line and the pin, so
+	// a login that waited would open already past its ReclaimGrace.
 	s.mu.Lock()
 	s.lastUsed = e.now()
 	s.mu.Unlock()
+	e.admitStep(ctx, admitStepNote)
+	// Best effort: a failed note is logged by NotePATUse and the login opens.
 	e.auth.NotePATUse(ctx, pat)
+	// THE STOP IS AUTHORITATIVE AT THE COMMIT POINT. NotePATUse swallows its own
+	// errors, and the steps above answer with their own denials; once ctx has
+	// stopped, none of that is a success.
+	if err := ctx.Err(); err != nil {
+		return WireSessionResult{}, err
+	}
 	return WireSessionResult{
-		SessionID: id, UserID: pat.UserID, ConnID: connRow.ID,
-		AdmissionSource: src, PATName: pat.Name, UserName: owner.Name,
-		ParameterStatuses: statuses, ApplicationName: req.ApplicationName,
+		SessionID: s.id, UserID: pat.UserID, ConnID: connRow.ID,
+		AdmissionSource: a.src, PATName: pat.Name, UserName: a.owner.Name,
+		ParameterStatuses: statuses, ApplicationName: a.req.ApplicationName,
 	}, nil
+}
+
+// errClosedBeneath stops a finalization whose session an engine closer has
+// claimed; finalizeOutcome answers with that closer's reason.
+var errClosedBeneath = errors.New("exec: the session was closed while its login was being finalized")
+
+// finalizeOutcome judges a finalization result, success or failure, from the
+// three sources that carry the reason, in this order. The run context is not one
+// of them. It returns nil only for a success none of them overrides.
+//
+//   - a departed client outranks everything: there is no one to answer;
+//   - an engine closer outranks the budget: it decided first and owns the teardown;
+//   - the budget outranks a step's own denial: a step that ran past it was cut off.
+func (e *Engine) finalizeOutcome(admitCtx, fctx context.Context, s *session, err error) error {
+	switch {
+	case errors.Is(context.Cause(admitCtx), ErrClientGone):
+		return ErrClientGone
+	case s.get() != sessOpen:
+		return closedBeneath(s)
+	case errors.Is(fctx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("%w: %w", ErrAdmitFinalizeTimeout, fctx.Err())
+	default:
+		return err
+	}
+}
+
+// closedBeneath is the answer for a login whose session an engine closer claimed
+// before it was handed over: a disabled exposure is the connection refusing the
+// front door; anything else is the engine going away.
+func closedBeneath(s *session) error {
+	s.mu.Lock()
+	why := s.closeWhy
+	s.mu.Unlock()
+	if why == reasonExposureDisabled {
+		return deny(DenyProfileRefuses)
+	}
+	if reason, detail, ok := admissionAnswer(ErrEngineClosing); ok {
+		return denyAfterAuthorizationWithDetail(reason, detail)
+	}
+	return ErrEngineClosing
+}
+
+// resolveStanding is auth.ResolveStanding, or the test hook standing in for it.
+func (e *Engine) resolveStanding(ctx context.Context, ref auth.AuthorityRef, userID, connID int64) (auth.StandingVerdict, error) {
+	if h := e.hookStanding; h != nil {
+		return h()
+	}
+	return e.auth.ResolveStanding(ctx, ref, userID, connID)
+}
+
+// admitStep reports an admission step to the test hook, if one is installed.
+func (e *Engine) admitStep(ctx context.Context, step string) {
+	if h := e.hookAdmitStep; h != nil {
+		h(ctx, step)
+	}
 }
 
 // connectionFrontDoorExposed reads the connection's explicit exposure decision.

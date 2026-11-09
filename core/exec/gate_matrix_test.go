@@ -161,6 +161,13 @@ var gateMatrixWalkExempt = map[string]string{
 	// docs/front-door/dial-failed-client-verification.md.
 	"ErrDialFailed": "a request's backend connection could not be opened; raised at backend " +
 		"acquisition before any statement is judged, not by an admission stage — the gate never sees it",
+	// A front-door login's admission, after its credential was checked and before
+	// any statement exists: neither is a refusal a statement path can meet.
+	"ErrClientGone": "a login's client left while it waited for its pool or was being finalized; " +
+		"raised by the front door's watch on the admission context, before any statement exists — " +
+		"the gate never sees it, and the client is gone so nothing is answered",
+	"ErrAdmitFinalizeTimeout": "a granted login did not finish opening within timeouts.AdmitFinalize; " +
+		"raised before any statement exists and answered as startup-unavailable (57P03), not a gate refusal",
 	"ErrConnectionUnusable": "this connection cannot serve requests as configured; raised at target " +
 		"resolution and at the pin boundary, before any statement is judged — the gate never sees it. " +
 		"Its client shape is a fixed F0000 owned by the front door, and its audit identity is " +

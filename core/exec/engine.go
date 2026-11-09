@@ -76,9 +76,10 @@ type Engine struct {
 
 	mu    sync.Mutex
 	conns map[int64]dao.DataConn
-	// exposureMu lets wire opens run concurrently, but serializes each complete
-	// open against exposure transitions through session withdrawal.
-	exposureMu sync.RWMutex
+	// exposure lets wire finalizations run concurrently, but serializes each
+	// against exposure transitions (exposure_gate.go). Unlike a sync.RWMutex, both
+	// of its acquisitions take a context.
+	exposure *exposureGate
 	// opening reserves a connID while its driver is connecting, so the open
 	// happens outside e.mu without two callers racing to publish two pools.
 	// beginDraining REVOKES a reservation by deleting it: the open in flight
@@ -131,6 +132,16 @@ type Engine struct {
 	// hookBeforeWireAdmit pauses a wire open after its durable exposure read
 	// but before its registry reservation. Test-only race-window control.
 	hookBeforeWireAdmit func()
+	// hookAdmitStep reports each step of a wire login's finalization
+	// (admitStep* in wire_session.go) with that step's context, so a cell can
+	// stall, panic or race at a named point. Test-only.
+	hookAdmitStep func(ctx context.Context, step string)
+	// hookStanding answers a wire login's standing re-check in place of the
+	// auth service, so a cell can make the store fail. Test-only.
+	hookStanding func() (auth.StandingVerdict, error)
+	// admitFinalize is timeouts.AdmitFinalize; a cell shortens it so a stalled
+	// step does not cost the cell ten seconds.
+	admitFinalize time.Duration
 	// hookAuditFail makes an audit write fail (a bounded one, or the clamp's
 	// inside its transaction), so a cell can prove what happens to an
 	// obligation whose record did not land. Nil in production.
@@ -411,7 +422,9 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		opening: map[int64]chan struct{}{},
 		history: true, maxRows: DefaultMaxRows, now: time.Now,
 		profile: ProfileSession, maxStatementBytes: DefaultMaxStatementBytes,
-		sessions: newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
+		sessions:      newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
+		exposure:      newExposureGate(),
+		admitFinalize: timeouts.AdmitFinalize,
 		staged: enginePolicy{
 			sessionIdle:  DefaultSessionIdleTimeout,
 			tx:           defaultTxLimits(),

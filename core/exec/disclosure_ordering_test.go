@@ -40,18 +40,42 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 	}
 	const witness = "denyAfterAuthorization*"
 
+	// A FUNCTION THAT DOES NOT CHECK BOTH GATES ITSELF MAY STILL BE PAST THEM:
+	// a login that waits for its pool is authorized in one function and admitted
+	// in others. Such a function is trusted only if it is unexported, has at
+	// least one caller, and EVERY reference to it -- a call or a method value --
+	// sits after both gates in its caller, or in a caller trusted the same way.
+	// An exported function is never trusted this way: a caller outside the
+	// package is one this walk cannot see.
+	//
+	// A GATE MAY BE PASSED THROUGH A HELPER. A call to an unexported function
+	// that itself passes a gate -- directly or through another such helper --
+	// counts as passing that gate at the call.
+	type call struct {
+		callee string
+		pos    token.Pos
+	}
+	type fnInfo struct {
+		calls []call
+		count int // declarations sharing this name
+	}
 	type site struct {
 		fn    string
 		where token.Position
 		pos   token.Pos
-		gates map[string]token.Pos
+	}
+	type ref struct {
+		caller string
+		pos    token.Pos
 	}
 
+	fns := map[string]*fnInfo{}
+	refsTo := map[string][]ref{}
 	var sites []site
 	for _, path := range goSourceFiles(t) {
 		// One FileSet per file keeps every position below comparable only
 		// against positions from the same file, which is the only comparison
-		// this test makes.
+		// this test makes; a caller's ref and its gates come from one file.
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
@@ -62,34 +86,32 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 			if !ok || fn.Body == nil {
 				continue
 			}
-			var calls []token.Pos
-			gates := map[string]token.Pos{}
+			name := fn.Name.Name
+			info := fns[name]
+			if info == nil {
+				info = &fnInfo{}
+				fns[name] = info
+			}
+			info.count++
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				switch fun := call.Fun.(type) {
-				case *ast.Ident:
-					if witnesses[fun.Name] {
-						calls = append(calls, call.Pos())
+				switch x := n.(type) {
+				case *ast.CallExpr:
+					switch fun := x.Fun.(type) {
+					case *ast.Ident:
+						if witnesses[fun.Name] {
+							sites = append(sites, site{fn: name, where: fset.Position(x.Pos()), pos: x.Pos()})
+						}
+						info.calls = append(info.calls, call{callee: fun.Name, pos: x.Pos()})
+					case *ast.SelectorExpr:
+						info.calls = append(info.calls, call{callee: fun.Sel.Name, pos: x.Pos()})
 					}
 				case *ast.SelectorExpr:
-					// FIRST occurrence wins. A later re-check cannot
-					// retroactively authorize something that already ran.
-					if name := fun.Sel.Name; name == authentication || name == authorization {
-						if _, seen := gates[name]; !seen {
-							gates[name] = call.Pos()
-						}
-					}
+					refsTo[x.Sel.Name] = append(refsTo[x.Sel.Name], ref{caller: name, pos: x.Pos()})
+				case *ast.Ident:
+					refsTo[x.Name] = append(refsTo[x.Name], ref{caller: name, pos: x.Pos()})
 				}
 				return true
 			})
-			for _, c := range calls {
-				sites = append(sites, site{
-					fn: fn.Name.Name, where: fset.Position(c), pos: c, gates: gates,
-				})
-			}
 		}
 	}
 
@@ -101,22 +123,81 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 			"guards, so its silence proves nothing", witness)
 	}
 
-	for _, s := range sites {
+	// passes reports whether fn passes gate somewhere in its body, directly or
+	// through an unexported helper that does.
+	var passes func(fn, gate string, seen map[string]bool) bool
+	passes = func(fn, gate string, seen map[string]bool) bool {
+		info := fns[fn]
+		if info == nil || info.count != 1 || seen[fn] {
+			return false
+		}
+		seen[fn] = true
+		defer delete(seen, fn)
+		for _, c := range info.calls {
+			if c.callee == gate || (!ast.IsExported(c.callee) && passes(c.callee, gate, seen)) {
+				return true
+			}
+		}
+		return false
+	}
+	// gatedAt reports whether pos, inside fn, runs after both gates. The FIRST
+	// call that passes a gate is where fn passes it: a later re-check cannot
+	// retroactively authorize something that already ran.
+	gatedAt := func(fn string, pos token.Pos) (missing string, before bool) {
 		for _, gate := range []string{authentication, authorization} {
-			gpos, ok := s.gates[gate]
-			if !ok {
-				t.Errorf("%s: %s is called in %s, which never calls %s -- the "+
-					"refusal claims the caller was authorized and nothing in "+
-					"that function established it",
-					s.where, witness, s.fn, gate)
+			gpos := token.NoPos
+			for _, c := range fns[fn].calls {
+				if (gpos == token.NoPos || c.pos < gpos) &&
+					(c.callee == gate || (!ast.IsExported(c.callee) && passes(c.callee, gate, map[string]bool{}))) {
+					gpos = c.pos
+				}
+			}
+			if gpos == token.NoPos {
+				return gate, false
+			}
+			if pos < gpos {
+				return gate, true
+			}
+		}
+		return "", false
+	}
+	var trusted func(fn string, seen map[string]bool) bool
+	trusted = func(fn string, seen map[string]bool) bool {
+		info := fns[fn]
+		if info == nil || info.count != 1 || ast.IsExported(fn) || seen[fn] {
+			return false // a cycle proves nothing: a root must check the gates
+		}
+		seen[fn] = true
+		defer delete(seen, fn)
+		callers := refsTo[fn]
+		if len(callers) == 0 {
+			return false
+		}
+		for _, r := range callers {
+			if missing, _ := gatedAt(r.caller, r.pos); missing == "" {
 				continue
 			}
-			if s.pos < gpos {
-				t.Errorf("%s: %s runs BEFORE %s in %s. A caller who has not passed "+
-					"that gate would be told the system is at its connection limit, "+
-					"which reports live capacity to a peer who has proved nothing",
-					s.where, witness, gate, s.fn)
+			if !trusted(r.caller, seen) {
+				return false
 			}
+		}
+		return true
+	}
+
+	for _, s := range sites {
+		missing, before := gatedAt(s.fn, s.pos)
+		switch {
+		case missing == "":
+		case before:
+			t.Errorf("%s: %s runs BEFORE %s in %s. A caller who has not passed "+
+				"that gate would be told the system is at its connection limit, "+
+				"which reports live capacity to a peer who has proved nothing",
+				s.where, witness, missing, s.fn)
+		case !trusted(s.fn, map[string]bool{}):
+			t.Errorf("%s: %s is called in %s, which never calls %s, and not every "+
+				"path into %s passes it -- the refusal claims the caller was "+
+				"authorized and nothing on some path to it established it",
+				s.where, witness, s.fn, missing, s.fn)
 		}
 	}
 }

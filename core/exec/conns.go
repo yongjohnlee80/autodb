@@ -661,11 +661,15 @@ func (e *Engine) SetConnectionExposure(ctx context.Context, token string, connID
 	if ident.Role() != meta.RoleAdmin {
 		return auth.ErrDenied
 	}
-	e.exposureMu.Lock()
+	// The gate's acquisition takes this caller's context: a writer that cannot
+	// get it in time gives up rather than wait on finalizations indefinitely.
+	if err := e.exposure.Lock(ctx); err != nil {
+		return err
+	}
 	locked := true
 	defer func() {
 		if locked {
-			e.exposureMu.Unlock()
+			e.exposure.Unlock()
 		}
 	}()
 	row, err := e.liveConnection(ctx, connID)
@@ -707,12 +711,12 @@ func (e *Engine) SetConnectionExposure(ctx context.Context, token string, connID
 	if err != nil {
 		return err
 	}
-	e.exposureMu.Unlock()
+	e.exposure.Unlock()
 	locked = false
 
 	if wasExposed && !exposed {
 		for _, s := range e.sessions.wireSessions(connID) {
-			e.closeSession(ctx, s, ip, "exposure-disabled")
+			e.closeSession(ctx, s, ip, reasonExposureDisabled)
 		}
 	}
 	return nil
@@ -941,3 +945,8 @@ func (e *Engine) RenameConnection(ctx context.Context, token string, connID int6
 			fmt.Sprintf("%s -> %s", row.Name, name))
 	})
 }
+
+// reasonExposureDisabled closes the wire sessions of a connection whose front-door
+// exposure was turned off. A login being finalized on it reads this reason and is
+// refused as the connection refusing the front door (closedBeneath).
+const reasonExposureDisabled = "exposure-disabled"

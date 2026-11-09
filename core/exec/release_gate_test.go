@@ -525,6 +525,9 @@ func TestReleaseGate_APinnedConnectionIsHandedBackInExactlyOnePlace(t *testing.T
 	// The pool handback takes a context; the permit ledger's own Release takes
 	// none, so this pattern separates them without an exemption list.
 	handback := regexp.MustCompile(`\.Release\(\s*[a-zA-Z_]`)
+	// The exposure gate's semaphore (its field is named sem) releases a weight,
+	// not a connection.
+	weight := regexp.MustCompile(`\bsem\.Release\(`)
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -544,7 +547,7 @@ func TestReleaseGate_APinnedConnectionIsHandedBackInExactlyOnePlace(t *testing.T
 			t.Fatal(err)
 		}
 		for i, line := range strings.Split(string(b), "\n") {
-			if !handback.MatchString(line) {
+			if !handback.MatchString(line) || weight.MatchString(line) {
 				continue
 			}
 			if path == "release_gate.go" {

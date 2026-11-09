@@ -105,6 +105,11 @@ const (
 	// finish opening a backend within its allowance. Raised in the front door,
 	// like DetailStoreUnavailable, and declared here so the set stays closed.
 	DetailBackendOpenTimeout ConfigDetail = "the target did not finish opening a connection in time"
+	// DetailAdmitFinalizeTimeout: a granted front-door login could not finish
+	// opening (fresh checks, pin, settings) within AdmitFinalize. Raised in the
+	// front door from ErrAdmitFinalizeTimeout, and declared here so the set
+	// stays closed.
+	DetailAdmitFinalizeTimeout ConfigDetail = "the login could not finish opening in time"
 	// DetailPermitUnreadable: a pooled connection's socket isn't one the pool's
 	// ledger dialled, so the share it was charged to can't be read. A defect in
 	// this package, refused rather than guessed (permitOf).
@@ -118,7 +123,7 @@ const (
 func configDetails() []ConfigDetail {
 	return []ConfigDetail{DetailUnknownEngine, DetailDSNUnusable, DetailDSNRefused, DetailPoolRefused,
 		DetailGrammarUnproved, DetailNoDestroy, DetailStoreUnavailable, DetailBackendOpenTimeout,
-		DetailPermitUnreadable, DetailUnclassified}
+		DetailAdmitFinalizeTimeout, DetailPermitUnreadable, DetailUnclassified}
 }
 
 // ErrConnectionUnusable is the sentinel every configuration failure carries,
