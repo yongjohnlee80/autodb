@@ -445,6 +445,16 @@ func endedAsInput(t *testing.T, lis *Listener, events func() []Event, peer strin
 	if n := eventsOf(events(), "fd.auth_denied", ""); n != 1 {
 		t.Errorf("%d login refusals recorded, want exactly the one protocol violation", n)
 	}
+	var mine []string
+	for _, e := range events() {
+		if e.Kind == "fd.auth_denied" && e.Peer == peer {
+			mine = append(mine, e.Reason)
+		}
+	}
+	if len(mine) != 1 || mine[0] != string(reasonPreAuthProtocolViolation) {
+		t.Errorf("this connection's refusals were %q, want exactly one with the protocol reason %q",
+			mine, reasonPreAuthProtocolViolation)
+	}
 	if n := chargesOn(lis); n != 1 {
 		t.Errorf("the source was charged %d times, want exactly once for one protocol violation", n)
 	}

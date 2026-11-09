@@ -1508,6 +1508,15 @@ func All() []Mutation {
 			Guarantee:   "that a client leaving while its login waits is neither refused nor charged",
 		},
 		{
+			Name: "the-audited-refusal-names-its-reason", Package: "./frontdoor/", File: "frontdoor/listener.go",
+			// One refusal and one charge still happen; only the recorded reason is wrong.
+			Anchor:      "\tl.onEvent(Event{Kind: \"fd.auth_denied\", Reason: outcome.Denied.String(), Peer: peer, Detail: out.RefusedParam})\n",
+			Replacement: "\t_ = outcome.Denied\n\tl.onEvent(Event{Kind: \"fd.auth_denied\", Reason: \"frontdoor/denied\", Peer: peer, Detail: out.RefusedParam})\n",
+			Test:        "TestAdmitFD_TheWatchDecidesAtTheHandoff",
+			Fails:       "want exactly one with the protocol reason",
+			Guarantee:   "that input ending a login's wait is recorded as the protocol violation it is",
+		},
+		{
 			Name: "each-login-phase-declares-only-what-it-reaches", Package: "./frontdoor/", File: "frontdoor/outcomes.go",
 			// The whole union back under the credential phase.
 			Anchor:      "\treturn append(out, engineDenials(exec.AuthorizeDenials())...)\n",
