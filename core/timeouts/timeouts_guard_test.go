@@ -130,7 +130,7 @@ func TestGuard_FindsAStrayAndPassesAnAnnotation(t *testing.T) {
 func TestFixedTimeoutsAreWithinMaxBound(t *testing.T) {
 	for name, d := range map[string]time.Duration{
 		"TLSHandshake": TLSHandshake, "StartupPacket": StartupPacket, "CredentialExchange": CredentialExchange,
-		"QueueWait": QueueWait, "HandshakeReserve": HandshakeReserve, "PinAllowance": PinAllowance,
+		"QueueWait": QueueWait, "HandshakeReserve": HandshakeReserve, "PinAllowance": PinAllowance, "AdmitFinalize": AdmitFinalize,
 		"MemoryLaneWait": MemoryLaneWait, "ReclaimGrace": ReclaimGrace, "IdleBetweenMessages": IdleBetweenMessages,
 		"ServerBeltMargin": ServerBeltMargin, "IdleHoldingState": IdleHoldingState,
 		"StrayBackendIdle": StrayBackendIdle, "BackendReset": BackendReset, "BackendConnect": BackendConnect,
@@ -159,15 +159,18 @@ func TestGuard_TheGuardedPackagesExist(t *testing.T) {
 	}
 }
 
-// A waiting front-door login has CredentialExchange less what the pin and the
-// reply keep back. Serving it by reclamation takes the victim's grace and then
-// its goodbye frame, whose write is bounded by GoodbyeWrite, before the lease
-// comes back. If those two reach the wait, a login that arrived just as every
-// holder went quiet is refused before any lease can be freed for it.
+// A waiting front-door login has QueueWait, after its credential phase. Serving
+// it by reclamation takes the victim's grace and then its goodbye frame, whose
+// write is bounded by GoodbyeWrite, before the lease comes back. If those two
+// reach the wait, a login that arrived just as every holder went quiet is refused
+// before any lease can be freed for it. And the pin runs inside the finalization
+// budget, so it can never be the larger of the two.
 func TestReclaimGrace_FitsInsideAFrontDoorLoginsWait(t *testing.T) {
-	wait := CredentialExchange - PinAllowance - HandshakeReserve
-	if path := ReclaimGrace + GoodbyeWrite; path >= wait {
+	if path := ReclaimGrace + GoodbyeWrite; path >= QueueWait {
 		t.Errorf("ReclaimGrace (%v) + GoodbyeWrite (%v) = %v is not shorter than a front-door "+
-			"login's wait (%v)", ReclaimGrace, GoodbyeWrite, path, wait)
+			"login's wait (%v)", ReclaimGrace, GoodbyeWrite, path, QueueWait)
+	}
+	if PinAllowance >= AdmitFinalize {
+		t.Errorf("PinAllowance (%v) is not inside AdmitFinalize (%v)", PinAllowance, AdmitFinalize)
 	}
 }

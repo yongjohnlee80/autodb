@@ -37,21 +37,26 @@ const (
 
 // Waiting for capacity (fixed).
 const (
-	// QueueWait is how long a new session waits in its pool's line, and how
-	// long a dial whose caller has no deadline waits in its share's line. A
-	// front-door wait ends sooner, PinAllowance + HandshakeReserve before
-	// CredentialExchange runs out.
+	// QueueWait is how long a new session waits in its pool's line, a front-door
+	// login included (its wait runs after its credential phase has ended), and
+	// how long a dial whose caller has no deadline waits in its share's line.
 	//
 	// Not derived from the transaction bounds: how long a transaction may sit
 	// idle is not how long a person or a service should wait for an answer.
 	QueueWait = 90 * time.Second
-	// HandshakeReserve is kept back from the credential deadline, so a
-	// front-door session admitted or refused at the last moment can still be
-	// told.
+	// HandshakeReserve is the write budget for a front-door login's answer
+	// after its wait: the success sequence or a refusal. The credential
+	// deadline has long passed by then, so the answer needs a bound of its own.
 	HandshakeReserve = 2 * time.Second
-	// PinAllowance is what the line leaves the pin: the dial, TLS, startup,
-	// the encoding check and the startup parameters, before HandshakeReserve.
+	// PinAllowance bounds a front-door login's pin, inside AdmitFinalize: the
+	// dial, TLS, startup, the encoding check and the startup parameters.
 	PinAllowance = 2 * time.Second
+	// AdmitFinalize bounds everything a front-door login does after its wait
+	// in line: the fresh exposure and standing reads, the pin (PinAllowance,
+	// inside it), the encoding check and startup settings, and the PAT's use
+	// note. A meta store or target that stalls here holds a granted lease, so
+	// it must end; expiry is answered as startup-unavailable (57P03).
+	AdmitFinalize = 10 * time.Second
 	// MemoryLaneWait bounds a front-door request's wait for memory-lane
 	// bytes, before it stops holding a statement open.
 	MemoryLaneWait = 30 * time.Second
@@ -84,13 +89,13 @@ const (
 	//     between client and autodb plus the client's own processing, about
 	//     0.2 s even from Asia to North America. 3 s is over ten times that,
 	//     so a client in the middle of its work is not ended.
-	//   - Below what a front-door login can wait. The wait runs inside the
-	//     credential exchange: CredentialExchange less PinAllowance and
-	//     HandshakeReserve, 6 s. Serving a login by reclamation takes this
-	//     grace and then the victim's goodbye write (GoodbyeWrite, 2 s):
-	//     3 s + 2 s fits, so a login that arrives just as every holder went
-	//     quiet can still be served. A longer grace would refuse that login
-	//     with 53300 before any slot could be freed for it.
+	//   - Short, because a waiting login waits through it. Serving a login by
+	//     reclamation takes this grace and then the victim's goodbye write
+	//     (GoodbyeWrite, 2 s). A front-door login waits up to QueueWait after
+	//     its credential phase, so 3 s + 2 s leaves it nearly all of that, and
+	//     a guard test keeps the sum below QueueWait. (While the wait ran
+	//     inside the credential exchange it had about 6 s, which is what set
+	//     3 s; the grace protects a client's working gap, which hasn't changed.)
 	//
 	// A session quiet for 3 s or more under a waiting login is idle for this
 	// purpose and may be ended: a pooled connection resting between
