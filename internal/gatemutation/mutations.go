@@ -237,8 +237,8 @@ func All() []Mutation {
 		{
 			Name: "only-an-untroubled-holder-is-chosen", Package: "./core/exec/",
 			File:        "core/exec/demand_reclaim.go",
-			Anchor:      "\t\teligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil",
-			Replacement: "\t\teligible := s.wire",
+			Anchor:      "\treturn s.get() == sessOpen && s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil\n",
+			Replacement: "\treturn s.get() == sessOpen && s.wire\n",
 			Test:        "TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen",
 			Fails:       "a holder was chosen while",
 			Guarantee: "that a session running a statement, holding a transaction, not " +
@@ -1329,7 +1329,7 @@ func All() []Mutation {
 		},
 		{
 			Name: "an-ask-is-armed-for-the-end-of-a-grace", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
-			Anchor:      "\t\tif at, ok := e.sessions.nextReclaimable(key); ok {\n\t\t\te.sessions.retryDemandAt(key, at, at.Sub(now))\n\t\t}\n",
+			Anchor:      "\t\tif at, ok := e.sessions.nextReclaimable(key); ok && at.After(now) {\n\t\t\te.sessions.retryDemandAt(key, at, at.Sub(now))\n\t\t}\n",
 			Replacement: "",
 			Test:        "TestDemandRetry_AWaitingLoginIsServedTheMomentAHolderPassesItsGrace",
 			Fails:       "no ask was armed",
@@ -1363,7 +1363,7 @@ func All() []Mutation {
 		{
 			// Needs TEST_PGURL: a live front door with its production login deadline.
 			Name: "a-queued-login-is-served-when-the-grace-ends", Package: "./frontdoor/", File: "core/exec/demand_reclaim.go",
-			Anchor:      "\t\tif at, ok := e.sessions.nextReclaimable(key); ok {\n\t\t\te.sessions.retryDemandAt(key, at, at.Sub(now))\n\t\t}\n",
+			Anchor:      "\t\tif at, ok := e.sessions.nextReclaimable(key); ok && at.After(now) {\n\t\t\te.sessions.retryDemandAt(key, at, at.Sub(now))\n\t\t}\n",
 			Replacement: "",
 			Test:        "TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds",
 			Fails:       "was refused after",
@@ -1376,6 +1376,22 @@ func All() []Mutation {
 			Test:        "TestDrivenDemand_AClientThatStopsReadingReleasesWithinTheGoodbyeBudget",
 			Fails:       "within the goodbye budget",
 			Guarantee:   "that a reclaimed client which stopped reading cannot hold the lease past the waiting login's deadline",
+		},
+		{
+			Name: "a-closing-holder-is-not-asked-again", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
+			Anchor:      "\treturn s.get() == sessOpen && s.wire && ",
+			Replacement: "\treturn s.wire && ",
+			Test:        "TestDemandReclaim_AHolderAlreadyClosingIsNotAskedAgain",
+			Fails:       "came back to the holder already closing",
+			Guarantee:   "that no more sessions are ended than logins are waiting",
+		},
+		{
+			Name: "a-session-is-promised-once", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
+			Anchor:      "\tif _, ok := r.demandPromised[key][id]; ok {\n\t\treturn false\n\t}\n",
+			Replacement: "",
+			Test:        "TestDemandReclaim_ASessionIsPromisedOnce",
+			Fails:       "promised twice",
+			Guarantee:   "that a failed reservation never takes away another login's promised reclamation",
 		},
 	}
 }
