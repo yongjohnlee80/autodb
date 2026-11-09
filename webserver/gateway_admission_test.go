@@ -443,7 +443,7 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 		if abs(got) <= bound {
 			t.Fatalf("with %v injected into the unknown-name path alone — %v past the %v bound "+
 				"this run accepted — the existence statistic resolved only %v (the control's own "+
-				"noise %v, the bound's %v). It cannot see a leak at its own boundary, so its green "+
+				"noise %v, the bound's %v). It cannot see a leak of twice its bound, so its green "+
 				"above says nothing",
 				delay, delay-bound, bound, abs(got), own, noise)
 		}
@@ -457,8 +457,8 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 		if abs(got) <= bound {
 			t.Fatalf("with %v injected into the correct-password path alone — %v past the %v "+
 				"bound this run accepted — the credential statistic resolved only %v (the "+
-				"control's own noise %v, the bound's %v). It cannot see a leak at its own "+
-				"boundary, so its green above says nothing",
+				"control's own noise %v, the bound's %v). It cannot see a leak of twice its "+
+				"bound, so its green above says nothing",
 				delay, delay-bound, bound, abs(got), own, noise)
 		}
 	})
