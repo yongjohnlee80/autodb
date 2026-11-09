@@ -371,7 +371,8 @@ func DenialReasons() []string {
 
 // AuthorizeDenials is every denial AuthorizeWire can return, and AdmitDenials
 // every one Admit can: the front door's two phases each declare exactly the set
-// their engine call can raise (ADR 0189 decision 3). The sets overlap where
+// their engine call can raise, so the registry can answer "what can happen in
+// this phase" and refuse a wiring mistake. The sets overlap where
 // finalization re-runs authorization's connection checks after the wait.
 // TestWireDenials_EachHalfDeclaresExactlyWhatItRaises derives both from the
 // source and fails on any difference.
