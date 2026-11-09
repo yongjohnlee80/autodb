@@ -276,7 +276,7 @@ func expectedControls() map[string][3]string {
 		"an-ask-is-armed-for-the-end-of-a-grace":                  {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandRetry_AWaitingLoginIsServedTheMomentAHolderPassesItsGrace"},
 		"an-idle-timeout-must-outlast-the-reclaim-grace":          {"core/exec/policy.go", "./core/exec/", "TestReloadPolicy_RefusesASessionIdleInsideTheReclaimGrace"},
 		"one-ask-serves-every-owed-waiter":                        {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandRetry_OneSweepServesEveryWaiterWhoseHolderPassedItsGrace"},
-		"a-session-is-quiet-from-when-it-opens":                   {"core/exec/session.go", "./frontdoor/", "TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds"},
+		"a-session-is-quiet-from-when-it-opens":                   {"core/exec/session.go", "./frontdoor/", "TestAdmitFD_AWaitedLoginIsQuietFromWhenItOpens"},
 		"a-queued-login-is-served-when-the-grace-ends":            {"core/exec/demand_reclaim.go", "./frontdoor/", "TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds"},
 		"a-reclaimed-client-is-told-within-the-goodbye-budget":    {"frontdoor/demand_wake.go", "./frontdoor/", "TestDrivenDemand_AClientThatStopsReadingReleasesWithinTheGoodbyeBudget"},
 		"a-session-is-promised-once":                              {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_ASessionIsPromisedOnce"},

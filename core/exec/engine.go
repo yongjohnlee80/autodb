@@ -139,6 +139,8 @@ type Engine struct {
 	// hookStanding answers a wire login's standing re-check in place of the
 	// auth service, so a cell can make the store fail. Test-only.
 	hookStanding func() (auth.StandingVerdict, error)
+	// hookReceiveOffered fires after a receive offer's demand ask has run (tests).
+	hookReceiveOffered func(id SessionID)
 	// admitFinalize is timeouts.AdmitFinalize; a cell shortens it so a stalled
 	// step does not cost the cell ten seconds.
 	admitFinalize time.Duration
@@ -285,6 +287,14 @@ func WithWaiterQueued(fn func()) Option {
 // client's login left the line before any capacity came back.
 func WithWaiterLeft(fn func(depth int)) Option {
 	return func(e *Engine) { e.sessions.hookWaiterLeft = fn }
+}
+
+// WithReceiveOffered is called when a session has opened its receive offer and
+// the demand ask that offer makes has run (tests). A cell outside this package
+// waits on it to know a holder was askable, and was judged, before it lets that
+// holder's client speak.
+func WithReceiveOffered(fn func(id SessionID)) Option {
+	return func(e *Engine) { e.hookReceiveOffered = fn }
 }
 
 // WithNow injects a clock (tests).

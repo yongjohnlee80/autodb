@@ -1356,8 +1356,8 @@ func All() []Mutation {
 			Name: "a-session-is-quiet-from-when-it-opens", Package: "./frontdoor/", File: "core/exec/session.go",
 			Anchor:      "\ts.busy = false\n\ts.lastUsed = time.Now()\n",
 			Replacement: "\ts.busy = false\n",
-			Test:        "TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds",
-			Fails:       "before it had said anything",
+			Test:        "TestAdmitFD_AWaitedLoginIsQuietFromWhenItOpens",
+			Fails:       "was ended for the next one before it had said anything",
 			Guarantee:   "that a login which waited in line is not reclaimed for the next one before its first statement",
 		},
 		{

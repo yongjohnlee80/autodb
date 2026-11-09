@@ -489,9 +489,25 @@ func libpqBurst(t *testing.T, l pgLoopHandles, poolMax, burst int, query string,
 // served inside its wait. Then a third login arrives while the second has not
 // yet sent anything: the second's silence started when it opened, not when it
 // joined the line, so it is not the third's victim before its first statement.
+//
+// THE JUDGEMENT IS OBSERVED BEFORE THE SECOND SPEAKS. The third's demand can
+// only consider the second once the second is offering to receive. If the
+// second's statement went out before that, the statement's own end would stamp
+// it fresh and the claim would hold whatever the open had stamped. So the cell
+// waits, after the third has queued, until the second's offer has opened and
+// its ask has run -- whichever of the two asks judged it -- and only then lets
+// the second send its first statement.
 func TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds(t *testing.T) {
 	queuedAndAsked := make(chan struct{}, 4)
-	l := pgLoopFull(t, exec.WithWaiterQueued(func() { queuedAndAsked <- struct{}{} }))
+	offered := make(chan exec.SessionID, 256)
+	l := pgLoopFull(t,
+		exec.WithWaiterQueued(func() { queuedAndAsked <- struct{}{} }),
+		exec.WithReceiveOffered(func(id exec.SessionID) {
+			select {
+			case offered <- id:
+			default: // the cell reads only the second's; a full buffer drops others
+			}
+		}))
 	if err := l.eng.UpdatePool(opCtx(t), l.rootTok, meta.DefaultPoolID, 3, "127.0.0.1"); err != nil {
 		t.Fatalf("shrinking the default pool to 3: %v", err)
 	}
@@ -534,6 +550,23 @@ func TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds(t *testi
 			"while its client might still have used it", waited, timeouts.ReclaimGrace)
 	}
 
+	// The second login's session, from the audit trail: the holder's opened
+	// first.
+	var second exec.SessionID
+	waitFor(t, "the second login's session_open", func() bool {
+		var ids []string
+		for _, e := range l.events() {
+			if e.Kind == "fd.session_open" {
+				ids = append(ids, e.Detail)
+			}
+		}
+		if len(ids) < 2 {
+			return false
+		}
+		second = exec.SessionID(ids[1])
+		return true
+	})
+
 	// The second login's own wait was announced; drain it, so the next
 	// announcement is the third login's.
 	select {
@@ -565,6 +598,17 @@ func TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds(t *testi
 		t.Fatalf("the third login never queued behind the second (connect: %v)", d.err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the third login never queued behind the second")
+	}
+	// The second has opened its offer and been judged: by the third's arrival
+	// ask if the offer was already open, or by its own offer's ask if not.
+	judged := time.After(10 * time.Second)
+	for seen := false; !seen; {
+		select {
+		case id := <-offered:
+			seen = id == second
+		case <-judged:
+			t.Fatal("the second login never offered to receive, so no demand could judge it")
+		}
 	}
 
 	if err := selectOne(opCtx(t), queued); err != nil {
