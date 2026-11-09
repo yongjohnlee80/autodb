@@ -62,22 +62,33 @@ func TestParsingGUC_ATargetReportingOffIsRefusedAtCheckout(t *testing.T) {
 	if _, err := admin.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
 		t.Fatalf("creating the scratch database: %v", err)
 	}
+	// A failed drop fails the cell: a passing run that left a database behind
+	// would hide the leak until the server ran out of room. Bounded on its own
+	// context, because the cell's is spent or cancelled by the time this runs.
 	t.Cleanup(func() {
-		c, err := pgx.Connect(context.Background(), shared)
+		cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer ccancel()
+		c, err := pgx.Connect(cctx, shared)
 		if err != nil {
-			t.Logf("cleanup: reconnect: %v", err)
+			t.Errorf("cleanup: reconnecting to drop %s: %v", dbName, err)
 			return
 		}
-		defer c.Close(context.Background())
-		if _, err := c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)"); err != nil {
-			t.Logf("cleanup: DROP DATABASE %s: %v", dbName, err)
+		defer c.Close(cctx)
+		if _, err := c.Exec(cctx, "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)"); err != nil {
+			t.Errorf("cleanup: DROP DATABASE %s: %v", dbName, err)
 		}
 	})
+	// TEST_PGURL is a URL, as the test docs give it. A dbname query parameter
+	// would override the path and point the cell back at the shared database,
+	// so it is removed; any other shape is refused rather than guessed at.
 	u, err := url.Parse(shared)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+		t.Fatalf("TEST_PGURL must be a postgres:// URL for this cell (parse error: %v)", err)
 	}
 	u.Path = "/" + dbName
+	q := u.Query()
+	q.Del("dbname")
+	u.RawQuery = q.Encode()
 	dsn := u.String()
 	if _, err := admin.Exec(ctx, "ALTER DATABASE "+dbName+" SET standard_conforming_strings = off"); err != nil {
 		t.Fatalf("ALTER DATABASE %s ... off: %v", dbName, err)
