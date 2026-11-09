@@ -23,7 +23,10 @@ func TestPlaybook_LoopbackHostNeverInvokesSSH(t *testing.T) {
 	for _, host := range []string{"127.0.0.1", "localhost", "::1"} {
 		t.Run(host, func(t *testing.T) {
 			cmd := exec.Command("sh", playbook(t), "--check", "--host", host)
-			cmd.Env = append(os.Environ(), "PATH="+mines+string(os.PathListSeparator)+os.Getenv("PATH"))
+			// The landmines first, then a host that has systemd: the probe
+			// requires systemctl, and this cell is about the transport.
+			cmd.Env = append(os.Environ(), "PATH="+mines+string(os.PathListSeparator)+
+				systemdHost(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
 			out, err := cmd.CombinedOutput()
 			body := string(out)
 			if strings.Contains(body, "local mode invoked") {

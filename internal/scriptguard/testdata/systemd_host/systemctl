@@ -1,0 +1,19 @@
+#!/bin/sh
+# A HOST THAT HAS SYSTEMD, for cells that must get past "is systemd here?" and
+# never act on a unit.
+#
+# provision_vm.sh's probe and update_frontdoor.sh both require systemctl before
+# they reach the consent gate those cells exist to test. A container or a
+# laptop without systemd failed them for that reason instead, so the cells
+# proved nothing there. This stub makes them independent of the host: a
+# deployment target always has systemd, and no cell that uses it may get far
+# enough to start, stop or enable anything -- they all require a refusal first.
+#
+# It answers what a unit that is not installed answers, and changes nothing.
+case "${1:-}" in
+  show)       printf '\n' ;;
+  is-active)  printf 'inactive\n'; exit 3 ;;
+  is-enabled) printf 'not-found\n'; exit 1 ;;
+  *)          : ;;
+esac
+exit 0

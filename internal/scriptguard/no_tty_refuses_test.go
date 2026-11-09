@@ -49,6 +49,30 @@ func underSetsid(t *testing.T, script string, args ...string) (string, error) {
 	return string(out), err
 }
 
+// underSetsidOnASystemdHost is underSetsid with testdata/systemd_host first on
+// PATH: for scripts that require systemctl before they reach the gate, so the
+// cell measures the gate on any machine rather than only on one with systemd.
+func underSetsidOnASystemdHost(t *testing.T, script string, args ...string) (string, error) {
+	t.Helper()
+	requireCapability(t, capSetsid, binaryProbe("setsid"),
+		"this cell cannot create the no-terminal condition it exists to test, "+
+			"so passing would be vacuous")
+	cmd := exec.Command("setsid", append([]string{"sh", script}, args...)...)
+	cmd.Env = append(os.Environ(), "PATH="+systemdHost(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// systemdHost is the directory holding the stand-in systemctl.
+func systemdHost(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(filepath.Join("testdata", "systemd_host"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestNoTTY_TheInstallerRefusesToApply(t *testing.T) {
 	t.Parallel()
 
@@ -108,7 +132,7 @@ func TestNoTTY_TheUpdaterRefusesAndReplacesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, uerr := underSetsid(t, updater(t), "--prefix", dir)
+	out, uerr := underSetsidOnASystemdHost(t, updater(t), "--prefix", dir)
 	if uerr == nil {
 		t.Fatalf("the updater ran with no terminal and no --yes:\n%s", out)
 	}
@@ -199,7 +223,7 @@ func TestNoTTY_TheProvisionerRefusesAndChangesNothing(t *testing.T) {
 
 	before := len(provisionTmpDirs(t))
 
-	out, err := underSetsid(t, playbook(t),
+	out, err := underSetsidOnASystemdHost(t, playbook(t),
 		"--host", "localhost", "--user", currentUser(t), "--apply",
 		"--ref", "main", "--prebuilt", "--swap", "none", "--no-init")
 	if err == nil {
