@@ -490,7 +490,12 @@ func (l *Listener) sendReadinessWith(conn net.Conn, be *pgproto3.Backend,
 // legitimate statement still runs unbounded, and only a client that will not take
 // what it asked for is cut off.
 func (l *Listener) flushBounded(conn net.Conn, be *pgproto3.Backend) error {
-	if err := conn.SetWriteDeadline(l.now().Add(l.dl.outputStall)); err != nil {
+	return l.flushWithin(conn, be, l.dl.outputStall)
+}
+
+// flushWithin is flushBounded with an explicit write budget.
+func (l *Listener) flushWithin(conn net.Conn, be *pgproto3.Backend, d time.Duration) error {
+	if err := conn.SetWriteDeadline(l.now().Add(d)); err != nil {
 		return err
 	}
 	err := be.Flush()

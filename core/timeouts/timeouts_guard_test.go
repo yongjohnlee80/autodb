@@ -160,12 +160,14 @@ func TestGuard_TheGuardedPackagesExist(t *testing.T) {
 }
 
 // A waiting front-door login has CredentialExchange less what the pin and the
-// reply keep back. A reclaim grace at or past that wait could never serve a
-// login that arrived just as every holder went quiet: it would be refused
-// before any holder became reclaimable.
+// reply keep back. Serving it by reclamation takes the victim's grace and then
+// its goodbye frame, whose write is bounded by GoodbyeWrite, before the lease
+// comes back. If those two reach the wait, a login that arrived just as every
+// holder went quiet is refused before any lease can be freed for it.
 func TestReclaimGrace_FitsInsideAFrontDoorLoginsWait(t *testing.T) {
 	wait := CredentialExchange - PinAllowance - HandshakeReserve
-	if ReclaimGrace >= wait {
-		t.Errorf("ReclaimGrace (%v) is not shorter than a front-door login's wait (%v)", ReclaimGrace, wait)
+	if path := ReclaimGrace + GoodbyeWrite; path >= wait {
+		t.Errorf("ReclaimGrace (%v) + GoodbyeWrite (%v) = %v is not shorter than a front-door "+
+			"login's wait (%v)", ReclaimGrace, GoodbyeWrite, path, wait)
 	}
 }

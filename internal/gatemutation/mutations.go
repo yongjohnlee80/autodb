@@ -1343,5 +1343,39 @@ func All() []Mutation {
 			Fails:       "want ErrPolicyInvalid",
 			Guarantee:   "that no policy lets the idle timeout end every quiet session before demand could reclaim one",
 		},
+		{
+			Name: "one-ask-serves-every-owed-waiter", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
+			Anchor:      "\tfor r.pressDemand(key) {\n",
+			Replacement: "\tfor r.pressDemand(key) {\n\t\tbreak\n",
+			Test:        "TestDemandRetry_OneSweepServesEveryWaiterWhoseHolderPassedItsGrace",
+			Fails:       "want 2: one per waiting login",
+			Guarantee:   "that when several logins wait on holders in their grace, every one is answered when the grace ends",
+		},
+		{
+			// Needs TEST_PGURL: a live front door with its production login deadline.
+			Name: "a-session-is-quiet-from-when-it-opens", Package: "./frontdoor/", File: "core/exec/wire_session.go",
+			Anchor:      "\ts.mu.Lock()\n\ts.lastUsed = e.now()\n\ts.mu.Unlock()\n\te.auth.NotePATUse(ctx, pat)\n",
+			Replacement: "\te.auth.NotePATUse(ctx, pat)\n",
+			Test:        "TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds",
+			Fails:       "before it had said anything",
+			Guarantee:   "that a login which waited in line is not reclaimed for the next one before its first statement",
+		},
+		{
+			// Needs TEST_PGURL: a live front door with its production login deadline.
+			Name: "a-queued-login-is-served-when-the-grace-ends", Package: "./frontdoor/", File: "core/exec/demand_reclaim.go",
+			Anchor:      "\t\tif at, ok := e.sessions.nextReclaimable(key); ok {\n\t\t\te.sessions.retryDemandAt(key, at, at.Sub(now))\n\t\t}\n",
+			Replacement: "",
+			Test:        "TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds",
+			Fails:       "was refused after",
+			Guarantee:   "that a front-door login queued behind a quiet holder is served inside its own login deadline",
+		},
+		{
+			Name: "a-reclaimed-client-is-told-within-the-goodbye-budget", Package: "./frontdoor/", File: "frontdoor/demand_wake.go",
+			Anchor:      "\tif l.flushWithin(conn, be, timeouts.GoodbyeWrite) == nil {\n",
+			Replacement: "\tif l.flushWithin(conn, be, l.dl.outputStall+0*timeouts.GoodbyeWrite) == nil {\n",
+			Test:        "TestDrivenDemand_AClientThatStopsReadingReleasesWithinTheGoodbyeBudget",
+			Fails:       "within the goodbye budget",
+			Guarantee:   "that a reclaimed client which stopped reading cannot hold the lease past the waiting login's deadline",
+		},
 	}
 }

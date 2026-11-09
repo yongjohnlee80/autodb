@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/outcome"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // THE CLIENT'S SOCKET HAS EXACTLY ONE WRITER, AND IT IS THE SESSION LOOP.
@@ -215,7 +216,10 @@ func (l *Listener) endForDemand(ctx context.Context, conn net.Conn, be *pgproto3
 	}
 
 	be.Send(gateError(row.severity, row.sqlState, row.message, row.identity, row.hint))
-	if l.flushBounded(conn, be) == nil {
+	// THE GOODBYE BUDGET, NOT THE OUTPUT STALL. A login is waiting for this
+	// lease and has about six seconds; a client that has stopped reading must
+	// not hold the lease for the thirty an ordinary result write is allowed.
+	if l.flushWithin(conn, be, timeouts.GoodbyeWrite) == nil {
 		delivery = exec.DemandDelivered
 	} else {
 		delivery = exec.DemandFlushFailed

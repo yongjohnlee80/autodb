@@ -180,8 +180,11 @@ apart; ending it in that gap hands the client a dead connection.
 A front-door login waits in line for **about 6 seconds**: its 10 s login limit,
 less what connecting its backend and replying need. When it arrives while
 every quiet session is still inside its 3 seconds, autodb asks again the
-moment the first one passes it, so the login can still be served in time. The
-janitor's sweep asks again too, as a backstop. A `session_idle_timeout` of 3
+moment the first one passes it, and once for every login still waiting. The
+ended session's client gets at most 2 seconds to take its goodbye message, so
+3 + 2 seconds stays inside the login's wait. A login that waited starts its own
+3 seconds when it opens, not when it joined the line. The janitor's sweep asks
+again too, as a backstop. A `session_idle_timeout` of 3
 seconds or less is refused, since it would end every quiet session before a
 waiting login could take one.
 
