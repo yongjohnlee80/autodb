@@ -26,7 +26,9 @@
 #
 # The ParameterStatus NAMES are not redacted, and they do depend on the target
 # server's build: a PostgreSQL upgrade that reports a new parameter changes this
-# list, and the fix is to re-read the exchange and edit this file.
+# list, and the fix is to re-read the exchange and edit this file. Recorded
+# against PostgreSQL 18, which added search_path to the parameters a server
+# reports at startup.
 #
 # HOW THE FRAMES WERE SEEN. The front door has no plaintext path, so a tap
 # between the driver and the listener would see ciphertext. The test puts a
@@ -51,6 +53,7 @@ front door -> driver  ParameterStatus in_hot_standby=<value>
 front door -> driver  ParameterStatus integer_datetimes=<value>
 front door -> driver  ParameterStatus is_superuser=<value>
 front door -> driver  ParameterStatus scram_iterations=<value>
+front door -> driver  ParameterStatus search_path=<value>
 front door -> driver  ParameterStatus server_encoding=<value>
 front door -> driver  ParameterStatus server_version=<value>
 front door -> driver  ParameterStatus session_authorization=<value>
