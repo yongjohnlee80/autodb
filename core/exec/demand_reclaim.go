@@ -379,6 +379,9 @@ func (e *Engine) OfferReceive(id SessionID) uint64 {
 	// are already coming, so a target with one waiter and several idle holders
 	// gives up one lease, not several.
 	e.sessions.pressDemand(target)
+	if h := e.hookReceiveOffered; h != nil {
+		h(id)
+	}
 
 	return token
 }

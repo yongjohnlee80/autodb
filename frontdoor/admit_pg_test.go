@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -118,6 +119,123 @@ func TestAdmitFD_ALoginOutwaitsTheOldSixSeconds(t *testing.T) {
 	if _, err := got.c.Exec(ctx, "SELECT 1").ReadAll(); err != nil {
 		t.Fatalf("the served login could not run its first statement: %v", err)
 	}
+}
+
+// A LOGIN THAT WAITED IS QUIET FROM WHEN IT OPENS, NOT FROM WHEN IT WAS BUILT.
+//
+// Both premises the claim needs are forced and measured, not assumed:
+//   - the second login's session is built well over ReclaimGrace before it
+//     opens: it queues behind a holder running a 7 s statement (a running
+//     statement is never reclaimed), and the cell fails if it was served
+//     sooner than ReclaimGrace plus a margin;
+//   - a third login queues behind it, and the second is seen offering to
+//     receive -- so judged by a demand -- before its client says anything.
+//
+// A session whose silence were counted from its construction would then be
+// past its grace and ended for the third; its first statement must succeed.
+func TestAdmitFD_AWaitedLoginIsQuietFromWhenItOpens(t *testing.T) {
+	queued := make(chan struct{}, 8)
+	offered := make(chan exec.SessionID, 256)
+	l := pgLoopFull(t,
+		exec.WithWaiterQueued(func() { queued <- struct{}{} }),
+		exec.WithReceiveOffered(func(id exec.SessionID) {
+			select {
+			case offered <- id:
+			default: // the cell reads only the second's
+			}
+		}))
+	shareOfOne(t, l)
+	busyHolder(t, l.addr, l.secret, l.database, 7*time.Second)
+	// The holder is seen EXECUTING on the target before the second login is
+	// sent, so the second queues behind a session no demand can take.
+	waitFor(t, "the holder's statement to be running on the target", func() bool {
+		return runningOnTarget(t, "%pg_sleep(7)%")
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	start := time.Now()
+	second, err := pgConnect(ctx, l.addr, l.secret, l.database)
+	waited := time.Since(start)
+	if err != nil {
+		t.Fatalf("the second login was refused after %v: %v", waited, err)
+	}
+	t.Cleanup(func() { _ = second.Close(context.Background()) })
+	if margin := timeouts.ReclaimGrace + 2*time.Second; waited < margin {
+		t.Fatalf("the second login was served after %v, under %v: its session was not built long "+
+			"enough before it opened for this cell to tell the two stamps apart", waited, margin)
+	}
+	select {
+	case <-queued:
+	default:
+		t.Fatal("the second login was served without queuing; the share was not full")
+	}
+	var id exec.SessionID
+	waitFor(t, "the second login's session_open", func() bool {
+		var ids []string
+		for _, e := range l.events() {
+			if e.Kind == "fd.session_open" {
+				ids = append(ids, e.Detail)
+			}
+		}
+		if len(ids) < 2 {
+			return false
+		}
+		id = exec.SessionID(ids[1])
+		return true
+	})
+
+	third := make(chan error, 1)
+	go func() {
+		c, err := pgConnect(ctx, l.addr, l.secret, l.database)
+		if err == nil {
+			_ = c.Close(context.Background())
+		}
+		third <- err
+	}()
+	t.Cleanup(func() { cancel(); <-third })
+	select {
+	case <-queued:
+	case err := <-third:
+		t.Fatalf("the third login never queued behind the second (connect: %v)", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the third login never queued behind the second")
+	}
+	judged := time.After(10 * time.Second)
+	for seen := false; !seen; {
+		select {
+		case got := <-offered:
+			seen = got == id
+		case <-judged:
+			t.Fatal("the second login never offered to receive, so no demand could judge it")
+		}
+	}
+
+	if _, err := second.Exec(ctx, "SELECT 1").ReadAll(); err != nil {
+		t.Fatalf("the second login's first statement failed: %v; a login that waited %v was "+
+			"ended for the next one before it had said anything", err, waited)
+	}
+}
+
+// runningOnTarget reports whether a statement whose text matches the LIKE
+// pattern is active on the live target, read from pg_stat_activity over a
+// direct connection. The probe's own text never contains the pattern's
+// literal, which travels as a parameter.
+func runningOnTarget(t *testing.T, pattern string) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := pgconn.Connect(ctx, os.Getenv("TEST_PGURL"))
+	if err != nil {
+		t.Fatalf("connecting to the target to read pg_stat_activity: %v", err)
+	}
+	defer c.Close(context.Background())
+	res := c.ExecParams(ctx, "SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND query LIKE $1",
+		[][]byte{[]byte(pattern)}, nil, nil, nil).Read()
+	if res.Err != nil {
+		t.Fatalf("reading pg_stat_activity: %v", res.Err)
+	}
+	return len(res.Rows) == 1 && string(res.Rows[0][0]) != "0"
 }
 
 // A WAITING LOGIN HOLDS NO AUTH WORKER. With one worker, a login queued behind
