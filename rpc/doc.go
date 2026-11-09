@@ -12,7 +12,7 @@
 //
 //  1. Handshake & Version Gating (server.go):
 //     Connections are quarantined upon arrival. Only sys.hello is callable.
-//     The server enforces an exact protocol version match (Protocol = 14).
+//     The server enforces an exact protocol version match (Protocol = 15).
 //     Mismatched versions immediately poison the connection to signal client
 //     re-provisioning.
 //
