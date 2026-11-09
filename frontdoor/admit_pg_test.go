@@ -53,8 +53,15 @@ func busyHolder(t *testing.T, addr, secret, database string, d time.Duration) <-
 	if err != nil {
 		t.Fatalf("the holder's login: %v", err)
 	}
-	t.Cleanup(func() { _ = c.Close(context.Background()) })
 	done := make(chan struct{})
+	t.Cleanup(func() {
+		// A pgconn is not safe for concurrent use, so the holder's own goroutine
+		// is ended first, by closing the socket under it (a net.Conn may be
+		// closed from any goroutine), and joined before the client is closed.
+		_ = c.Conn().Close()
+		<-done
+		_ = c.Close(context.Background())
+	})
 	go func() {
 		defer close(done)
 		_, _ = c.Exec(context.Background(), fmt.Sprintf("SELECT pg_sleep(%g)", d.Seconds())).ReadAll()
@@ -65,22 +72,50 @@ func busyHolder(t *testing.T, addr, secret, database string, d time.Duration) <-
 // A LOGIN OUTWAITS THE OLD SIX SECONDS. The share is held by a statement that
 // runs 8 s; a second login waits in line past the credential phase's whole
 // budget, is served when the holder finishes, and runs its first statement.
+//
+// THE PREMISE IS OBSERVED, NOT ASSUMED: the second login is seen to join the
+// line, and it is served only after it has waited longer than the old bound. A
+// holder that was not busy would be reclaimed after its 3 s grace and serve the
+// login early, and a login that never queued would prove nothing about waiting.
 func TestAdmitFD_ALoginOutwaitsTheOldSixSeconds(t *testing.T) {
-	l := pgLoopFull(t)
+	queued := make(chan struct{}, 4)
+	l := pgLoopFull(t, exec.WithWaiterQueued(func() { queued <- struct{}{} }))
 	shareOfOne(t, l)
 	held := busyHolder(t, l.addr, l.secret, l.database, 8*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	start := time.Now()
-	c, err := pgConnect(ctx, l.addr, l.secret, l.database)
-	if err != nil {
-		t.Fatalf("a login queued behind an 8 s statement was refused after %v: %v; the wait "+
-			"must outlast the credential phase", time.Since(start), err)
+	type login struct {
+		c   *pgconn.PgConn
+		err error
 	}
-	defer c.Close(context.Background())
+	done := make(chan login, 1)
+	start := time.Now()
+	go func() {
+		c, err := pgConnect(ctx, l.addr, l.secret, l.database)
+		done <- login{c, err}
+	}()
+	select {
+	case <-queued:
+	case got := <-done:
+		t.Fatalf("the second login finished (%v) without joining the line: the share was not "+
+			"full, so this cell would prove nothing about waiting", got.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second login never reached the line")
+	}
+	got := <-done
+	waited := time.Since(start)
+	if got.err != nil {
+		t.Fatalf("a login queued behind an 8 s statement was refused after %v: %v; the wait "+
+			"must outlast the credential phase", waited, got.err)
+	}
+	defer got.c.Close(context.Background())
+	if oldBound := timeouts.CredentialExchange - timeouts.PinAllowance - timeouts.HandshakeReserve; waited <= oldBound {
+		t.Fatalf("the login was served after %v, within the old %v bound: the holder was not "+
+			"busy for the wait, so the cell did not outwait anything", waited, oldBound)
+	}
 	<-held
-	if _, err := c.Exec(ctx, "SELECT 1").ReadAll(); err != nil {
+	if _, err := got.c.Exec(ctx, "SELECT 1").ReadAll(); err != nil {
 		t.Fatalf("the served login could not run its first statement: %v", err)
 	}
 }
@@ -112,6 +147,58 @@ func TestAdmitFD_AWaitingLoginHoldsNoAuthWorker(t *testing.T) {
 				"login is still holding the worker its credential check used", i)
 		}
 	}
+}
+
+// A CLIENT THAT HANGS UP WHILE QUEUED LEAVES THE LINE AT ONCE, BEFORE ANY
+// CAPACITY COMES BACK. The share is held by a running statement, so nothing can
+// serve or reclaim for the login. Its client closes the socket while it waits:
+// the watch must carry that close to the queue, and the line must be empty
+// while the holder still holds the share.
+func TestAdmitFD_AClientThatLeavesWhileQueuedLeavesTheLine(t *testing.T) {
+	queued := make(chan struct{}, 4)
+	left := make(chan int, 4)
+	l := pgLoopFull(t,
+		exec.WithWaiterQueued(func() { queued <- struct{}{} }),
+		exec.WithWaiterLeft(func(depth int) { left <- depth }))
+	shareOfOne(t, l)
+	held := busyHolder(t, l.addr, l.secret, l.database, 20*time.Second)
+
+	conn, fe := startupTo(t, l.addr, map[string]string{"user": "root", "database": l.database})
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("the password prompt: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: l.secret})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("writing the password: %v", err)
+	}
+	select {
+	case <-queued:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the login never reached the line")
+	}
+
+	_ = conn.Close()
+	select {
+	case depth := <-left:
+		if depth != 0 {
+			t.Fatalf("the line holds %d after the departed login left, want 0", depth)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a login whose client hung up stayed in line: the socket's close never reached the queue")
+	}
+	select {
+	case <-held:
+		t.Fatal("the holder finished first, so capacity came back before the line emptied; " +
+			"the cell would pass whether or not the close reached the queue")
+	default:
+	}
+	// Nothing was published for the departed client: the holder's is the only
+	// session ever opened, and the departure was neither refused nor charged.
+	if n := eventsOf(l.events(), "fd.session_open", ""); n != 1 {
+		t.Errorf("%d sessions opened, want only the holder's", n)
+	}
+	endedSilently(t, l.lis, l.events)
 }
 
 // loginRaw starts a login on addr and answers the password prompt with frames
@@ -161,6 +248,31 @@ func loginRaw(t *testing.T, addr, secret, database string, extra []byte, beforeP
 	}
 }
 
+// boundaryListener is a listener on l's engine that reports how many bytes the
+// password read handed to pgproto3.
+func boundaryListener(t *testing.T, l pgLoopHandles) (string, func(*testing.T) int) {
+	t.Helper()
+	got := make(chan int, 1)
+	_, _, addr := listenerWith(t, Options{
+		Authn: l.eng, Queries: l.eng, AuthFailuresPerIP: unthrottled,
+		testPasswordDelivered: func(n int) { got <- n },
+	})
+	return addr, func(t *testing.T) int {
+		t.Helper()
+		select {
+		case n := <-got:
+			return n
+		case <-time.After(5 * time.Second):
+			t.Fatal("the password read never reported what it delivered")
+			return 0
+		}
+	}
+}
+
+// passwordFrameLen is a PasswordMessage's length on the wire: type, length word,
+// the secret and its terminator.
+func passwordFrameLen(secret string) int { return 1 + 4 + len(secret) + 1 }
+
 // INPUT SENT BEFORE THE LOGIN MAY SPEAK IS REFUSED, NEVER SERVED.
 //
 // Coalesced with the password in one TCP write -- a whole Query, or a single
@@ -182,13 +294,37 @@ func TestAdmitFD_InputSentBeforeTheLoginMaySpeakIsRefused(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l := pgLoopFull(t)
-			got := loginRaw(t, l.addr, l.secret, l.database, c.extra, nil, nil)
+			addr, delivered := boundaryListener(t, l)
+			got := loginRaw(t, addr, l.secret, l.database, c.extra, nil, nil)
 			if got.authOK || got.ready {
 				t.Fatalf("the login was admitted (AuthenticationOk %v, ReadyForQuery %v) though it "+
 					"sent input with its password", got.authOK, got.ready)
 			}
+			// THE BOUNDARY ITSELF: the refusal above holds with or without it,
+			// because the frame reader scans what it hands on. What only the
+			// boundary guarantees is that pgproto3 saw the password and nothing
+			// after it.
+			if n, want := delivered(t), passwordFrameLen(l.secret); n != want {
+				t.Fatalf("the password read handed pgproto3 %d bytes, want exactly the password "+
+					"frame's %d: the input sent with it reached pgproto3's own buffer", n, want)
+			}
 		})
 	}
+	// THE CONTROL BESIDE THEM: the same login with nothing sent after its
+	// password is admitted. Without it, a boundary that broke every login would
+	// pass the refusals above.
+	t.Run("nothing sent with the password", func(t *testing.T) {
+		l := pgLoopFull(t)
+		addr, delivered := boundaryListener(t, l)
+		got := loginRaw(t, addr, l.secret, l.database, nil, nil, nil)
+		if !got.authOK || !got.ready {
+			t.Fatalf("a plain login was not admitted (AuthenticationOk %v, ReadyForQuery %v, error %q)",
+				got.authOK, got.ready, got.errCode)
+		}
+		if n, want := delivered(t), passwordFrameLen(l.secret); n != want {
+			t.Fatalf("a plain login's password read handed pgproto3 %d bytes, want %d", n, want)
+		}
+	})
 	t.Run("a byte sent while the login waits", func(t *testing.T) {
 		queued := make(chan struct{}, 4)
 		l := pgLoopFull(t, exec.WithWaiterQueued(func() { queued <- struct{}{} }))
@@ -205,6 +341,7 @@ func TestAdmitFD_InputSentBeforeTheLoginMaySpeakIsRefused(t *testing.T) {
 		if got.authOK || got.ready {
 			t.Fatal("a login that spoke while it waited was admitted")
 		}
+		endedAsInput(t, l.lis, l.events)
 	})
 }
 
@@ -225,7 +362,7 @@ func TestAdmitFD_TheWatchDecidesAtTheHandoff(t *testing.T) {
 			l := pgLoopFull(t)
 			var client atomic.Pointer[tls.Conn]
 			read := make(chan struct{}, 1)
-			_, _, addr := listenerWith(t, Options{
+			lis, events, addr := listenerWith(t, Options{
 				Authn: l.eng, Queries: l.eng, AuthFailuresPerIP: unthrottled,
 				testAfterAdmit: func() {
 					c.act(client.Load())
@@ -249,7 +386,62 @@ func TestAdmitFD_TheWatchDecidesAtTheHandoff(t *testing.T) {
 			waitFor(t, "the admitted session's close", func() bool {
 				return closedFor(t, l, c.reason) == 1
 			})
+			if c.reason == "protocol-violation" {
+				endedAsInput(t, lis, events)
+			} else {
+				endedSilently(t, lis, events)
+			}
 		})
+	}
+}
+
+// chargesOn counts the failures the listener's throttle has charged, across
+// every source.
+func chargesOn(l *Listener) int {
+	l.admit.mu.Lock()
+	defer l.admit.mu.Unlock()
+	n := 0
+	for _, f := range l.admit.failures {
+		n += len(f)
+	}
+	return n
+}
+
+// eventsOf counts the listener events of kind, and of reason when it is given.
+func eventsOf(evs []Event, kind, reason string) int {
+	n := 0
+	for _, e := range evs {
+		if e.Kind == kind && (reason == "" || e.Reason == reason) {
+			n++
+		}
+	}
+	return n
+}
+
+// endedAsInput asserts a login whose input ended its admission was refused as a
+// protocol violation exactly once, and charged exactly once.
+func endedAsInput(t *testing.T, lis *Listener, events func() []Event) {
+	t.Helper()
+	waitFor(t, "the protocol refusal", func() bool {
+		return eventsOf(events(), "fd.auth_denied", string(reasonPreAuthProtocolViolation)) >= 1
+	})
+	if n := eventsOf(events(), "fd.auth_denied", ""); n != 1 {
+		t.Errorf("%d login refusals recorded, want exactly the one protocol violation", n)
+	}
+	if n := chargesOn(lis); n != 1 {
+		t.Errorf("the source was charged %d times, want exactly once for one protocol violation", n)
+	}
+}
+
+// endedSilently asserts a login whose client left was neither refused nor
+// charged: nobody was there to tell, and leaving is not grinding.
+func endedSilently(t *testing.T, lis *Listener, events func() []Event) {
+	t.Helper()
+	if n := eventsOf(events(), "fd.auth_denied", ""); n != 0 {
+		t.Errorf("a departed client's login recorded %d refusals, want none", n)
+	}
+	if n := chargesOn(lis); n != 0 {
+		t.Errorf("a departed client was charged %d times, want none", n)
 	}
 }
 

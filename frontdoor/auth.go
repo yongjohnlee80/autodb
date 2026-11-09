@@ -211,7 +211,9 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	// check -- and after this phase the login waits, with nothing reading. The
 	// frame reader's boundary admits exactly this one frame; any byte past it
 	// stays in the reader or the socket, where the admission phase sees it.
+	before := 0
 	if fr != nil {
+		before = fr.deliveredBytes()
 		fr.setBounded(true)
 		if fr.waitHeader() {
 			if h, ok := fr.peekHeader(); ok {
@@ -226,6 +228,9 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	if fr != nil {
 		fr.consumeHeader()
 		fr.setBounded(false) // runSession turns it on again for the session loop
+		if h := l.testPasswordDelivered; h != nil {
+			h(fr.deliveredBytes() - before)
+		}
 	}
 	if err != nil {
 		// A read failure is not a denial: nothing was presented. It closes
