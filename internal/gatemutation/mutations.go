@@ -237,7 +237,7 @@ func All() []Mutation {
 		{
 			Name: "only-an-untroubled-holder-is-chosen", Package: "./core/exec/",
 			File:        "core/exec/demand_reclaim.go",
-			Anchor:      "\treturn s.get() == sessOpen && s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil\n",
+			Anchor:      "\treturn s.get() == sessOpen && s.wire && !s.busy && s.tx == nil && !s.segmentOpen &&\n\t\ts.recvToken != 0 && s.wake != nil\n",
 			Replacement: "\treturn s.get() == sessOpen && s.wire\n",
 			Test:        "TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen",
 			Fails:       "a holder was chosen while",
@@ -1515,6 +1515,14 @@ func All() []Mutation {
 			Test:        "TestAdmitFD_TheWatchDecidesAtTheHandoff",
 			Fails:       "want exactly one with the protocol reason",
 			Guarantee:   "that input ending a login's wait is recorded as the protocol violation it is",
+		},
+		{
+			Name: "a-session-mid-segment-is-in-use", Package: "./frontdoor/", File: "core/exec/demand_reclaim.go",
+			Anchor:      "s.tx == nil && !s.segmentOpen &&\n",
+			Replacement: "s.tx == nil &&\n",
+			Test:        "TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease",
+			Fails:       "a session part-way through a segment was ended for a waiting login",
+			Guarantee:   "that a session with an extended segment open is never ended for a waiting login",
 		},
 		{
 			Name: "each-login-phase-declares-only-what-it-reaches", Package: "./frontdoor/", File: "frontdoor/outcomes.go",

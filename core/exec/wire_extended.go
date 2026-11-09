@@ -125,6 +125,11 @@ func (e *Engine) wireExtEntry(ctx context.Context, id SessionID, userID int64, w
 			s.ext.roWrap = rotx
 		}
 	}
+	if willSend {
+		s.mu.Lock()
+		s.segmentOpen = true
+		s.mu.Unlock()
+	}
 	return s, connRow, pc, release, closeAfterRelease, nil
 }
 
@@ -684,6 +689,9 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// segment's outstanding count is void either way: on success the server
 	// answered or discarded everything, and on failure the wire is unusable.
 	s.ext.segment = nil
+	s.mu.Lock()
+	s.segmentOpen = false
+	s.mu.Unlock()
 	// EVERY RESERVATION WHOSE COMPLETION WILL NEVER ARRIVE IS RELEASED HERE.
 	// After a target error the segment discards to Sync, so the answers to
 	// everything queued behind it never come — which makes an unfinalized

@@ -139,6 +139,10 @@ func (r *sessionRegistry) reserveDemandVictim(key leaseKey, now time.Time) (dema
 		//     which the ruling forbids outright;
 		//   - a transaction open -> ending it rolls back work the holder never
 		//     abandoned, and they find out from their next statement;
+		//   - an extended segment open (frames sent, no Sync yet) -> the same
+		//     harm without a BEGIN: the target is inside the segment's implicit
+		//     transaction, a suspended portal may be part-way through its rows,
+		//     and the client is in the middle of reading them;
 		//   - not offering a receive epoch -> the owner is not blocked reading
 		//     from its client, so a notice posted now would be overwritten by
 		//     the loop re-arming its own deadline and would go dormant. The
@@ -270,7 +274,8 @@ func (e *Engine) demandReclaim(key leaseKey) bool {
 // time and losing the close claim would then discharge its first promise, and
 // more sessions would be ended than logins are waiting.
 func (s *session) askableLocked() bool {
-	return s.get() == sessOpen && s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil
+	return s.get() == sessOpen && s.wire && !s.busy && s.tx == nil && !s.segmentOpen &&
+		s.recvToken != 0 && s.wake != nil
 }
 
 // nextReclaimable reports the earliest instant a holder on this target that is
