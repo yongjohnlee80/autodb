@@ -294,7 +294,13 @@ type session struct {
 	// wire-level prepared statements and portals. Nil until the first extended
 	// frame, and dropped with the session, so the objects cannot outlive the
 	// connection whose backend holds them.
-	ext              *extObjects
+	ext *extObjects
+	// segmentOpen is true from the first extended frame put on the wire until
+	// Sync ends the segment, guarded by mu. Between them the target is inside
+	// the segment's implicit transaction (and a reader inside autodb's own
+	// READ ONLY wrap), and a suspended portal may be part-way through its rows,
+	// so a demand must not end the session there: see askableLocked.
+	segmentOpen      bool
 	txPhase          txPhase
 	txID             string
 	txOpened         time.Time

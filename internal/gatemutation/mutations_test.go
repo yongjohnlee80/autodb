@@ -288,6 +288,7 @@ func expectedControls() map[string][3]string {
 		"a-departed-client-leaves-the-line":                       {"frontdoor/admit.go", "./frontdoor/", "TestAdmitFD_AClientThatLeavesWhileQueuedLeavesTheLine"},
 		"a-departure-is-not-a-protocol-refusal":                   {"frontdoor/admit.go", "./frontdoor/", "TestAdmitFD_AClientThatLeavesWhileQueuedLeavesTheLine"},
 		"the-audited-refusal-names-its-reason":                    {"frontdoor/listener.go", "./frontdoor/", "TestAdmitFD_TheWatchDecidesAtTheHandoff"},
+		"a-session-mid-segment-is-in-use":                         {"core/exec/demand_reclaim.go", "./frontdoor/", "TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease"},
 		"each-login-phase-declares-only-what-it-reaches":          {"frontdoor/outcomes.go", "./frontdoor/", "TestOutcomes_TheRegistryMatchesItsManifestExactly"},
 		"the-engine-sets-match-their-raise-sites":                 {"core/exec/wire_session.go", "./core/exec/", "TestWireDenials_EachHalfDeclaresExactlyWhatItRaises"},
 		"admission-is-reached-only-through-authorization":         {"core/exec/wire_session.go", "./core/exec/", "TestDisclosureWitness_IsUnreachableBeforeBothGates"},

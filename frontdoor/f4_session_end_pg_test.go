@@ -1,13 +1,16 @@
 package frontdoor
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // Matrix row 4a:Session-end — what a mid-segment teardown leaves behind.
@@ -27,12 +30,11 @@ import (
 // either can or cannot do, and the front door answers.
 //
 // THE CONTROL IS THE POINT OF THE CELL (feedback: check what a cell ACCEPTS).
-// Without step 2, this cell passes when the cap is not applied at all: B would
+// Without step 3, this cell passes when the cap is not applied at all: B would
 // connect after the teardown because B could always have connected, and the cell
-// would report a released lease it never observed. Step 2 is what makes B's
-// later success mean something, and it is asserted on the AUDIT REASON, not
-// merely on "B was refused" — the pre-auth vocabulary is uniform 28000, so a
-// refusal for any other cause is indistinguishable on the wire.
+// would report a released lease it never observed. Step 3 is what makes B's
+// later success mean something: B is seen to queue, and to stay unserved while
+// A holds the lease.
 //
 // MUTATION-PROVEN on a green baseline, three mutants, each caught at the
 // assertion it is aimed at rather than by a control:
@@ -52,9 +54,19 @@ import (
 // Sync. The segment is open, a portal is suspended, and the reservation is held
 // at the instant the socket dies — which is the shape the row names, and the one
 // where a leak would survive.
+//
+// A LOGIN NOW WAITS RATHER THAN BEING REFUSED, so the control is a queued login
+// that is NOT served: B joins the line and stays unserved for longer than the
+// reclaim grace while A sits idle mid-segment. A session part-way through a
+// segment is in use -- its implicit transaction is open and its portal is
+// suspended -- so no demand may end it; before the segment flag existed, B
+// reclaimed A at the grace and the cap stopped binding. Then A dies, and the
+// SAME queued B is served: the lease came back, observed rather than argued.
 func TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease(t *testing.T) {
 	// A cap of one, which is what turns the whole question into an observation.
-	l := pgLoopFull(t, exec.WithDefaultPoolMax(3)) // a front-door share of 1
+	queued := make(chan struct{}, 4)
+	l := pgLoopFull(t, exec.WithDefaultPoolMax(3), // a front-door share of 1
+		exec.WithWaiterQueued(func() { queued <- struct{}{} }))
 	conn, fe := pgClientWithConn(t, l.addr, l.secret, l.database)
 
 	// 1. A GOES MID-SEGMENT. Execute, Flush, no Sync.
@@ -95,13 +107,44 @@ func TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease(t *testing.T) {
 		t.Fatalf("control: the registry does not know the live session %q: %v", sid, err)
 	}
 
-	// 3. CONTROL: the cap binds, and A is the one holding the lease.
-	if _, errResp := pgTryClient(t, l.addr, l.secret, l.database); errResp == nil {
-		t.Fatal("control: a second client connected while the first held the only lease, so " +
-			"the cap is not binding and this cell would report a released lease whatever " +
-			"the teardown did")
+	// 3. CONTROL: the cap binds, and A is the one holding the lease. B queues,
+	// and stays unserved past A's whole reclaim grace plus a margin. This is an
+	// ABSENCE over a window, not an ordering: the only thing that could serve B
+	// while A lives is a demand ending A, and a demand may end A no sooner than
+	// ReclaimGrace after A last spoke -- which was before B queued.
+	type dialed struct {
+		c   *pgconn.PgConn
+		err error
 	}
-	waitForRefusal(t, l.events, exec.DenyLeaseCap, "control: A holds the only lease")
+	bctx, bcancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer bcancel()
+	b := make(chan dialed, 1)
+	go func() {
+		c, err := pgConnect(bctx, l.addr, l.secret, l.database)
+		b <- dialed{c, err}
+	}()
+	t.Cleanup(func() {
+		bcancel()
+		if d := <-b; d.c != nil {
+			_ = d.c.Close(context.Background())
+		}
+	})
+	select {
+	case <-queued:
+	case d := <-b:
+		b <- d
+		t.Fatalf("control: B finished (%v) without queuing, so the cap is not binding and this "+
+			"cell would report a released lease whatever the teardown did", d.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("control: B never reached the line")
+	}
+	select {
+	case d := <-b:
+		b <- d
+		t.Fatalf("control: B was answered (%v) while A, mid-segment, held the only lease: a "+
+			"session part-way through a segment was ended for a waiting login", d.err)
+	case <-time.After(timeouts.ReclaimGrace + 2*time.Second):
+	}
 
 	// 4. THE TEARDOWN. The socket dies with the segment open.
 	_ = conn.Close()
@@ -117,13 +160,19 @@ func TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease(t *testing.T) {
 		return errors.Is(err, exec.ErrSessionNotFound)
 	})
 
-	// 7. AND THE LEASE IT HELD CAME BACK — the half the row was open for. B is the same
-	// attempt that was refused in step 2; the only thing that changed is that A
-	// went away mid-segment.
-	waitFor(t, "the torn-down session's lease to be returned to the registry", func() bool {
-		fe2, errResp := pgTryClient(t, l.addr, l.secret, l.database)
-		return errResp == nil && fe2 != nil
-	})
+	// 7. AND THE LEASE IT HELD CAME BACK — the half the row was open for. B is the
+	// login that waited in step 3; the only thing that changed is that A went
+	// away mid-segment.
+	select {
+	case d := <-b:
+		b <- d
+		if d.err != nil {
+			t.Fatalf("the queued login was refused after A's teardown: %v; the lease A held did "+
+				"not come back", d.err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the queued login was not served after A's teardown: the lease A held did not come back")
+	}
 }
 
 // untilSuspended stops at the frame that says the portal is live and the segment
@@ -134,35 +183,6 @@ func untilSuspended(m pgproto3.BackendMessage) bool {
 		return true
 	}
 	return false
-}
-
-// pgTryClient is pgClientWithConn without the fatal: a refusal is an ANSWER
-// here, not a broken fixture.
-func pgTryClient(t *testing.T, addr, secret, database string) (*pgproto3.Frontend, *pgproto3.ErrorResponse) {
-	t.Helper()
-	conn, fe := startupTo(t, addr, map[string]string{
-		"user": "root", "database": database, "application_name": "psql",
-	})
-	t.Cleanup(func() { _ = conn.Close() })
-	if _, err := fe.Receive(); err != nil {
-		t.Fatalf("auth request: %v", err)
-	}
-	fe.Send(&pgproto3.PasswordMessage{Password: secret})
-	if err := fe.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	for {
-		msg, err := fe.Receive()
-		if err != nil {
-			t.Fatalf("the answer to the password: %v", err)
-		}
-		switch m := msg.(type) {
-		case *pgproto3.ErrorResponse:
-			return nil, m
-		case *pgproto3.ReadyForQuery:
-			return fe, nil
-		}
-	}
 }
 
 // A pre-auth refusal is audited as fd.auth_denied, or as fd.auth_failed when
@@ -188,7 +208,7 @@ func refusedFor(evs []Event, reason string) bool {
 //
 // The listener writes the denial to the SOCKET and emits the event afterwards
 // -- the client is told first and the operator second, which is the right
-// priority and is unchanged -- so pgTryClient returns in the interval between
+// priority and is unchanged -- so a client sees its refusal in the interval between
 // them. A cell reading l.events() there saw an EMPTY list and reported that the
 // refusal had some other cause.
 //
