@@ -841,6 +841,11 @@ func TestDemandReclaim_AHolderInsideItsGraceIsNotEnded(t *testing.T) {
 
 // A HOLDER ALREADY CLOSING IS NOT ASKED AGAIN.
 //
+// TWO GUARDS HOLD THIS, EACH ENOUGH ON ITS OWN: a closing holder is not
+// askable, and a session is promised once. So no single-edit control can turn
+// this cell red; each guard has its own (TestDemandReclaim_AClosingHolderArmsNoAsk,
+// TestDemandReclaim_ASessionIsPromisedOnce), and this cell is the regression.
+//
 // A reserved session keeps its offer and knock until its owner finalises it.
 // With two logins owed, the second ask must move on to another holder rather
 // than come back to the first; coming back promised it twice, failed to

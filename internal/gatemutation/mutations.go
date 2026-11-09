@@ -1378,14 +1378,6 @@ func All() []Mutation {
 			Guarantee:   "that a reclaimed client which stopped reading cannot hold the lease past the waiting login's deadline",
 		},
 		{
-			Name: "a-closing-holder-is-not-asked-again", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
-			Anchor:      "\treturn s.get() == sessOpen && s.wire && ",
-			Replacement: "\treturn s.wire && ",
-			Test:        "TestDemandReclaim_AHolderAlreadyClosingIsNotAskedAgain",
-			Fails:       "came back to the holder already closing",
-			Guarantee:   "that no more sessions are ended than logins are waiting",
-		},
-		{
 			Name: "a-closing-holder-arms-no-ask", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
 			Anchor:      "\treturn s.get() == sessOpen && s.wire && ",
 			Replacement: "\treturn s.wire && ",
