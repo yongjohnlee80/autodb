@@ -1525,6 +1525,24 @@ func All() []Mutation {
 			Guarantee:   "that a session with an extended segment open is never ended for a waiting login",
 		},
 		{
+			Name: "a-stalled-setting-is-unavailable", Package: "./core/exec/", File: "core/exec/wire_session.go",
+			// The behaviour before: a deadline while the settings applied read as a refused setting.
+			Anchor:      "\tcase errors.Is(pinCtx.Err(), context.DeadlineExceeded):\n\t\treturn fmt.Errorf(\"%w: %w\", ErrBackendOpenTimeout, err)\n",
+			Replacement: "\tcase errors.Is(pinCtx.Err(), context.DeadlineExceeded):\n\t\treturn deny(DenyStartupGUC)\n",
+			Test:        "TestAdmitPG_ATargetThatStallsWhileApplyingStartupSettingsIsUnavailable",
+			Fails:       "want ErrBackendOpenTimeout (57P03) and no denial",
+			Guarantee:   "that a target too slow to take the startup settings is answered unavailable, not as a refused setting",
+		},
+		{
+			Name: "a-closed-login-is-told-its-closers-reason", Package: "./core/exec/", File: "core/exec/wire_session.go",
+			// The behaviour before: every closer but the exposure sweep read as the engine closing.
+			Anchor:      "\tcase reasonConnectionDeleted:\n\t\tcause = ErrTargetGone\n\tcase reasonConnectionPoolChanged, reasonProfileDowngraded:\n\t\tcause = ErrConnectionDraining\n",
+			Replacement: "",
+			Test:        "TestAdmitPG_AConnectionDeletedOrMovedDuringFinalizationIsAnsweredByItsReason",
+			Fails:       "during finalization got",
+			Guarantee:   "that a login whose connection is deleted or moved while it is finalized is told so, not that the instance is closing",
+		},
+		{
 			Name: "each-login-phase-declares-only-what-it-reaches", Package: "./frontdoor/", File: "frontdoor/outcomes.go",
 			// The whole union back under the credential phase.
 			Anchor:      "\treturn append(out, engineDenials(exec.AuthorizeDenials())...)\n",

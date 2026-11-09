@@ -193,3 +193,70 @@ func TestAdmitPG_APanicInFinalizationReleasesEverything(t *testing.T) {
 	}
 	f.eng.CloseWireSession(context.Background(), res.SessionID, res.UserID, testIP, "test")
 }
+
+// A TARGET THAT STALLS WHILE THE STARTUP SETTINGS ARE APPLIED IS UNAVAILABLE, not
+// a refused setting. The settings are applied under the pin's allowance; here it
+// runs out at the SETs while the finalization budget is still live, so the
+// answer is the pin's own deadline (ErrBackendOpenTimeout, 57P03), never the
+// startup-GUC denial that tells the client its setting was wrong.
+func TestAdmitPG_ATargetThatStallsWhileApplyingStartupSettingsIsUnavailable(t *testing.T) {
+	f := newFixture(t)
+	connID, secret, dbName := exposedPGConnection(t, f)
+	f.eng.hookAdmitStep = func(ctx context.Context, step string) {
+		if step == admitStepGUCs {
+			<-ctx.Done() // the pin's allowance; finalization's own budget is still live
+		}
+	}
+	_, err := openPG(f, secret, dbName)
+	if !errors.Is(err, ErrBackendOpenTimeout) || DenialReason(err) != "" {
+		t.Fatalf("a target that stalled while the startup settings were applied got %v "+
+			"(denial %q), want ErrBackendOpenTimeout (57P03) and no denial", err, DenialReason(err))
+	}
+	if errors.Is(err, ErrAdmitFinalizeTimeout) {
+		t.Fatalf("the finalization budget, not the pin's allowance, ended it: %v", err)
+	}
+	nothingHeld(t, f, connID)
+}
+
+// A LOGIN WHOSE CONNECTION IS DELETED OR MOVED WHILE IT IS FINALIZED is told what
+// happened, as a waiter swept by the same change is: the connection is gone, or
+// changing. Not that the instance is shutting down, which it is not.
+func TestAdmitPG_AConnectionDeletedOrMovedDuringFinalizationIsAnsweredByItsReason(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		act  func(t *testing.T, f *fixture, connID int64)
+		want string
+	}{
+		{"deleted", func(t *testing.T, f *fixture, connID int64) {
+			if _, err := f.eng.DeleteConnection(context.Background(), f.rootTok, connID, testIP); err != nil {
+				t.Errorf("DeleteConnection: %v", err)
+			}
+		}, DenyTargetGone},
+		{"moved to another pool", func(t *testing.T, f *fixture, connID int64) {
+			pool, err := f.eng.CreatePool(context.Background(), f.rootTok, fmt.Sprintf("p-%d", time.Now().UnixNano()), 10, testIP)
+			if err != nil {
+				t.Errorf("CreatePool: %v", err)
+				return
+			}
+			if err := f.eng.SetConnectionPool(context.Background(), f.rootTok, connID, pool, testIP); err != nil {
+				t.Errorf("SetConnectionPool: %v", err)
+			}
+		}, DenyConnectionChanging},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			connID, secret, dbName := exposedPGConnection(t, f)
+			f.eng.hookAdmitStep = func(_ context.Context, step string) {
+				if step == admitStepGranted {
+					c.act(t, f, connID)
+				}
+			}
+			_, err := openPG(f, secret, dbName)
+			if got := DenialReason(err); got != c.want {
+				t.Fatalf("a login whose connection was %s during finalization got %v (denial %q), "+
+					"want %s", c.name, err, got, c.want)
+			}
+			nothingHeld(t, f, connID)
+		})
+	}
+}

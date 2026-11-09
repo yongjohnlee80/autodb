@@ -733,6 +733,7 @@ const (
 	admitStepGate      = "finalize.gate"     // the exposure gate is held
 	admitStepStanding  = "finalize.standing" // about to re-check the login's standing
 	admitStepPinned    = "finalize.pinned"   // the backend is pinned
+	admitStepGUCs      = "finalize.gucs"     // about to apply the startup settings, under the pin's allowance
 	admitStepNote      = "finalize.note"     // about to note the PAT's use
 	admitStepFinalized = "admit.finalized"   // finalization returned; not yet arbitrated
 )
@@ -911,7 +912,7 @@ func (e *Engine) finalizeWire(ctx context.Context, s *session, a *WireAuthorizat
 		// like any other used backend.
 		if len(a.req.StartupGUCs) > 0 {
 			if gerr := e.applyStartupGUCs(pinCtx, s, pc, a.req.StartupGUCs, pat.UserID, ip, connRow.ID); gerr != nil {
-				return WireSessionResult{}, deny(DenyStartupGUC)
+				return WireSessionResult{}, startupGUCAnswer(pinCtx, gerr)
 			}
 			if r, ok := e.reporterFor(pc).(golibpg.ParameterStatusReporter); ok {
 				statuses = r.ReportedParameterStatuses() // live: reflects the SETs
@@ -966,19 +967,29 @@ func (e *Engine) finalizeOutcome(admitCtx, fctx context.Context, s *session, err
 }
 
 // closedBeneath is the answer for a login whose session an engine closer claimed
-// before it was handed over: a disabled exposure is the connection refusing the
-// front door; anything else is the engine going away.
+// before it was handed over, by the closer's own reason:
+//   - a disabled exposure is the connection refusing the front door;
+//   - a deleted connection is gone, and a moved or downgraded one is changing:
+//     the same answers the line gives a waiter the same change swept
+//     (drainRemoved, drainChanged);
+//   - anything else is the engine going away.
 func closedBeneath(s *session) error {
 	s.mu.Lock()
 	why := s.closeWhy
 	s.mu.Unlock()
-	if why == reasonExposureDisabled {
+	cause := ErrEngineClosing
+	switch why {
+	case reasonExposureDisabled:
 		return deny(DenyProfileRefuses)
+	case reasonConnectionDeleted:
+		cause = ErrTargetGone
+	case reasonConnectionPoolChanged, reasonProfileDowngraded:
+		cause = ErrConnectionDraining
 	}
-	if reason, detail, ok := admissionAnswer(ErrEngineClosing); ok {
+	if reason, detail, ok := admissionAnswer(cause); ok {
 		return denyAfterAuthorizationWithDetail(reason, detail)
 	}
-	return ErrEngineClosing
+	return cause
 }
 
 // resolveStanding is auth.ResolveStanding, or the test hook standing in for it.
@@ -1113,6 +1124,7 @@ func (e *Engine) applyStartupGUCs(ctx context.Context, s *session, pc golibpg.Pi
 		names = append(names, k)
 	}
 	sort.Strings(names)
+	e.admitStep(ctx, admitStepGUCs)
 	for _, raw := range names {
 		name := strings.ToLower(raw)
 		sqlText := "SET " + quoteIdent(name) + " TO " + quoteLiteral(gucs[raw])
@@ -1124,7 +1136,7 @@ func (e *Engine) applyStartupGUCs(ctx context.Context, s *session, pc golibpg.Pi
 		if admitErr != nil {
 			e.auditBounded(ctx, userID, ip, "wire_startup_guc_refused",
 				fmt.Sprintf("conn %d: session %s: %s: %v", connID, s.id, name, admitErr))
-			return admitErr
+			return &startupGUCRefusal{err: admitErr}
 		}
 		var targetErr *pgconn.PgError
 		_, derr := e.sessionSimpleQuery(ctx, sq, sessionSQLAutodb, sqlText, func(m golibpg.ExtendedMessage) error {
@@ -1141,7 +1153,7 @@ func (e *Engine) applyStartupGUCs(ctx context.Context, s *session, pc golibpg.Pi
 		case targetErr != nil:
 			e.auditBounded(ctx, userID, ip, "wire_startup_guc_refused",
 				fmt.Sprintf("conn %d: session %s: %s: target: %s", connID, s.id, name, targetErr.Message))
-			return targetErr
+			return &startupGUCRefusal{err: targetErr}
 		}
 	}
 	e.auditBounded(ctx, userID, ip, "wire_startup_gucs_applied",
@@ -1150,6 +1162,35 @@ func (e *Engine) applyStartupGUCs(ctx context.Context, s *session, pc golibpg.Pi
 }
 
 // quoteIdent renders a setting name as a double-quoted identifier.
+// startupGUCRefusal marks a startup setting that was REFUSED -- by the
+// session-state gate, or by the target's own ErrorResponse -- as opposed to one
+// that could not be applied.
+type startupGUCRefusal struct{ err error }
+
+func (r *startupGUCRefusal) Error() string { return r.err.Error() }
+func (r *startupGUCRefusal) Unwrap() error { return r.err }
+
+// startupGUCAnswer is how a startup setting's failure is answered, classified as
+// the pin's own failures are:
+//   - a refused setting is the client's: the startup-GUC denial;
+//   - the pin's allowance running out while the settings were applied is a
+//     target too slow to open, ErrBackendOpenTimeout (57P03), exactly as the
+//     pin's own deadline is;
+//   - anything else is returned as itself, so a locked store, a connection that
+//     cannot serve, or a store outage keeps its own answer rather than reading as
+//     a setting the client got wrong.
+func startupGUCAnswer(pinCtx context.Context, err error) error {
+	var refused *startupGUCRefusal
+	switch {
+	case errors.As(err, &refused):
+		return deny(DenyStartupGUC)
+	case errors.Is(pinCtx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("%w: %w", ErrBackendOpenTimeout, err)
+	default:
+		return err
+	}
+}
+
 func quoteIdent(name string) string { return `"` + strings.ReplaceAll(name, `"`, `""`) + `"` }
 
 // quoteLiteral renders a value as a single-quoted string literal. PostgreSQL
