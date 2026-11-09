@@ -795,6 +795,10 @@ func (e *Engine) runFinalize(fctx context.Context, s *session, a *WireAuthorizat
 	if err != nil {
 		return WireSessionResult{}, err
 	}
+	// THE SESSION'S SILENCE STARTS WHEN THIS RUN ENDS: the release's finish()
+	// stamps lastUsed. It was stamped when the session was built, before the
+	// wait in line and the pin, so a login that waited would otherwise open
+	// already past its ReclaimGrace.
 	defer release()
 	rctx, endRun := s.runContext(fctx) // a stop, not a cause: finalizeOutcome decides why
 	defer endRun()
@@ -893,12 +897,6 @@ func (e *Engine) finalizeWire(ctx context.Context, s *session, a *WireAuthorizat
 			fmt.Sprintf("conn %d: session %s: target engine %q has no session settings", connRow.ID, s.id, connRow.Engine))
 		return WireSessionResult{}, deny(DenyStartupGUC)
 	}
-	// THE SESSION'S SILENCE STARTS NOW, when its client can first use it. It was
-	// stamped when the session was built, before the wait in line and the pin, so
-	// a login that waited would open already past its ReclaimGrace.
-	s.mu.Lock()
-	s.lastUsed = e.now()
-	s.mu.Unlock()
 	e.admitStep(ctx, admitStepNote)
 	// Best effort: a failed note is logged by NotePATUse and the login opens.
 	e.auth.NotePATUse(ctx, pat)

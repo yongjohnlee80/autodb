@@ -48,9 +48,11 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 	// An exported function is never trusted this way: a caller outside the
 	// package is one this walk cannot see.
 	//
-	// A GATE MAY BE PASSED THROUGH A HELPER. A call to an unexported function
-	// that itself passes a gate -- directly or through another such helper --
-	// counts as passing that gate at the call.
+	// A GATE MAY BE PASSED THROUGH A HELPER. A call to a function of this
+	// package that itself passes a gate -- directly or through another such
+	// function, AuthorizeWire included -- counts as passing that gate at the
+	// call. Exported or not makes no difference here: what matters is what the
+	// callee does, not who else may call it.
 	type call struct {
 		callee string
 		pos    token.Pos
@@ -123,22 +125,27 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 			"guards, so its silence proves nothing", witness)
 	}
 
-	// passes reports whether fn passes gate somewhere in its body, directly or
-	// through an unexported helper that does.
-	var passes func(fn, gate string, seen map[string]bool) bool
-	passes = func(fn, gate string, seen map[string]bool) bool {
-		info := fns[fn]
-		if info == nil || info.count != 1 || seen[fn] {
-			return false
-		}
-		seen[fn] = true
-		defer delete(seen, fn)
-		for _, c := range info.calls {
-			if c.callee == gate || (!ast.IsExported(c.callee) && passes(c.callee, gate, seen)) {
-				return true
+	// passing[gate] is every function that passes gate somewhere in its body,
+	// directly or through a function of this package that does: a fixed point,
+	// grown until no call adds a function.
+	passing := map[string]map[string]bool{}
+	for _, gate := range []string{authentication, authorization} {
+		set := map[string]bool{}
+		for grew := true; grew; {
+			grew = false
+			for name, info := range fns {
+				if set[name] || info.count != 1 {
+					continue
+				}
+				for _, c := range info.calls {
+					if c.callee == gate || set[c.callee] {
+						set[name], grew = true, true
+						break
+					}
+				}
 			}
 		}
-		return false
+		passing[gate] = set
 	}
 	// gatedAt reports whether pos, inside fn, runs after both gates. The FIRST
 	// call that passes a gate is where fn passes it: a later re-check cannot
@@ -148,7 +155,7 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 			gpos := token.NoPos
 			for _, c := range fns[fn].calls {
 				if (gpos == token.NoPos || c.pos < gpos) &&
-					(c.callee == gate || (!ast.IsExported(c.callee) && passes(c.callee, gate, map[string]bool{}))) {
+					(c.callee == gate || passing[gate][c.callee]) {
 					gpos = c.pos
 				}
 			}
