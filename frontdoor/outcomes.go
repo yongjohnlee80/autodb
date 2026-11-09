@@ -358,7 +358,8 @@ func Outcomes() []outcome.Registration {
 // authenticateOutcomes is what the credential phase can end on, and
 // admitOutcomes what the admission phase can: each EXACTLY what its own code and
 // its engine call can reach, so the runner refuses a phase that ends on another
-// phase's outcome as the wiring mistake it is (ADR 0189 decision 3).
+// phase's outcome as the wiring mistake it is: membership is what lets the
+// registry answer "what can happen in this phase".
 //
 // credential phase only: the read, the worker, the setup, the missing store,
 // and the engine's authorization denials (exec.AuthorizeDenials).
