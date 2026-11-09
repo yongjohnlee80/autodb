@@ -427,7 +427,7 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	}
 
 	// TWO COMMITTED CONTROLS, one per property, each injecting a difference
-	// just past the bound THIS RUN accepted and each caught by the exact
+	// past the bound THIS RUN accepted (timingControlDelay) and each caught by the exact
 	// assertion that defends it.
 	//
 	// The previous control delayed the gateway's own refusal, which only the
@@ -436,15 +436,16 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	// caught that. These use a proxy in front of the daemon instead, which
 	// is test-owned, needs no production seam, and can single out either
 	// cause by what the request carries.
-	delay := bound + timingControlMargin
+	delay := timingControlDelay(bound)
 	t.Run("the harness can catch a username-existence leak", func(t *testing.T) {
 		// The unknown name is in its own cause's request alone: one per round.
-		got := abs(timingControl(t, daemon, []byte("nobody-at-all"), timingRounds, delay, unknownName, wrongPassword))
-		if got <= bound {
+		got, own := timingControl(t, daemon, []byte("nobody-at-all"), timingRounds, delay, unknownName, wrongPassword)
+		if abs(got) <= bound {
 			t.Fatalf("with %v injected into the unknown-name path alone — %v past the %v bound "+
-				"this run accepted — the existence statistic resolved only %v. It cannot see a "+
-				"leak at its own boundary, so its green above says nothing",
-				delay, timingControlMargin, bound, got)
+				"this run accepted — the existence statistic resolved only %v (the control's own "+
+				"noise %v, the bound's %v). It cannot see a leak at its own boundary, so its green "+
+				"above says nothing",
+				delay, delay-bound, bound, abs(got), own, noise)
 		}
 	})
 	t.Run("the harness can catch a credential-validity leak", func(t *testing.T) {
@@ -452,35 +453,36 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 		// unknown-name one (timingCauses), so it delays two requests per round;
 		// the credential statistic compares right against wrong, which only the
 		// first of the two moves.
-		got := abs(timingControl(t, daemon, []byte(adminPass), 2*timingRounds, delay, rightPassword, wrongPassword))
-		if got <= bound {
+		got, own := timingControl(t, daemon, []byte(adminPass), 2*timingRounds, delay, rightPassword, wrongPassword)
+		if abs(got) <= bound {
 			t.Fatalf("with %v injected into the correct-password path alone — %v past the %v "+
-				"bound this run accepted — the credential statistic resolved only %v. It cannot "+
-				"see a leak at its own boundary, so its green above says nothing",
-				delay, timingControlMargin, bound, got)
+				"bound this run accepted — the credential statistic resolved only %v (the "+
+				"control's own noise %v, the bound's %v). It cannot see a leak at its own "+
+				"boundary, so its green above says nothing",
+				delay, delay-bound, bound, abs(got), own, noise)
 		}
 	})
 }
 
 // timingControl measures through a proxy that delays only the requests whose
 // payload carries `match`, and returns the SAME paired statistic the
-// assertions use.
+// assertions use, with that sample's own noise for the failure to report.
 //
 // THE INJECTION IS COUNTED BEFORE THE STATISTIC IS JUDGED. A control whose delay
 // reached only some of its cause's requests resolves part of the delay, and
 // that reads exactly like a harness too weak to see a leak. So the proxy counts
 // the requests it delayed, and anything but the expected count fails here,
 // naming the shortfall, rather than as a power failure it is not.
-func timingControl(t *testing.T, daemon string, match []byte, want int64, delay time.Duration, a, b string) time.Duration {
+func timingControl(t *testing.T, daemon string, match []byte, want int64, delay time.Duration, a, b string) (got, noise time.Duration) {
 	t.Helper()
 	proxy, delayed := delayingProxy(t, daemon, match, delay)
 	base, _ := startGateway(t, proxy)
-	got := pairedDifference(sampleInterleaved(t, base, timingCauses(), timingRounds), a, b)
+	samples := sampleInterleaved(t, base, timingCauses(), timingRounds)
 	if n := delayed.Load(); n != want {
 		t.Fatalf("the control's delay reached %d requests, want %d: the injection, not the "+
 			"harness, is what this run measured", n, want)
 	}
-	return got
+	return pairedDifference(samples, a, b), pairedSpread(samples, a, b)
 }
 
 // pairedDifference is the median of the per-ROUND differences between two
@@ -648,10 +650,25 @@ func delayingProxy(t *testing.T, upstream string, match []byte, delay time.Durat
 // difference in work done.
 const timingFloor = 5 * time.Millisecond
 
-// timingControlMargin is how far past the accepted bound the control's
-// injected delay sits. Small on purpose: the control has to demonstrate
-// sensitivity AT the boundary.
+// timingControlMargin is the least a control's injected delay sits past the
+// accepted bound.
 const timingControlMargin = 20 * time.Millisecond
+
+// timingControlDelay is what a control injects: the bound, plus a margin as
+// large as the bound itself and never under timingControlMargin.
+//
+// THE MARGIN SCALES WITH THE NOISE, because the control is a second sample,
+// judged against the bound the first one set. A fixed 20ms was about one and a
+// half standard errors on a loaded -race run (13ms), so a control sample that
+// landed on a busier moment than the first missed a delay it had received in
+// full: 48 of 48 requests delayed 85ms, resolved 54ms against a 65ms bound. A
+// margin of the bound is five of the first sample's standard errors, so the
+// control misses only when its own sample is several times noisier.
+// TestPairedSpread_CoversTheNullAndSeesAnOffset pins that on synthetic rounds,
+// a quiet control and a loaded one.
+func timingControlDelay(bound time.Duration) time.Duration {
+	return bound + max(bound, timingControlMargin)
+}
 
 type timingCause struct{ name, user, pass string }
 
