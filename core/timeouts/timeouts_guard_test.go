@@ -158,3 +158,14 @@ func TestGuard_TheGuardedPackagesExist(t *testing.T) {
 		}
 	}
 }
+
+// A waiting front-door login has CredentialExchange less what the pin and the
+// reply keep back. A reclaim grace at or past that wait could never serve a
+// login that arrived just as every holder went quiet: it would be refused
+// before any holder became reclaimable.
+func TestReclaimGrace_FitsInsideAFrontDoorLoginsWait(t *testing.T) {
+	wait := CredentialExchange - PinAllowance - HandshakeReserve
+	if ReclaimGrace >= wait {
+		t.Errorf("ReclaimGrace (%v) is not shorter than a front-door login's wait (%v)", ReclaimGrace, wait)
+	}
+}

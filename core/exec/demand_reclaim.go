@@ -159,8 +159,7 @@ func (r *sessionRegistry) reserveDemandVictim(key leaseKey, now time.Time) (dema
 		//     here AS WELL AS in OfferReceive, because the two guard different
 		//     mistakes: that one stops a live offer existing without a knock,
 		//     and this one stops a reservation committing against one anyway.
-		eligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil &&
-			now.Sub(s.lastUsed) >= timeouts.ReclaimGrace
+		eligible := s.askableLocked() && now.Sub(s.lastUsed) >= timeouts.ReclaimGrace
 		// THE DEMAND UNIT IS SPENT HERE, NOT WHERE IT WAS CHECKED.
 		//
 		// pressDemand's check is an optimisation and nothing more. Two receive
@@ -241,8 +240,14 @@ func (e *Engine) demandReclaim(key leaseKey) bool {
 	if e.sessions == nil {
 		return false
 	}
-	v, ok := e.sessions.reserveDemandVictim(key, e.now())
+	now := e.now()
+	v, ok := e.sessions.reserveDemandVictim(key, now)
 	if !ok {
+		// Nobody is reclaimable yet, but a holder inside its grace becomes so
+		// by staying quiet, which is no event. Ask again at that instant.
+		if at, ok := e.sessions.nextReclaimable(key); ok {
+			e.sessions.retryDemandAt(key, at, at.Sub(now))
+		}
 		return false
 	}
 
@@ -250,6 +255,78 @@ func (e *Engine) demandReclaim(key leaseKey) bool {
 	// will frame its client and then finalise, which is what releases the lease.
 	_ = v
 	return true
+}
+
+// askableLocked reports whether this session could be asked to leave, apart
+// from how long it has been silent: the conditions reserveDemandVictim lists.
+// Called with s.mu held.
+func (s *session) askableLocked() bool {
+	return s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil
+}
+
+// nextReclaimable reports the earliest instant a holder on this target that is
+// askable now finishes its grace, or false when none is waiting it out.
+func (r *sessionRegistry) nextReclaimable(key leaseKey) (time.Time, bool) {
+	r.mu.Lock()
+	candidates := make([]*session, 0, len(r.byID))
+	for _, s := range r.byID {
+		if s.reservation.Key == key {
+			candidates = append(candidates, s)
+		}
+	}
+	r.mu.Unlock()
+
+	var earliest time.Time
+	for _, s := range candidates {
+		s.mu.Lock()
+		if s.askableLocked() {
+			if at := s.lastUsed.Add(timeouts.ReclaimGrace); earliest.IsZero() || at.Before(earliest) {
+				earliest = at
+			}
+		}
+		s.mu.Unlock()
+	}
+	return earliest, !earliest.IsZero()
+}
+
+// retryDemandAt arms one ask on this target for instant at, d from now, unless
+// one is already armed for that instant or earlier.
+//
+// ONE TIMER PER TARGET. Every failed ask lands here, and arrivals in a burst
+// would otherwise arm one each for the same instant. When it fires the ask goes
+// through pressDemand like every other, so it does nothing if the waiter has
+// been served meanwhile, and a holder that spoke in the meantime is simply not
+// reclaimable when it is judged.
+func (r *sessionRegistry) retryDemandAt(key leaseKey, at time.Time, d time.Duration) {
+	r.demandMu.Lock()
+	defer r.demandMu.Unlock()
+	if armed, ok := r.demandRetry[key]; ok && !armed.at.After(at) {
+		return
+	}
+	if armed, ok := r.demandRetry[key]; ok {
+		armed.stop()
+	}
+	if r.demandRetry == nil {
+		r.demandRetry = map[leaseKey]demandRetry{}
+	}
+	after := r.afterFunc
+	if after == nil {
+		after = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
+	}
+	r.demandRetry[key] = demandRetry{at: at, stop: after(d, func() {
+		r.demandMu.Lock()
+		if armed, ok := r.demandRetry[key]; ok && armed.at.Equal(at) {
+			delete(r.demandRetry, key)
+		}
+		r.demandMu.Unlock()
+		r.pressDemand(key)
+	})}
+}
+
+// demandRetry is one armed ask: when it fires, and how to cancel it.
+type demandRetry struct {
+	at   time.Time
+	stop func() bool
 }
 
 // OfferReceive opens this session's receive offer and returns the token its
@@ -616,11 +693,9 @@ func (r *sessionRegistry) pressDemand(key leaseKey) bool {
 // pressOwedDemand asks again on every target where a request is still waiting
 // for a reclamation.
 //
-// THE JANITOR CALLS IT, because a holder can become reclaimable with no event
-// at all: it only has to stay silent past ReclaimGrace. The asks at arrival and
-// at each receive offer find nothing while every holder is still inside its
-// grace, and without a later ask the request would wait out its whole bound
-// beside a holder that became reclaimable seconds after it arrived.
+// THE JANITOR CALLS IT, AS A BACKSTOP. A holder becomes reclaimable by staying
+// silent past ReclaimGrace, which is no event; retryDemandAt arms an ask for
+// that instant, and this sweep asks again in case that ask was missed.
 func (r *sessionRegistry) pressOwedDemand() {
 	if r == nil {
 		return

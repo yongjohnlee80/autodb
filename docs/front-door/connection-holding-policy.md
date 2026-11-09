@@ -172,12 +172,18 @@ the queue wait (90 s), then is refused as a capacity matter (`53300`).
 **A waiting login can end an idle session, but not one in use.** When the
 front-door share is full, a waiting login may end a session that holds a slot
 and is doing nothing: no statement running, no transaction open, and **silent
-for at least 10 seconds**. That session's client is told why before it closes.
+for at least 3 seconds**. That session's client is told why before it closes.
 A session silent for less is left alone, because a pooled client sends its
 first statement a moment after it connects and a request's statements a moment
-apart; ending it in that gap hands the client a dead connection. Each janitor
-sweep (`exec.janitor_interval`, 10 s) asks again for anyone still waiting, so a
-login stuck behind idle sessions is served within about 20 seconds.
+apart; ending it in that gap hands the client a dead connection.
+
+A front-door login waits in line for **about 6 seconds**: its 10 s login limit,
+less what connecting its backend and replying need. When it arrives while
+every quiet session is still inside its 3 seconds, autodb asks again the
+moment the first one passes it, so the login can still be served in time. The
+janitor's sweep asks again too, as a backstop. A `session_idle_timeout` of 3
+seconds or less is refused, since it would end every quiet session before a
+waiting login could take one.
 
 **No backend in a pool is reused.** Every release closes the socket, so its
 permit returns at once and no idle connection holds a pool's capacity. A

@@ -60,9 +60,13 @@ const (
 	// first statement a moment after the session opens, and a request's
 	// statements a moment apart; ending a session inside that gap hands the
 	// client a dead connection, and the burst that caused the wait turns into
-	// failed requests. A login waiting behind sessions that really are idle is
-	// served within ReclaimGrace and one janitor sweep.
-	ReclaimGrace = 10 * time.Second
+	// failed requests.
+	//
+	// SHORTER THAN A FRONT-DOOR LOGIN'S WAIT, which is CredentialExchange less
+	// PinAllowance and HandshakeReserve (6 s). A login that arrives just as
+	// every holder went quiet can still be served by the one that stays quiet
+	// longest; a guard test holds the two apart.
+	ReclaimGrace = 3 * time.Second
 )
 
 // Idle sessions.
