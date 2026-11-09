@@ -19,6 +19,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 
+	"github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
@@ -472,7 +473,8 @@ func TestHarness_ABurstPastTheShareWaitsAndEveryRequestRuns(t *testing.T) {
 // yet sent anything: the second's silence started when it opened, not when it
 // joined the line, so it is not the third's victim before its first statement.
 func TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds(t *testing.T) {
-	l := pgLoopFull(t)
+	queuedAndAsked := make(chan struct{}, 4)
+	l := pgLoopFull(t, exec.WithWaiterQueued(func() { queuedAndAsked <- struct{}{} }))
 	if err := l.eng.UpdatePool(opCtx(t), l.rootTok, meta.DefaultPoolID, 3, "127.0.0.1"); err != nil {
 		t.Fatalf("shrinking the default pool to 3: %v", err)
 	}
@@ -515,18 +517,38 @@ func TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds(t *testi
 			"while its client might still have used it", waited, timeouts.ReclaimGrace)
 	}
 
-	// A third login queues behind the one just served, before it has said anything.
-	third := make(chan *pgconn.PgConn, 1)
+	// The second login's own wait was announced; drain it, so the next
+	// announcement is the third login's.
+	select {
+	case <-queuedAndAsked:
+	default:
+		t.Fatal("the second login was served without ever queuing; the share was not full")
+	}
+
+	// A third login queues behind the one just served, before it has said
+	// anything, and its arrival asks for a reclamation.
+	type dialed struct {
+		c   *pgconn.PgConn
+		err error
+	}
+	third := make(chan dialed, 1)
 	go func() {
-		c, _ := connect(opCtx(t))
-		third <- c
+		c, err := connect(opCtx(t))
+		third <- dialed{c, err}
 	}()
 	t.Cleanup(func() {
-		if c := <-third; c != nil {
-			_ = c.Close(context.Background())
+		if d := <-third; d.c != nil {
+			_ = d.c.Close(context.Background())
 		}
 	})
-	time.Sleep(500 * time.Millisecond) // not a timeout: lets the third login join the line and ask
+	select {
+	case <-queuedAndAsked:
+	case d := <-third:
+		third <- d
+		t.Fatalf("the third login never queued behind the second (connect: %v)", d.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the third login never queued behind the second")
+	}
 
 	if err := selectOne(opCtx(t), queued); err != nil {
 		t.Fatalf("the served login could not run its first statement: %v; a login that "+

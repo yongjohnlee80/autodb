@@ -245,7 +245,10 @@ func (e *Engine) demandReclaim(key leaseKey) bool {
 	if !ok {
 		// Nobody is reclaimable yet, but a holder inside its grace becomes so
 		// by staying quiet, which is no event. Ask again at that instant.
-		if at, ok := e.sessions.nextReclaimable(key); ok {
+		// Only a FUTURE instant: a holder already past its grace that was not
+		// reserved lost to something else ending it, and an ask armed for now
+		// would fire straight back here.
+		if at, ok := e.sessions.nextReclaimable(key); ok && at.After(now) {
 			e.sessions.retryDemandAt(key, at, at.Sub(now))
 		}
 		return false
@@ -260,8 +263,14 @@ func (e *Engine) demandReclaim(key leaseKey) bool {
 // askableLocked reports whether this session could be asked to leave, apart
 // from how long it has been silent: the conditions reserveDemandVictim lists.
 // Called with s.mu held.
+//
+// OPEN, NOT MERELY QUIET. A session already reserved is closing but keeps its
+// offer and knock until its owner finalises it, so without this one ask after
+// another (pressWhileAnswered) would come back to it. Promising it a second
+// time and losing the close claim would then discharge its first promise, and
+// more sessions would be ended than logins are waiting.
 func (s *session) askableLocked() bool {
-	return s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil
+	return s.get() == sessOpen && s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil
 }
 
 // nextReclaimable reports the earliest instant a holder on this target that is
@@ -617,6 +626,12 @@ func (r *sessionRegistry) tryPromiseDemand(key leaseKey, id SessionID) bool {
 	r.demandMu.Lock()
 	defer r.demandMu.Unlock()
 	if r.demandWanted[key] <= len(r.demandPromised[key]) {
+		return false
+	}
+	// ONE PROMISE PER SESSION. A second would not add to the count, and the
+	// caller, failing to reserve a session that is already closing, would
+	// discharge the first.
+	if _, ok := r.demandPromised[key][id]; ok {
 		return false
 	}
 	if r.demandPromised == nil {

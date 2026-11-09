@@ -261,6 +261,13 @@ func WithMaxRows(n int) Option {
 	}
 }
 
+// WithWaiterQueued is called each time a front-door login joins its pool's line,
+// after its arrival has asked for a reclamation (tests). A cell outside this
+// package waits on it instead of sleeping and hoping the login got there.
+func WithWaiterQueued(fn func()) Option {
+	return func(e *Engine) { e.sessions.hookWaiterQueued = func(uint64) { fn() } }
+}
+
 // WithNow injects a clock (tests).
 func WithNow(now func() time.Time) Option { return func(e *Engine) { e.now = now } }
 

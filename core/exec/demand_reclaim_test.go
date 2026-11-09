@@ -838,3 +838,55 @@ func TestDemandReclaim_AHolderInsideItsGraceIsNotEnded(t *testing.T) {
 		t.Errorf("ended %q, want %q, the only holder past its grace", v.s.id, paused.id)
 	}
 }
+
+// A HOLDER ALREADY CLOSING IS NOT ASKED AGAIN.
+//
+// A reserved session keeps its offer and knock until its owner finalises it.
+// With two logins owed, the second ask must move on to another holder rather
+// than come back to the first; coming back promised it twice, failed to
+// reserve it, and discharged the first promise, so a third ask could end a
+// third session for two waiting logins.
+func TestDemandReclaim_AHolderAlreadyClosingIsNotAskedAgain(t *testing.T) {
+	now := time.Now()
+	oldest := demandHolder("quiet-longest", 1, 7, now.Add(-time.Hour))
+	next := demandHolder("quiet-a-while", 2, 7, now.Add(-time.Minute))
+	spare := demandHolder("quiet-a-little", 3, 7, now.Add(-10*time.Second))
+	r := demandRegistry(t, oldest, next, spare)
+	r.wantDemand(connKey(7)) // two logins are owed, one more than demandRegistry seeds
+
+	first, ok := r.reserveDemandVictim(connKey(7), now)
+	if !ok || first.s != oldest {
+		t.Fatalf("the first ask did not take the holder quiet longest")
+	}
+	second, ok := r.reserveDemandVictim(connKey(7), now)
+	if !ok {
+		t.Fatal("the second ask reserved nobody, though a second login is owed and two open holders remain")
+	}
+	if second.s == oldest {
+		t.Fatal("the second ask came back to the holder already closing for the first login")
+	}
+	if n := r.promisedCount(connKey(7)); n != 2 {
+		t.Errorf("%d reclamations promised for two waiting logins, want 2", n)
+	}
+	if v, ok := r.reserveDemandVictim(connKey(7), now); ok {
+		t.Errorf("a third holder (%s) was reserved though only two logins are waiting", v.s.id)
+	}
+}
+
+// A SESSION IS PROMISED ONCE. Promising it again adds nothing to the count,
+// and the caller's failed reservation would then take the first promise away.
+func TestDemandReclaim_ASessionIsPromisedOnce(t *testing.T) {
+	r := newSessionRegistry(64, 64)
+	key := connKey(7)
+	r.wantDemand(key)
+	r.wantDemand(key)
+	if !r.tryPromiseDemand(key, "holder") {
+		t.Fatal("the first promise was refused with two logins owed")
+	}
+	if r.tryPromiseDemand(key, "holder") {
+		t.Error("the same session was promised twice")
+	}
+	if n := r.promisedCount(key); n != 1 {
+		t.Errorf("%d promises recorded, want 1", n)
+	}
+}
