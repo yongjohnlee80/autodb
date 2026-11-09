@@ -177,16 +177,25 @@ A session silent for less is left alone, because a pooled client sends its
 first statement a moment after it connects and a request's statements a moment
 apart; ending it in that gap hands the client a dead connection.
 
-A front-door login waits in line for **about 6 seconds**: its 10 s login limit,
-less what connecting its backend and replying need. When it arrives while
-every quiet session is still inside its 3 seconds, autodb asks again the
-moment the first one passes it, and once for every login still waiting. The
-ended session's client gets at most 2 seconds to take its goodbye message, so
-3 + 2 seconds stays inside the login's wait. A login that waited starts its own
-3 seconds when it opens, not when it joined the line. The janitor's sweep asks
-again too, as a backstop. A `session_idle_timeout` of 3
-seconds or less is refused, since it would end every quiet session before a
-waiting login could take one.
+**A front-door login waits for its pool after it has logged in.** Its
+password is checked first, inside the 10 s login limit and one of the 16
+credential workers. Then it gives the worker back and waits in its pool's
+line for up to **90 seconds**, so a burst over a slow link is queued rather
+than refused. While it waits, autodb watches the connection: a client that
+hangs up leaves the line at once, and one that sends anything before it is
+told it may is refused. After the wait, autodb checks again that the
+connection is still open to the front door and that the token is still good,
+then opens the database connection, all within **10 seconds**; past that the
+client is told the server is unavailable (`57P03`). The answer, success or
+refusal, is written within 2 seconds.
+
+When a waiting login arrives while every quiet session is still inside its
+3 seconds, autodb asks again the moment the first one passes it, and once for
+every login still waiting. The ended session's client gets at most 2 seconds
+to take its goodbye message. A login that waited starts its own 3 seconds when
+it opens, not when it joined the line. The janitor's sweep asks again too, as
+a backstop. A `session_idle_timeout` of 3 seconds or less is refused, since it
+would end every quiet session before a waiting login could take one.
 
 **No backend in a pool is reused.** Every release closes the socket, so its
 permit returns at once and no idle connection holds a pool's capacity. A
