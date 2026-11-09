@@ -168,6 +168,54 @@ func TestRunner_AnUndeclaredIdentityIsRefused(t *testing.T) {
 	}
 }
 
+// EACH LOGIN PHASE REFUSES THE OTHER'S ENDINGS. The credential phase cannot
+// wait, pin or meet a startup failure, because nothing waits or pins before it
+// ends; the admission phase cannot meet a credential identity, because those are
+// decided before the wait. A phase that ends on the other's outcome is a wiring
+// mistake, and the runner must refuse it rather than accept it.
+func TestRunner_EachLoginPhaseRefusesTheOtherPhasesEndings(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("the pin failed")
+	for _, c := range []struct {
+		name  string
+		phase PhaseName
+		end   func() Outcome
+		ok    bool
+	}{
+		{"authenticate: a queue timeout", PhaseAuthenticate, func() Outcome { return Refuse(outcomeID(exec.DenyQueueTimeout)) }, false},
+		{"authenticate: a lease cap", PhaseAuthenticate, func() Outcome { return Refuse(outcomeID(exec.DenyLeaseCap)) }, false},
+		{"authenticate: the pin's budget", PhaseAuthenticate, func() Outcome { return Refuse(outcomeID(exec.DenyTargetBudget)) }, false},
+		{"authenticate: a startup failure", PhaseAuthenticate, func() Outcome {
+			return Operational(outcomeID(OutcomeStartupConnectionUnavailable), boom)
+		}, false},
+		{"authenticate: a client that left while waiting", PhaseAuthenticate, func() Outcome {
+			return Operational(outcomeID(OutcomeAdmitPeerGone), boom)
+		}, false},
+		{"admit: a bad credential", PhaseAdmit, func() Outcome { return Refuse(outcomeID(exec.DenyBadCredential)) }, false},
+		{"admit: a startup user mismatch", PhaseAdmit, func() Outcome { return Refuse(outcomeID(exec.DenyUserMismatch)) }, false},
+		{"admit: an IP not admitted", PhaseAdmit, func() Outcome { return Refuse(outcomeID(exec.DenyIPNotAdmitted)) }, false},
+		{"admit: a busy auth worker", PhaseAdmit, func() Outcome { return Operational(OutcomeAuthWorkerBusy, boom) }, false},
+		// The controls beside them: each phase's own endings, and the shared
+		// re-check, are accepted, so the cell is not refusing everything.
+		{"authenticate: a bad credential", PhaseAuthenticate, func() Outcome { return Refuse(outcomeID(exec.DenyBadCredential)) }, true},
+		{"admit: a queue timeout", PhaseAdmit, func() Outcome { return Refuse(outcomeID(exec.DenyQueueTimeout)) }, true},
+		{"admit: a startup failure", PhaseAdmit, func() Outcome {
+			return Operational(outcomeID(OutcomeStartupConnectionUnavailable), boom)
+		}, true},
+		{"authenticate: no grant", PhaseAuthenticate, func() Outcome { return Refuse(outcomeID(exec.DenyNoGrant)) }, true},
+		{"admit: no grant after the wait", PhaseAdmit, func() Outcome { return Refuse(outcomeID(exec.DenyNoGrant)) }, true},
+	} {
+		lc := testLifecycle(t)
+		_, err := lc.run(c.phase, c.end)
+		if c.ok && err != nil {
+			t.Errorf("%s: a declared ending was refused: %v", c.name, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%s: the phase ended on an outcome it cannot reach and did not declare", c.name)
+		}
+	}
+}
+
 // OPERATIONAL OUTCOMES ARE VALIDATED LIKE EVERY OTHER ENDING.
 //
 // They used to bypass the registry entirely, which made a registry built
@@ -232,7 +280,7 @@ func TestRunner_TheWitnessReachesTheOccurrenceOnlyWhenGiven(t *testing.T) {
 		// the code.
 		lc := testLifecycle(t)
 		out := c.out
-		res, err := lc.run(PhaseAuthenticate, func() Outcome { return out })
+		res, err := lc.run(PhaseAdmit, func() Outcome { return out })
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -747,62 +795,50 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"accept", "frontdoor/pre-auth-connection-cap", outcome.Refusal, outcome.Capacity},
 		{"accept", "frontdoor/source-connection-cap", outcome.Refusal, outcome.Capacity},
 		{"accept", "frontdoor/source-ip-throttled", outcome.Refusal, outcome.Credential},
-		// The admission phase: an authorized login's wait and finalization. It
-		// calls the engine, so it declares the engine's identities and the shared
-		// startup and store endings; its own is a client that left while waiting.
+		// The admission phase: an authorized login's wait and finalization.
+		// EXACTLY what it can reach: a client that left while waiting, input sent
+		// too early, the store, the pin's startup failures, the connection checks
+		// re-run after the wait, and the line's and the pin's capacity answers.
+		// No credential identity: those are decided before the wait.
 		{"admit", "admit-peer-gone", outcome.Operational, outcome.None},
 		{"admit", "frontdoor/auth-store-error", outcome.Operational, outcome.None},
 		{"admit", "frontdoor/startup-connection-unavailable", outcome.Operational, outcome.None},
 		{"admit", "frontdoor/startup-connection-unusable", outcome.Operational, outcome.None},
-		{"admit", "frontdoor/bad-credential", outcome.Refusal, outcome.Credential},
 		{"admit", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
-		{"admit", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},
 		{"admit", "frontdoor/lease-cap-exceeded", outcome.Refusal, outcome.Capacity},
-		{"admit", "frontdoor/queue-timeout", outcome.Refusal, outcome.Capacity},
-		{"admit", "frontdoor/all-capacity-in-transaction", outcome.Refusal, outcome.Capacity},
-		{"admit", "frontdoor/target-removed-while-waiting", outcome.Refusal, outcome.Capacity},
-		{"admit", "frontdoor/connection-changing", outcome.Refusal, outcome.Capacity},
-		{"admit", "frontdoor/target-budget-exhausted", outcome.Refusal, outcome.Capacity},
-		{"admit", "frontdoor/instance-shutting-down", outcome.Refusal, outcome.Capacity},
-		{"admit", "frontdoor/lease-encoding", outcome.Refusal, outcome.None},
-		{"admit", "frontdoor/no-grant", outcome.Refusal, outcome.None},
-		{"admit", "frontdoor/no-such-database", outcome.Refusal, outcome.None},
-		{"admit", "frontdoor/pat-allowed-ips", outcome.Refusal, outcome.Credential},
-		{"admit", "frontdoor/pat-cleartext-debug-in-tls", outcome.Refusal, outcome.None},
-		{"admit", "frontdoor/pat-not-cleartext-debug", outcome.Refusal, outcome.None},
-		{"admit", "frontdoor/pat-unscoped", outcome.Refusal, outcome.None},
-		{"admit", "frontdoor/pre-auth-protocol-violation", outcome.Refusal, outcome.Protocol},
-		{"admit", "frontdoor/profile-not-front-door", outcome.Refusal, outcome.None},
-		{"admit", "frontdoor/resident-budget-exceeded", outcome.Refusal, outcome.Capacity},
-		{"admit", "frontdoor/session-cap-exceeded", outcome.Refusal, outcome.Capacity},
-		{"admit", "frontdoor/startup-guc-refused", outcome.Refusal, outcome.None},
-		{"admit", "frontdoor/startup-user-mismatch", outcome.Refusal, outcome.Credential},
-		{"authenticate", "auth-read-failed", outcome.Operational, outcome.Protocol},
-		{"authenticate", "auth-setup-failed", outcome.Operational, outcome.None},
-		{"authenticate", "auth-worker-unavailable", outcome.Operational, outcome.None},
-		{"authenticate", "frontdoor/auth-not-yet-available", outcome.Refusal, outcome.None},
-		{"authenticate", "frontdoor/auth-store-error", outcome.Operational, outcome.None},
-		{"authenticate", "frontdoor/startup-connection-unavailable", outcome.Operational, outcome.None},
-		{"authenticate", "frontdoor/startup-connection-unusable", outcome.Operational, outcome.None},
-		{"authenticate", "frontdoor/bad-credential", outcome.Refusal, outcome.Credential},
-		{"authenticate", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
-		{"authenticate", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},
-		{"authenticate", "frontdoor/lease-cap-exceeded", outcome.Refusal, outcome.Capacity},
 		// The four answers the admission line can give. Three of them follow a
 		// wait; all-capacity-in-transaction is deliberately the opposite --
 		// it is decided BEFORE the request joins the line, because nothing is
 		// going to be released and waiting would end in the same answer. None
 		// is charged: the caller presented nothing wrong, and charging them
 		// would ban a developer for their patience.
-		{"authenticate", "frontdoor/queue-timeout", outcome.Refusal, outcome.Capacity},
-		{"authenticate", "frontdoor/all-capacity-in-transaction", outcome.Refusal, outcome.Capacity},
-		{"authenticate", "frontdoor/target-removed-while-waiting", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/queue-timeout", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/all-capacity-in-transaction", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/target-removed-while-waiting", outcome.Refusal, outcome.Capacity},
 		// A connection being moved to another pool or downgraded, and a pin
 		// that waited out its pool's front-door share: capacity, never charged.
-		{"authenticate", "frontdoor/connection-changing", outcome.Refusal, outcome.Capacity},
-		{"authenticate", "frontdoor/target-budget-exhausted", outcome.Refusal, outcome.Capacity},
-		{"authenticate", "frontdoor/instance-shutting-down", outcome.Refusal, outcome.Capacity},
-		{"authenticate", "frontdoor/lease-encoding", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/connection-changing", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/target-budget-exhausted", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/instance-shutting-down", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/lease-encoding", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/no-grant", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/no-such-database", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/pre-auth-protocol-violation", outcome.Refusal, outcome.Protocol},
+		{"admit", "frontdoor/profile-not-front-door", outcome.Refusal, outcome.None},
+		{"admit", "frontdoor/resident-budget-exceeded", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/session-cap-exceeded", outcome.Refusal, outcome.Capacity},
+		{"admit", "frontdoor/startup-guc-refused", outcome.Refusal, outcome.None},
+		// The credential phase: the read, the worker, the store and the engine's
+		// authorization denials. No capacity, pin or startup identity: nothing
+		// waits or pins before the credential phase has ended.
+		{"authenticate", "auth-read-failed", outcome.Operational, outcome.Protocol},
+		{"authenticate", "auth-setup-failed", outcome.Operational, outcome.None},
+		{"authenticate", "auth-worker-unavailable", outcome.Operational, outcome.None},
+		{"authenticate", "frontdoor/auth-not-yet-available", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/auth-store-error", outcome.Operational, outcome.None},
+		{"authenticate", "frontdoor/bad-credential", outcome.Refusal, outcome.Credential},
+		{"authenticate", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
+		{"authenticate", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},
 		{"authenticate", "frontdoor/no-grant", outcome.Refusal, outcome.None},
 		{"authenticate", "frontdoor/no-such-database", outcome.Refusal, outcome.None},
 		{"authenticate", "frontdoor/pat-allowed-ips", outcome.Refusal, outcome.Credential},
@@ -811,9 +847,6 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"authenticate", "frontdoor/pat-unscoped", outcome.Refusal, outcome.None},
 		{"authenticate", "frontdoor/pre-auth-protocol-violation", outcome.Refusal, outcome.Protocol},
 		{"authenticate", "frontdoor/profile-not-front-door", outcome.Refusal, outcome.None},
-		{"authenticate", "frontdoor/resident-budget-exceeded", outcome.Refusal, outcome.Capacity},
-		{"authenticate", "frontdoor/session-cap-exceeded", outcome.Refusal, outcome.Capacity},
-		{"authenticate", "frontdoor/startup-guc-refused", outcome.Refusal, outcome.None},
 		{"authenticate", "frontdoor/startup-user-mismatch", outcome.Refusal, outcome.Credential},
 		{"cancel", "fd.cancel_applied", outcome.Control, outcome.None},
 		{"cancel", "fd.cancel_received", outcome.Control, outcome.None},
@@ -1060,7 +1093,7 @@ func TestCharging_TheRegisteredClassIsTheOnlyAuthority(t *testing.T) {
 			"ours, before the peer did anything at all"},
 		{"the store would not answer", PhaseAuthenticate, string(reasonAuthStoreError), false,
 			"throttling a peer for our own outage turns one incident into two"},
-		{"the pool is full", PhaseAuthenticate, exec.DenyLeaseCap, false,
+		{"the pool is full", PhaseAdmit, exec.DenyLeaseCap, false,
 			"CAPACITY IS NOT A CREDENTIAL FAILURE -- charging it is what banned a developer"},
 		{"a missing grant", PhaseAuthenticate, exec.DenyNoGrant, false,
 			"our stored state, met by a caller who has already proved who they are"},

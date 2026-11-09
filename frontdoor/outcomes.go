@@ -356,27 +356,31 @@ func Outcomes() []outcome.Registration {
 }
 
 // authenticateOutcomes is what the credential phase can end on, and
-// admitOutcomes what the admission phase can. Both call the engine, so both
-// declare the engine's identities, and both share engineSideOutcomes: the
-// startup and store endings that reach the wire from whichever phase's engine
-// call raised them.
+// admitOutcomes what the admission phase can: each EXACTLY what its own code and
+// its engine call can reach, so the runner refuses a phase that ends on another
+// phase's outcome as the wiring mistake it is (ADR 0189 decision 3).
 //
-// credential-phase only: the read, the worker, the setup and the missing store.
-// admission-phase only: a client that left while waiting.
+// credential phase only: the read, the worker, the setup, the missing store,
+// and the engine's authorization denials (exec.AuthorizeDenials).
+// admission phase only: a client that left while waiting, the startup failures
+// of the pin, and the engine's admission denials (exec.AdmitDenials).
 // both: the protocol violation (the pre-auth type check; input sent while the
-// login waited) and the engine's own registration.
+// login waited), the store outage, and the connection checks finalization
+// re-runs after the wait (the overlap of the engine's two sets).
 //
 // IT DECLARES THE ENGINE'S IDENTITIES AS WELL AS ITS OWN, and that is the case
 // that forced membership onto the producer rather than onto the reason. The
-// engine RAISES a capacity refusal; this phase is where it reaches the wire,
-// so this phase can end on it and must say so. An earlier shape put a single
-// phase on the reason, which makes one of the two lie about who it belongs to.
+// engine RAISES a capacity refusal; the admission phase is where it reaches the
+// wire, so that phase can end on it and must say so. An earlier shape put a
+// single phase on the reason, which makes one of the two lie about who it
+// belongs to.
 //
-// The engine's half is DERIVED from the engine's own registration rather than
-// restated here. A second list would fall behind the first, and the way it
-// would fail is the worst available: a refusal the engine raises and this
-// phase has not declared is refused by the runner as a programming error --
-// during an incident, on the path that was already refusing somebody.
+// The engine's half is DERIVED from the engine's own registration, filtered by
+// the engine's own per-half sets, rather than restated here. A second list would
+// fall behind the first, and the way it would fail is the worst available: a
+// refusal the engine raises and the phase has not declared is refused by the
+// runner as a programming error -- during an incident, on the path that was
+// already refusing somebody.
 func authenticateOutcomes(
 	refusal func(denialReason, outcome.Charge) outcome.Decl,
 	operational func(denialReason) outcome.Decl,
@@ -396,8 +400,9 @@ func authenticateOutcomes(
 		// This is the credential exchange being spoken wrongly, which is the
 		// same kind of thing as grinding it.
 		refusal(reasonPreAuthProtocolViolation, outcome.Protocol),
+		storeOutcome(),
 	}
-	return append(append(out, engineSideOutcomes()...), exec.Registration().Outcomes...)
+	return append(out, engineDenials(exec.AuthorizeDenials())...)
 }
 
 func admitOutcomes(refusal func(denialReason, outcome.Charge) outcome.Decl) []outcome.Decl {
@@ -407,35 +412,53 @@ func admitOutcomes(refusal func(denialReason, outcome.Charge) outcome.Decl) []ou
 		// wrongly, whether its frame arrived with the password or during the wait.
 		refusal(reasonPreAuthProtocolViolation, outcome.Protocol),
 		{ID: OutcomeAdmitPeerGone, Kind: outcome.Operational, Charge: outcome.None},
+		storeOutcome(),
 	}
-	return append(append(out, engineSideOutcomes()...), exec.Registration().Outcomes...)
+	out = append(out, startupOutcomes()...)
+	return append(out, engineDenials(exec.AdmitDenials())...)
 }
 
-// engineSideOutcomes are the endings an engine call can produce that are not
-// the engine's own denials: a store that would not answer, and a target that is
-// unavailable or unusable. Either phase that calls the engine can end on them.
-func engineSideOutcomes() []outcome.Decl {
+// engineDenials is the engine's registration, kept to the given reasons: the
+// kind and charge stay the engine's own.
+func engineDenials(reasons []string) []outcome.Decl {
+	want := map[outcome.ReasonID]bool{}
+	for _, r := range reasons {
+		want[outcome.ReasonID(r)] = true
+	}
+	var out []outcome.Decl
+	for _, d := range exec.Registration().Outcomes {
+		if want[d.ID] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// storeOutcome is the store outage: either phase's engine call reads the store.
+//
+// OURS: the store would not answer. A peer holding a perfectly good token meets
+// it through no fault of their own, so it is not charged.
+//
+// THE STORE OUTAGE IS OPERATIONAL, and it still writes a frame. It was briefly a
+// refusal on the grounds that it renders one, which conflated three separate
+// questions. It is error-driven (kind), ours (charge), and owed the uniform
+// denial (wire) -- and the wire is carried on the outcome, so it need not
+// distort the kind to get one.
+func storeOutcome() outcome.Decl {
+	return outcome.Decl{ID: outcome.ReasonID(reasonAuthStoreError), Kind: outcome.Operational, Charge: outcome.None}
+}
+
+// startupOutcomes are the pin's failures: a locked secret store, a connection
+// this install cannot serve, a target that did not open in time, and a
+// finalization past its budget. Only admission pins, so only it can end on them.
+//
+// OURS TOO, AND ARRIVING HERE FOR A REASON THIS PACKAGE GOT WRONG ONCE. They were
+// folded into the store-outage identity and answered with the uniform
+// credential denial, which told a developer holding a good token that their
+// CREDENTIAL was wrong -- the exact shape of the lockout this work exists to
+// fix. Neither is charged: the peer did nothing.
+func startupOutcomes() []outcome.Decl {
 	return []outcome.Decl{
-		// OURS: the store would not answer, or there is no credential store
-		// behind this listener yet. A peer holding a perfectly good token
-		// meets these through no fault of their own, so neither is charged.
-		//
-		// THE STORE OUTAGE IS OPERATIONAL, and it still writes a frame.
-		//
-		// It was briefly a refusal on the grounds that it renders one, which
-		// conflated three separate questions. It is error-driven (kind), ours
-		// (charge), and owed the uniform denial (wire) -- and the wire is
-		// carried on the outcome, so it need not distort the kind to get one.
-		{ID: outcome.ReasonID(reasonAuthStoreError), Kind: outcome.Operational, Charge: outcome.None},
-		// OURS TOO, AND ARRIVING HERE FOR A REASON THIS PACKAGE GOT WRONG
-		// ONCE. A PostgreSQL-wire session pins its backend inside
-		// OpenWireSessionWith, before the client sees ReadyForQuery, so a
-		// locked store and a connection this install cannot serve both
-		// surface DURING the credential phase. They were being folded into
-		// the store-outage identity and answered with the uniform credential
-		// denial, which told a developer holding a good token that their
-		// CREDENTIAL was wrong -- the exact shape of the lockout this work
-		// exists to fix. Neither is charged: the peer did nothing.
 		{ID: outcomeID(OutcomeStartupConnectionUnavailable), Kind: outcome.Operational, Charge: outcome.None},
 		{ID: outcomeID(OutcomeStartupConnectionUnusable), Kind: outcome.Operational, Charge: outcome.None},
 	}

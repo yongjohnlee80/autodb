@@ -147,6 +147,10 @@ type Listener struct {
 	// returns, with the bytes it read, so the cell knows the watch saw it.
 	testAfterAdmit func()
 	testWatchRead  func(n int)
+	// testPasswordDelivered reports how many bytes the password read handed to
+	// pgproto3: a cell proves the credential boundary by that count, since the
+	// admission phase refuses coalesced input with or without it.
+	testPasswordDelivered func(n int)
 
 	// testSegmentMsgs and testSegmentBytes lower the extended segment's caps so a
 	// cell can reach them without sending 96 MiB.
@@ -327,9 +331,10 @@ type Options struct {
 
 	// testReaderReady publishes the per-session reader to a cell.
 	testReaderReady func(*frameReader)
-	// testAfterAdmit and testWatchRead: see Options.
-	testAfterAdmit func()
-	testWatchRead  func(n int)
+	// testAfterAdmit, testWatchRead and testPasswordDelivered: see Options.
+	testAfterAdmit        func()
+	testWatchRead         func(n int)
+	testPasswordDelivered func(n int)
 
 	// testLifecycleReady publishes each connection's lifecycle to a cell, so
 	// the phases it ran can be asserted.
@@ -511,6 +516,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.testOutputCap = opt.testOutputCap
 	l.testReaderReady = opt.testReaderReady
 	l.testAfterAdmit, l.testWatchRead = opt.testAfterAdmit, opt.testWatchRead
+	l.testPasswordDelivered = opt.testPasswordDelivered
 	l.testLifecycleReady = opt.testLifecycleReady
 	l.testHandshakeFail = opt.testHandshakeFail
 	l.testBeforeDeadlineArm = opt.testBeforeDeadlineArm

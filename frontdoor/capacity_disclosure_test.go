@@ -60,12 +60,12 @@ func TestCapacityDisclosure_TheTruthTable(t *testing.T) {
 		why     string
 	}{
 		{
-			"authorized capacity", PhaseAuthenticate, exec.DenyLeaseCap,
+			"authorized capacity", PhaseAdmit, exec.DenyLeaseCap,
 			outcome.Capacity, true, CapacitySQLState,
 			"the one case that may disclose: the caller proved who they are and the system was full",
 		},
 		{
-			"unwitnessed capacity", PhaseAuthenticate, exec.DenyLeaseCap,
+			"unwitnessed capacity", PhaseAdmit, exec.DenyLeaseCap,
 			outcome.Capacity, false, DenialSQLState,
 			"a capacity oracle for a peer who has proved nothing is what the uniform denial exists to prevent",
 		},
@@ -125,7 +125,7 @@ func TestCapacityDisclosure_TheTruthTable(t *testing.T) {
 func TestCapacityDisclosure_TheDisclosedMessageCarriesNoCause(t *testing.T) {
 	t.Parallel()
 	for _, reason := range []string{exec.DenyLeaseCap, exec.DenySessionCap, exec.DenyResidentBudget} {
-		occ := occurrenceFor(t, PhaseAuthenticate, reason, true)
+		occ := occurrenceFor(t, PhaseAdmit, reason, true)
 		frame := denialForOccurrence(occ)
 		if frame.Code != CapacitySQLState {
 			t.Fatalf("%s: code = %q, want the capacity state", reason, frame.Code)

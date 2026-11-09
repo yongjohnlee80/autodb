@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -999,14 +1000,28 @@ func (b *blockingCloseAuth) CloseWireSession(context.Context, exec.SessionID, in
 }
 
 // authorizeByOpening adapts a test double whose OpenWireSessionWith decides the
-// whole open. It runs that decision at authorization time, so a denial lands in
-// the credential phase as the real engine's authorization denials do, and a
-// success is admitted, already decided, in the admission phase.
+// whole open. It runs that decision at authorization time and hands each ending
+// to the phase where the real engine raises it: an authorization denial or a
+// store failure from AuthorizeWire (the credential phase), and everything else
+// -- a capacity or pin refusal, a startup failure, a success -- from Admit (the
+// admission phase).
 func authorizeByOpening(ctx context.Context, req exec.WireOpen,
 	open func(context.Context, exec.WireOpen) (exec.WireSessionResult, error)) (*exec.WireAuthorization, error) {
 	res, err := open(ctx, req)
-	if err != nil {
+	if err != nil && raisedByAuthorization(err) {
 		return nil, err
 	}
-	return exec.PreAdmitted(func(context.Context) (exec.WireSessionResult, error) { return res, nil }), nil
+	return exec.PreAdmitted(func(context.Context) (exec.WireSessionResult, error) { return res, err }), nil
+}
+
+// raisedByAuthorization reports whether the real engine raises err in
+// AuthorizeWire rather than in Admit.
+func raisedByAuthorization(err error) bool {
+	if reason := exec.DenialReason(err); reason != "" {
+		return slices.Contains(exec.AuthorizeDenials(), reason)
+	}
+	if id, _ := startupFailure(err); id != "" {
+		return false // only admission pins
+	}
+	return true // a store failure: authorization reads the store first
 }

@@ -49,9 +49,13 @@ func TestOutcomes_TheWholeSystemComposes(t *testing.T) {
 }
 
 // THE ENGINE RAISES A CAPACITY REFUSAL AND THE FRONT DOOR RENDERS IT, so the
-// shared identities really do have two producers -- this is the case that
-// forced membership onto the producer rather than onto the reason, and it is
-// worth pinning that it is reachable rather than hypothetical.
+// shared identities really do have more than one producer -- this is the case
+// that forced membership onto the producer rather than onto the reason, and it
+// is worth pinning that it is reachable rather than hypothetical.
+//
+// EXACTLY: the engine, plus each front-door phase whose engine call raises the
+// identity -- authenticate for AuthorizeWire's denials, admit for Admit's, and
+// both for the connection checks finalization re-runs after the wait.
 func TestOutcomes_TheEngineAndTheDoorAgreeOnWhatTheyShare(t *testing.T) {
 	t.Parallel()
 	reg, err := composeOutcomes()
@@ -75,10 +79,18 @@ func TestOutcomes_TheEngineAndTheDoorAgreeOnWhatTheyShare(t *testing.T) {
 	// fact about the current code, not a rule -- so this records it, and the
 	// day an identity is genuinely shared the registry will accept it while
 	// this line makes somebody look.
+	phases := map[outcome.ReasonID]int{}
+	for _, r := range coreexec.AuthorizeDenials() {
+		phases[outcome.ReasonID(r)]++
+	}
+	for _, r := range coreexec.AdmitDenials() {
+		phases[outcome.ReasonID(r)]++
+	}
 	for id := range engineIDs {
 		if doorIDs[id] {
-			if got := len(reg.Producers(id)); got != 2 {
-				t.Errorf("%q is declared by both packages but has %d producer(s)", id, got)
+			if got, want := len(reg.Producers(id)), 1+phases[id]; got != want {
+				t.Errorf("%q is declared by both packages with %d producer(s), want %d: the engine "+
+					"and the %d front-door phase(s) that raise it", id, got, want, phases[id])
 			}
 		}
 	}

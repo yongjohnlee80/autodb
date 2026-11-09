@@ -412,8 +412,25 @@ func TestHarness_TheApprovedDriversStayTestOnly(t *testing.T) {
 // a few times and gives up, so a burst turns into failed requests while the
 // pool still had capacity coming back.
 func TestHarness_ABurstPastTheShareWaitsAndEveryRequestRuns(t *testing.T) {
-	l := pgLoopFull(t)
-	const poolMax, burst = 10, 30
+	// Held long enough that the share is full while the rest arrive.
+	libpqBurst(t, pgLoopFull(t), 10, 30, "SELECT 1 FROM pg_sleep(0.2)", 20*time.Second)
+}
+
+// A BURST WHOSE REQUESTS OUTLAST THE OLD SIX-SECOND WAIT STILL RUNS EVERY
+// REQUEST. The same client shape, but each request holds its connection for
+// 7 s. A pool of 10 has a front-door share of 5, so 15 requests run in three
+// waves and the last wave waits about 14 s in line: past the ~6 s a login had
+// when its wait ran inside the credential exchange, and well inside QueueWait.
+func TestHarness_ABurstWhoseRequestsOutlastTheOldWaitAllRun(t *testing.T) {
+	libpqBurst(t, pgLoopFull(t), 10, 15, "SELECT 1 FROM pg_sleep(7)", 60*time.Second)
+}
+
+// libpqBurst sends burst concurrent requests through LM's own client shape --
+// database/sql over lib/pq, open connections uncapped and two kept idle --
+// against the default pool shrunk to poolMax, and fails, with the listener's own
+// record of each ending, if any request fails within the bound.
+func libpqBurst(t *testing.T, l pgLoopHandles, poolMax, burst int, query string, within time.Duration) {
+	t.Helper()
 	if err := l.eng.UpdatePool(opCtx(t), l.rootTok, meta.DefaultPoolID, poolMax, "127.0.0.1"); err != nil {
 		t.Fatalf("shrinking the default pool to %d: %v", poolMax, err)
 	}
@@ -431,16 +448,16 @@ func TestHarness_ABurstPastTheShareWaitsAndEveryRequestRuns(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	db.SetMaxIdleConns(2) // LM's PG_MAX_IDLE_CONNS default; open is uncapped
 
-	ctx := opCtx(t)
+	ctx, cancel := context.WithTimeout(context.Background(), within)
+	defer cancel()
 	var wg sync.WaitGroup
 	errs := make(chan error, burst)
 	for i := 0; i < burst; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Held long enough that the share is full while the rest arrive.
 			var n int
-			if err := db.QueryRowContext(ctx, "SELECT 1 FROM pg_sleep(0.2)").Scan(&n); err != nil {
+			if err := db.QueryRowContext(ctx, query).Scan(&n); err != nil {
 				errs <- err
 			}
 		}()
