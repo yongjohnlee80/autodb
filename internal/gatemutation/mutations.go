@@ -1454,19 +1454,66 @@ func All() []Mutation {
 		},
 		{
 			Name: "the-credential-boundary-admits-only-the-password", Package: "./frontdoor/", File: "frontdoor/auth.go",
-			Anchor:      "\t\tif fr.waitHeader() {\n\t\t\tif h, ok := fr.peekHeader(); ok {\n\t\t\t\tfr.allow(h)\n\t\t\t}\n\t\t}\n",
-			Replacement: "",
+			// The ADR's control: the password read unbounded, so pgproto3 reads
+			// ahead into whatever was coalesced with it.
+			Anchor:      "\t\tfr.setBounded(true)\n\t\tif fr.waitHeader() {\n",
+			Replacement: "\t\tif fr.waitHeader() {\n",
 			Test:        "TestAdmitFD_InputSentBeforeTheLoginMaySpeakIsRefused",
-			Fails:       "sent input with its password",
+			Fails:       "reached pgproto3's own buffer",
 			Guarantee:   "that input coalesced with the password never reaches pgproto3 unseen",
 		},
 		{
 			Name: "the-watch-clears-the-credential-deadline", Package: "./frontdoor/", File: "frontdoor/admit.go",
-			Anchor:      "\tif err := conn.SetDeadline(time.Time{}); err != nil {\n",
-			Replacement: "\tif err := error(nil); err != nil {\n",
+			Anchor: "\tif err := conn.SetDeadline(time.Time{}); err != nil {\n",
+			// The time import stays used, so the mutant builds.
+			Replacement: "\t_ = time.Time{} // the credential deadline stays armed\n\tif err := error(nil); err != nil {\n",
 			Test:        "TestAdmitFD_AnAnswerAfterTheWaitIsWritten",
 			Fails:       "want 57P03",
 			Guarantee:   "that the credential deadline does not end a login's wait or swallow its answer",
+		},
+		{
+			Name: "the-wait-is-not-bounded-by-the-credential-deadline", Package: "./frontdoor/", File: "frontdoor/admit.go",
+			// The old bound restored: the wait runs under the credential deadline,
+			// so the engine leaves it about 6 s.
+			Anchor:      "\tres, aerr := authz.Admit(w.ctx)\n",
+			Replacement: "\tres, aerr := func() (exec.WireSessionResult, error) {\n\t\tc, cancel := context.WithTimeout(w.ctx, l.dl.auth)\n\t\tdefer cancel()\n\t\treturn authz.Admit(c)\n\t}()\n",
+			Test:        "TestAdmitFD_ALoginOutwaitsTheOldSixSeconds",
+			Fails:       "must outlast the credential phase",
+			Guarantee:   "that a front-door login's wait for its pool is not bounded by the credential deadline",
+		},
+		{
+			Name: "a-burst-outlasting-the-old-wait-completes", Package: "./frontdoor/", File: "frontdoor/admit.go",
+			Anchor:      "\tres, aerr := authz.Admit(w.ctx)\n",
+			Replacement: "\tres, aerr := func() (exec.WireSessionResult, error) {\n\t\tc, cancel := context.WithTimeout(w.ctx, l.dl.auth)\n\t\tdefer cancel()\n\t\treturn authz.Admit(c)\n\t}()\n",
+			Test:        "TestHarness_ABurstWhoseRequestsOutlastTheOldWaitAllRun",
+			Fails:       "requests failed past a front-door share",
+			Guarantee:   "that LM's lib/pq burst completes when its requests outlast the old six-second wait",
+		},
+		{
+			Name: "a-departed-client-leaves-the-line", Package: "./frontdoor/", File: "frontdoor/admit.go",
+			// The watch still sees the close, but the wait no longer listens to it.
+			Anchor:      "\tres, aerr := authz.Admit(w.ctx)\n",
+			Replacement: "\tres, aerr := authz.Admit(context.Background())\n",
+			Test:        "TestAdmitFD_AClientThatLeavesWhileQueuedLeavesTheLine",
+			Fails:       "stayed in line",
+			Guarantee:   "that a client hanging up while queued takes its login out of the line at once",
+		},
+		{
+			Name: "each-login-phase-declares-only-what-it-reaches", Package: "./frontdoor/", File: "frontdoor/outcomes.go",
+			// The whole union back under the credential phase.
+			Anchor:      "\treturn append(out, engineDenials(exec.AuthorizeDenials())...)\n",
+			Replacement: "\treturn append(append(out, startupOutcomes()...), exec.Registration().Outcomes...)\n",
+			Test:        "TestOutcomes_TheRegistryMatchesItsManifestExactly",
+			Fails:       "registered and not in the manifest",
+			Guarantee:   "that the credential phase cannot end on an admission outcome it does not reach",
+		},
+		{
+			Name: "the-engine-sets-match-their-raise-sites", Package: "./core/exec/", File: "core/exec/wire_session.go",
+			Anchor:      "\t\t// The pinned backend.\n\t\tDenyLeaseEncoding, DenyStartupGUC,\n",
+			Replacement: "\t\t// The pinned backend.\n\t\tDenyLeaseEncoding,\n",
+			Test:        "TestWireDenials_EachHalfDeclaresExactlyWhatItRaises",
+			Fails:       "AdmitDenials declares",
+			Guarantee:   "that each half's declared denials are exactly the ones its code raises",
 		},
 		{
 			Name: "the-watch-result-decides-the-handoff", Package: "./frontdoor/", File: "frontdoor/admit.go",
@@ -1486,8 +1533,9 @@ func All() []Mutation {
 		},
 		{
 			Name: "a-waiting-login-holds-no-auth-worker", Package: "./frontdoor/", File: "frontdoor/auth.go",
-			Anchor:      "\t\tStartupGUCs: gucs,\n\t})\n\trelease()\n",
-			Replacement: "\t\tStartupGUCs: gucs,\n\t})\n",
+			Anchor: "\t\tStartupGUCs: gucs,\n\t})\n\trelease()\n",
+			// release stays used, so the mutant builds; the worker is never given back.
+			Replacement: "\t\tStartupGUCs: gucs,\n\t})\n\t_ = release\n",
 			Test:        "TestAdmitFD_AWaitingLoginHoldsNoAuthWorker",
 			Fails:       "still holding the worker",
 			Guarantee:   "that a login waiting for its pool does not hold a credential worker",
