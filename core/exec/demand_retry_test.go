@@ -556,6 +556,22 @@ func TestDemandRetry_OneSweepServesEveryWaiterWhoseHolderPassedItsGrace(t *testi
 		t.Errorf("a third holder (%s) was asked to leave though only two logins were waiting", id)
 	default:
 	}
+	// Asking again while the two are still closing changes nothing: they are
+	// not askable, and their promises stand.
+	e.reapExpired(context.Background(), now())
+	if n := r.promisedCount(connKey(7)); n != 2 {
+		t.Errorf("a second sweep left %d reclamations promised, want the same 2", n)
+	}
+	select {
+	case id := <-knocks:
+		t.Errorf("a second sweep asked %s to leave though both waiting logins are answered", id)
+	default:
+	}
+	for _, h := range holders {
+		if h.id != victims[0] && h.id != victims[1] && h.get() != sessOpen {
+			t.Errorf("the holder nobody needed (%s) is no longer open", h.id)
+		}
+	}
 
 	for _, h := range holders {
 		for _, v := range victims {
