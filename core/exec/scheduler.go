@@ -273,6 +273,9 @@ func (r *sessionRegistry) giveUp(w *admitWaiter, own error) error {
 		h()
 	}
 	if r.leaveLine(w) {
+		if h := r.hookWaiterLeft; h != nil {
+			h(r.lineDepth())
+		}
 		return own // still queued, so nothing was ever taken
 	}
 	// The line resolved it first. Take that outcome and undo it if it was an
