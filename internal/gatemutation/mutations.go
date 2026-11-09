@@ -1386,6 +1386,14 @@ func All() []Mutation {
 			Guarantee:   "that no more sessions are ended than logins are waiting",
 		},
 		{
+			Name: "a-closing-holder-arms-no-ask", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
+			Anchor:      "\treturn s.get() == sessOpen && s.wire && ",
+			Replacement: "\treturn s.wire && ",
+			Test:        "TestDemandReclaim_AClosingHolderArmsNoAsk",
+			Fails:       "a closing holder alone armed an ask",
+			Guarantee:   "that a holder already closing never arms an ask due now, again and again",
+		},
+		{
 			Name: "a-session-is-promised-once", Package: "./core/exec/", File: "core/exec/demand_reclaim.go",
 			Anchor:      "\tif _, ok := r.demandPromised[key][id]; ok {\n\t\treturn false\n\t}\n",
 			Replacement: "",

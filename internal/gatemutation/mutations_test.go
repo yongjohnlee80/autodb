@@ -281,6 +281,7 @@ func expectedControls() map[string][3]string {
 		"a-reclaimed-client-is-told-within-the-goodbye-budget":    {"frontdoor/demand_wake.go", "./frontdoor/", "TestDrivenDemand_AClientThatStopsReadingReleasesWithinTheGoodbyeBudget"},
 		"a-closing-holder-is-not-asked-again":                     {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_AHolderAlreadyClosingIsNotAskedAgain"},
 		"a-session-is-promised-once":                              {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_ASessionIsPromisedOnce"},
+		"a-closing-holder-arms-no-ask":                            {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_AClosingHolderArmsNoAsk"},
 		"release-serves-the-line":                                 {"core/exec/session.go", "./core/exec/", "TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting"},
 		"expired-wait-names-its-blocker":                          {"core/exec/wire_session.go", "./core/exec/", "TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal"},
 		"the-wait-arm-comes-first":                                {"core/exec/wire_session.go", "./core/exec/", "TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn"},

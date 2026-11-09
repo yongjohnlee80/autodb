@@ -890,3 +890,34 @@ func TestDemandReclaim_ASessionIsPromisedOnce(t *testing.T) {
 		t.Errorf("%d promises recorded, want 1", n)
 	}
 }
+
+// A CLOSING HOLDER ARMS NO ASK. Its grace ended long ago, so counting it would
+// arm an ask due now, which would fire, find it still closing, and arm again
+// for as long as its goodbye is in flight. Only an open holder's grace counts.
+func TestDemandReclaim_AClosingHolderArmsNoAsk(t *testing.T) {
+	now := time.Now()
+	closing := demandHolder("closing-for-another-login", 1, 7, now.Add(-time.Hour))
+	r := demandRegistry(t, closing)
+	closing.mu.Lock()
+	reserved := closing.beginCloseLocked("", ReasonDemandReclaimed)
+	closing.mu.Unlock()
+	if !reserved {
+		t.Fatal("could not put the holder into closing, so this cell cannot reach its state")
+	}
+	if at, ok := r.nextReclaimable(connKey(7)); ok {
+		t.Fatalf("a closing holder alone armed an ask for %v (%v ago)", at, now.Sub(at))
+	}
+
+	inGrace := demandHolder("quiet-a-moment", 2, 7, now.Add(-time.Second))
+	r.mu.Lock()
+	r.byID[inGrace.id] = inGrace
+	inGrace.reservation = reservation{LeaseConn: 7, Key: connKey(7)}
+	r.mu.Unlock()
+	at, ok := r.nextReclaimable(connKey(7))
+	if !ok {
+		t.Fatal("an open holder inside its grace armed no ask")
+	}
+	if want := inGrace.lastUsed.Add(timeouts.ReclaimGrace); !at.Equal(want) {
+		t.Errorf("the ask is due at %v, want %v: the open holder's grace, not the closing one's", at, want)
+	}
+}
