@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // WHAT THESE CELLS ARE FOR: everything else about demand reclamation is proved
@@ -605,6 +606,35 @@ func TestDrivenDemand_AnUndeclaredOutcomeStillReleasesTheLease(t *testing.T) {
 	}
 	if faults != 1 {
 		t.Errorf("recorded %d internal faults, want exactly 1 naming the undeclared outcome", faults)
+	}
+	wait()
+}
+
+// A CLIENT THAT HAS STOPPED READING RELEASES ITS LEASE WITHIN THE GOODBYE BUDGET.
+//
+// A login is waiting for this lease, inside a wait of about six seconds. The
+// goodbye frame's write is bounded by GoodbyeWrite; bounded by the output stall
+// instead, a client that does not read would hold the lease for thirty seconds
+// and the login it was freed for would be refused.
+func TestDrivenDemand_AClientThatStopsReadingReleasesWithinTheGoodbyeBudget(t *testing.T) {
+	_, d, _, wait := drivenSession(t, newDemandEngine())
+	awaitOffer(t, d)
+
+	// Nothing reads the client end of the pipe, so the frame cannot be written.
+	start := time.Now()
+	d.reclaim(time.Hour)
+	select {
+	case delivery := <-d.finished:
+		if elapsed := time.Since(start); elapsed > timeouts.GoodbyeWrite+time.Second {
+			t.Errorf("the lease came back %s after the reclamation, past the goodbye budget "+
+				"(%v); the waiting login has about six seconds", elapsed, timeouts.GoodbyeWrite)
+		}
+		if delivery != exec.DemandFlushFailed {
+			t.Errorf("the record says %q, though the client never read the frame", delivery)
+		}
+	case <-time.After(timeouts.GoodbyeWrite + 5*time.Second):
+		t.Fatal("the lease did not come back within the goodbye budget; a client that has " +
+			"stopped reading holds it for as long as an ordinary result write may stall")
 	}
 	wait()
 }

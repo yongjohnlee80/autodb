@@ -20,6 +20,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/timeouts"
 )
 
 // THE CONFORMANCE HARNESS (matrix §10): the listener on a
@@ -459,6 +460,77 @@ func TestHarness_ABurstPastTheShareWaitsAndEveryRequestRuns(t *testing.T) {
 		}
 		t.Fatalf("%d of %d requests failed past a front-door share of pool %d; first: %v; listener events: %v",
 			len(failed), burst, poolMax, failed[:min(3, len(failed))], tally)
+	}
+}
+
+// A LOGIN QUEUED BEHIND A QUIET HOLDER IS SERVED WHEN THE HOLDER'S GRACE ENDS,
+// through the front door's own login deadline (about six seconds of waiting).
+//
+// A pool of 3 has a front-door share of 1, so one quiet holder fills it. The
+// second login must wait out the holder's grace, not end it early, and still be
+// served inside its wait. Then a third login arrives while the second has not
+// yet sent anything: the second's silence started when it opened, not when it
+// joined the line, so it is not the third's victim before its first statement.
+func TestHarness_ALoginQueuedBehindAQuietHolderIsServedWhenItsGraceEnds(t *testing.T) {
+	l := pgLoopFull(t)
+	if err := l.eng.UpdatePool(opCtx(t), l.rootTok, meta.DefaultPoolID, 3, "127.0.0.1"); err != nil {
+		t.Fatalf("shrinking the default pool to 3: %v", err)
+	}
+	host, port, ok := strings.Cut(l.addr, ":")
+	if !ok {
+		t.Fatalf("listener address %q is not host:port", l.addr)
+	}
+	connect := func(ctx context.Context) (*pgconn.PgConn, error) {
+		cfg, err := pgconn.ParseConfig(fmt.Sprintf("postgres://root:%s@%s:%s/%s?sslmode=require",
+			l.secret, host, port, l.database))
+		if err != nil {
+			return nil, err
+		}
+		cfg.TLSConfig.InsecureSkipVerify = true // the cell's own self-signed listener
+		return pgconn.ConnectConfig(ctx, cfg)
+	}
+	selectOne := func(ctx context.Context, c *pgconn.PgConn) error {
+		_, err := c.Exec(ctx, "SELECT 1").ReadAll()
+		return err
+	}
+
+	holder, err := connect(opCtx(t))
+	if err != nil {
+		t.Fatalf("the first login: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Close(context.Background()) })
+	if err := selectOne(opCtx(t), holder); err != nil {
+		t.Fatalf("the holder's statement: %v", err)
+	}
+	quietSince := time.Now()
+
+	queued, err := connect(opCtx(t))
+	waited := time.Since(quietSince)
+	if err != nil {
+		t.Fatalf("a login queued behind a holder in its grace was refused after %v: %v", waited, err)
+	}
+	t.Cleanup(func() { _ = queued.Close(context.Background()) })
+	if waited < timeouts.ReclaimGrace-500*time.Millisecond {
+		t.Errorf("served after %v, before the holder's grace (%v) ended: the holder was ended "+
+			"while its client might still have used it", waited, timeouts.ReclaimGrace)
+	}
+
+	// A third login queues behind the one just served, before it has said anything.
+	third := make(chan *pgconn.PgConn, 1)
+	go func() {
+		c, _ := connect(opCtx(t))
+		third <- c
+	}()
+	t.Cleanup(func() {
+		if c := <-third; c != nil {
+			_ = c.Close(context.Background())
+		}
+	})
+	time.Sleep(500 * time.Millisecond) // not a timeout: lets the third login join the line and ask
+
+	if err := selectOne(opCtx(t), queued); err != nil {
+		t.Fatalf("the served login could not run its first statement: %v; a login that "+
+			"queued was ended for the next one before it had said anything", err)
 	}
 }
 

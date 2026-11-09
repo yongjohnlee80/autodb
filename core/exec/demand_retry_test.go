@@ -493,3 +493,85 @@ func TestDemandRetry_AWaitingLoginIsServedTheMomentAHolderPassesItsGrace(t *test
 		t.Fatal("the reclaimed lease never reached the login that was waiting for it")
 	}
 }
+
+// ONE SWEEP SERVES EVERY WAITER WHOSE HOLDER HAS PASSED ITS GRACE.
+//
+// Two logins queue while three holders are inside their grace. When the grace
+// ends, both must be answered by the same ask; a single reclamation per target
+// would leave the second waiting for an offer or a sweep that need not come
+// within its wait. And no more than two may be ended: the third holder is owed
+// nothing.
+func TestDemandRetry_OneSweepServesEveryWaiterWhoseHolderPassedItsGrace(t *testing.T) {
+	start := time.Now()
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()) }
+
+	holders := []*session{
+		demandHolder("holder-a", 1, 7, start.Add(-time.Second)),
+		demandHolder("holder-b", 2, 7, start.Add(-time.Second)),
+		demandHolder("holder-c", 3, 7, start.Add(-time.Second)),
+	}
+	e := New(nil, nil, WithNow(now))
+	e.sessions.pools = fixedLeases(len(holders))
+	knocks := make(chan SessionID, len(holders))
+	for _, h := range holders {
+		if err := e.sessions.admitWithLease(h, h.connID, 0); err != nil {
+			t.Fatalf("seeding %s: %v", h.id, err)
+		}
+		e.sessions.genSeq++
+		h.gen = e.sessions.genSeq
+		id := h.id
+		h.wake = func() { knocks <- id }
+	}
+	r := e.sessions
+	seen := queuedAt(r)
+	// No armed retry fires: the sweep alone must answer both waiters.
+	r.afterFunc = func(time.Duration, func()) func() bool { return func() bool { return true } }
+
+	served := make(chan error, 2)
+	for i, name := range []string{"first-waiter", "second-waiter"} {
+		w := schedSession(name, int64(10+i), 7)
+		go func() { served <- r.admitWithLeaseOrWait(context.Background(), w, 7, 0) }()
+		awaitSeq(t, seen)
+	}
+
+	clock.Store(start.Add(timeouts.ReclaimGrace).UnixNano())
+	e.reapExpired(context.Background(), now())
+
+	var victims []SessionID
+	for len(victims) < 2 {
+		select {
+		case id := <-knocks:
+			victims = append(victims, id)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("one sweep asked %d holders to leave, want 2: one per waiting login", len(victims))
+		}
+	}
+	if n := r.promisedCount(connKey(7)); n != 2 {
+		t.Errorf("%d reclamations promised, want 2: one per waiting login, no more", n)
+	}
+	select {
+	case id := <-knocks:
+		t.Errorf("a third holder (%s) was asked to leave though only two logins were waiting", id)
+	default:
+	}
+
+	for _, h := range holders {
+		for _, v := range victims {
+			if h.id == v {
+				r.remove(h)
+			}
+		}
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-served:
+			if err != nil {
+				t.Fatalf("a waiting login was not served by a reclaimed lease: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of 2 waiting logins were served", i)
+		}
+	}
+}

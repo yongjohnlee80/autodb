@@ -319,7 +319,7 @@ func (r *sessionRegistry) retryDemandAt(key leaseKey, at time.Time, d time.Durat
 			delete(r.demandRetry, key)
 		}
 		r.demandMu.Unlock()
-		r.pressDemand(key)
+		r.pressWhileAnswered(key)
 	})}
 }
 
@@ -710,7 +710,21 @@ func (r *sessionRegistry) pressOwedDemand() {
 	r.demandMu.Unlock()
 	// Outside demandMu: pressing selects a victim and knocks on a socket.
 	for _, key := range owed {
-		r.pressDemand(key)
+		r.pressWhileAnswered(key)
+	}
+}
+
+// pressWhileAnswered asks on this target until no request is still owed a
+// reclamation or nobody can answer one.
+//
+// ONE ASK PER WAITER, NOT ONE PER TARGET. Several logins can queue while every
+// holder is inside its grace; when the grace ends, one ask would serve one of
+// them, and the rest would wait for an event that may not come in their wait.
+// Each ask spends one demand unit atomically (tryPromiseDemand), so this stops
+// at the number of waiters and can't end more sessions than are owed.
+func (r *sessionRegistry) pressWhileAnswered(key leaseKey) {
+	for r.pressDemand(key) {
+		// Each pass reserved one holder and spent one demand unit.
 	}
 }
 

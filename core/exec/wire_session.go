@@ -755,6 +755,13 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		cancel()
 		return out, deny(DenyStartupGUC)
 	}
+	// THE SESSION'S SILENCE STARTS NOW, when its client can first use it. It
+	// was stamped when the session was built, before the wait in line and the
+	// pin, so a login that waited would open already past its ReclaimGrace and
+	// be the next waiting login's victim before sending its first statement.
+	s.mu.Lock()
+	s.lastUsed = e.now()
+	s.mu.Unlock()
 	e.auth.NotePATUse(ctx, pat)
 	return WireSessionResult{
 		SessionID: id, UserID: pat.UserID, ConnID: connRow.ID,
