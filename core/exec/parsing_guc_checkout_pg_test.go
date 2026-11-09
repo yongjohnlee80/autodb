@@ -11,6 +11,8 @@ package exec
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -32,9 +34,13 @@ func parsingGUCDSN(t *testing.T) string {
 //
 // The database default is changed, so every NEW session reports `off` at
 // startup -- which is the shape a hostile or misconfigured target has, and the
-// one the verifier exists for. ALTER DATABASE does not disturb sessions that
-// already exist, so the change is invisible to anything but connections opened
-// inside this cell.
+// one the verifier exists for.
+//
+// ON A DATABASE OF ITS OWN. A database default reaches every new session on
+// that database, not only this cell's: run against TEST_PGURL's database, it
+// reached other packages' test binaries running at the same time, and a front
+// door session opened in the window was refused with F0000. So the cell
+// creates a scratch database, alters that, and drops it.
 //
 // WHAT THIS CELL DEFENDS. The fix deleted a probe and replaced a query with a
 // read of reported state. Deleting the check entirely, or reading a parameter
@@ -42,40 +48,40 @@ func parsingGUCDSN(t *testing.T) string {
 // autodb serving statements it cannot parse the same way the server does. This
 // cell fails for all three.
 func TestParsingGUC_ATargetReportingOffIsRefusedAtCheckout(t *testing.T) {
-	dsn := parsingGUCDSN(t)
+	shared := parsingGUCDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	admin, err := pgx.Connect(ctx, dsn)
+	admin, err := pgx.Connect(ctx, shared)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer admin.Close(context.Background())
 
-	var dbName string
-	if err := admin.QueryRow(ctx, "SELECT current_database()").Scan(&dbName); err != nil {
-		t.Fatal(err)
-	}
-	// Quote the identifier: the harness's database name contains a hyphen.
-	set := func(val string) {
-		if _, err := admin.Exec(ctx,
-			`ALTER DATABASE "`+dbName+`" SET standard_conforming_strings = `+val); err != nil {
-			t.Fatalf("ALTER DATABASE ... %s: %v", val, err)
-		}
+	dbName := fmt.Sprintf("parsing_guc_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("creating the scratch database: %v", err)
 	}
 	t.Cleanup(func() {
-		c, err := pgx.Connect(context.Background(), dsn)
+		c, err := pgx.Connect(context.Background(), shared)
 		if err != nil {
 			t.Logf("cleanup: reconnect: %v", err)
 			return
 		}
 		defer c.Close(context.Background())
-		if _, err := c.Exec(context.Background(),
-			`ALTER DATABASE "`+dbName+`" RESET standard_conforming_strings`); err != nil {
-			t.Logf("cleanup: RESET: %v", err)
+		if _, err := c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)"); err != nil {
+			t.Logf("cleanup: DROP DATABASE %s: %v", dbName, err)
 		}
 	})
-	set("off")
+	u, err := url.Parse(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Path = "/" + dbName
+	dsn := u.String()
+	if _, err := admin.Exec(ctx, "ALTER DATABASE "+dbName+" SET standard_conforming_strings = off"); err != nil {
+		t.Fatalf("ALTER DATABASE %s ... off: %v", dbName, err)
+	}
 
 	// Prove the instrument: a NEW session really does report off now. Without
 	// this the cell passes for a target that never drifted, which is no
