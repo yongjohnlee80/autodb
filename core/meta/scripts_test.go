@@ -46,8 +46,16 @@ func catalog(t *testing.T, s *Store) []string {
 			// SELECT * and a positional INSERT see.
 			`SELECT 'col ' || table_name || '.' || column_name || ' ' || rank() OVER (PARTITION BY table_name ORDER BY ordinal_position) || ' ' || data_type || ' null=' || is_nullable || ' dflt=' || COALESCE(column_default,'') || ' identity=' || is_identity
 			   FROM information_schema.columns WHERE table_schema = current_schema()`,
+			// NOT NULL CONSTRAINTS ARE LEFT TO THE COLUMN ROWS. PostgreSQL 18 records
+			// every NOT NULL as a named pg_constraint row (contype 'n'), and the
+			// name depends on how the column got it: a fresh CREATE TABLE, a
+			// legacy ALTER, a partition attached later, or a column a revert
+			// dropped and the next update added again ("..._not_null1"). The
+			// name is history, not schema. Nullability itself is compared
+			// above, column by column (null=), so a store missing a NOT NULL
+			// still differs.
 			`SELECT 'con ' || conrelid::regclass::text || ' ' || conname || ' ' || pg_get_constraintdef(oid)
-			   FROM pg_constraint WHERE connamespace = current_schema()::regnamespace`,
+			   FROM pg_constraint WHERE connamespace = current_schema()::regnamespace AND contype <> 'n'`,
 			`SELECT 'idx ' || indexname || ' ' || regexp_replace(indexdef, '^.* USING', 'USING')
 			   FROM pg_indexes WHERE schemaname = current_schema()`,
 			`SELECT 'seq ' || sequencename FROM pg_sequences WHERE schemaname = current_schema()`,
@@ -75,6 +83,28 @@ func catalog(t *testing.T, s *Store) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// THE CATALOG STILL SEES A LOST NOT NULL. It leaves PostgreSQL's NOT NULL
+// constraint rows out, because their names are history rather than schema, and
+// relies on each column's null= field instead. This is the cell that keeps that
+// reliance honest: a store whose column lost its NOT NULL must read differently.
+func TestTheCatalogStillSeesALostNotNull(t *testing.T) {
+	cfgOf, ok := scriptEngines(t)["postgres"]
+	if !ok {
+		t.Skip("TEST_PGURL not set; NOT NULL constraint rows are PostgreSQL's")
+	}
+	s := open(t, cfgOf(t))
+	before := catalog(t, s)
+	if _, err := s.Conn().ExecContext(context.Background(),
+		`ALTER TABLE audit_log ALTER COLUMN detail DROP NOT NULL`); err != nil {
+		t.Fatalf("dropping a NOT NULL: %v", err)
+	}
+	after := catalog(t, s)
+	if strings.Join(before, "\n") == strings.Join(after, "\n") {
+		t.Fatal("a column lost its NOT NULL and the catalog did not change: leaving the " +
+			"constraint rows out has made nullability invisible to every schema cell")
+	}
 }
 
 func sqliteTables(t *testing.T, s *Store) []string {
