@@ -16,7 +16,10 @@ require (
 	golang.org/x/term v0.46.0
 )
 
-require github.com/yongjohnlee80/golib/gui v0.3.17
+require (
+	github.com/yongjohnlee80/golib/gui v0.3.17
+	golang.org/x/sync v0.24.0
+)
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
@@ -35,7 +38,6 @@ require (
 	golang.org/x/exp/shiny v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/image v0.45.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	modernc.org/libc v1.79.0 // indirect

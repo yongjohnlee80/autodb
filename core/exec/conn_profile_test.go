@@ -319,6 +319,13 @@ func TestSetConnectionExposure_SlowWithdrawalDoesNotBlockUnrelatedWireOpens(t *t
 	}
 }
 
+// A DISABLE THAT COMMITS WHILE A LOGIN IS AUTHORIZED BUT NOT YET ADMITTED WINS.
+//
+// The login read the connection as exposed and holds nothing while it waits for
+// its lease (the wait runs outside every engine lock). The disable commits and
+// sweeps; the login's finalization then re-reads the connection, fresh, and is
+// refused. No session and no lease survive, and re-enabling exposure lets the
+// next login in.
 func TestSetConnectionExposure_DisableWinsAgainstAnOpenThatReadTheOldValue(t *testing.T) {
 	t.Parallel()
 	f, _, secret, dbName := wireFixture(t)
@@ -330,38 +337,28 @@ func TestSetConnectionExposure_DisableWinsAgainstAnOpenThatReadTheOldValue(t *te
 		<-release
 	}
 
-	opened := make(chan WireSessionResult, 1)
-	openErr := make(chan error, 1)
+	opened := make(chan error, 1)
 	go func() {
-		res, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
-		opened <- res
-		openErr <- err
+		_, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
+		opened <- err
 	}()
 	<-reached
-	if f.eng.exposureMu.TryLock() {
-		f.eng.exposureMu.Unlock()
+	// The login is authorized and holds no gate: the disable is not blocked.
+	if err := f.eng.SetConnectionExposure(ctx, f.rootTok, f.connID, false, testIP); err != nil {
 		close(release)
 		<-opened
-		<-openErr
-		t.Fatal("wire open did not hold the exposure transition lock after reading the row")
+		t.Fatalf("SetConnectionExposure while a login waited to be admitted: %v", err)
 	}
-	disableErr := make(chan error, 1)
-	go func() {
-		disableErr <- f.eng.SetConnectionExposure(ctx, f.rootTok, f.connID, false, testIP)
-	}()
 	close(release)
-	res := <-opened
-	if err := <-openErr; err != nil {
-		t.Fatalf("the open that owned the transition lock was refused: %v", err)
+	if err := <-opened; DenialReason(err) != DenyProfileRefuses {
+		t.Fatalf("a login authorized before the disable opened anyway (err %v); finalization "+
+			"must re-read the connection after the wait", err)
 	}
-	if err := <-disableErr; err != nil {
-		t.Fatalf("SetConnectionExposure: %v", err)
-	}
-	if _, err := f.eng.sessions.lookup(res.SessionID, res.UserID); !errors.Is(err, ErrSessionNotFound) {
-		t.Fatalf("the completed wire open survived disabling exposure: %v", err)
+	if n := f.eng.sessions.countForTest(); n != 0 {
+		t.Fatalf("%d sessions survived the refused login, want 0", n)
 	}
 	if n := f.eng.sessions.leaseCount(f.connID); n != 0 {
-		t.Fatalf("stale open left %d wire leases, want 0", n)
+		t.Fatalf("the refused login left %d wire leases, want 0", n)
 	}
 
 	f.eng.hookBeforeWireAdmit = nil
