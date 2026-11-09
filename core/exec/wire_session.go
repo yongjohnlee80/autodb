@@ -369,6 +369,33 @@ func DenialReasons() []string {
 	}
 }
 
+// AuthorizeDenials is every denial AuthorizeWire can return, and AdmitDenials
+// every one Admit can: the front door's two phases each declare exactly the set
+// their engine call can raise (ADR 0189 decision 3). The sets overlap where
+// finalization re-runs authorization's connection checks after the wait.
+// TestWireDenials_EachHalfDeclaresExactlyWhatItRaises derives both from the
+// source and fails on any difference.
+func AuthorizeDenials() []string {
+	return []string{
+		DenyBadCredential, DenyUserMismatch, DenyPATNotCleartextDebug, DenyPATCleartextDebugInTLS,
+		DenyIPNotAdmitted, DenyPATIPNarrowed, DenyPATUnscoped,
+		DenyNoSuchDatabase, DenyNoGrant, DenyProfileRefuses, DenyDatabaseMismatch,
+	}
+}
+
+// AdmitDenials: see AuthorizeDenials.
+func AdmitDenials() []string {
+	return []string{
+		// The fresh connection read and standing re-check after the wait.
+		DenyNoSuchDatabase, DenyNoGrant, DenyProfileRefuses, DenyDatabaseMismatch,
+		// The line and the pin (admissionAnswer).
+		DenyQueueTimeout, DenyLeaseCap, DenyAllCapacityInTransaction, DenyTargetGone,
+		DenyConnectionChanging, DenyTargetBudget, DenyEngineClosing, DenySessionCap, DenyResidentBudget,
+		// The pinned backend.
+		DenyLeaseEncoding, DenyStartupGUC,
+	}
+}
+
 // admissionAnswer names the answer an admission refusal earns, WITHOUT
 // claiming anything about who the caller is.
 //

@@ -423,6 +423,9 @@ type sessionRegistry struct {
 	// hookWaiterQueued fires once a request is in line, so a cell can act on
 	// that fact instead of polling for it.
 	hookWaiterQueued func(seq uint64)
+	// hookWaiterLeft fires when a request that was still queued gives up and
+	// has left the line, with the line's depth after it left.
+	hookWaiterLeft func(depth int)
 
 	// txMu guards txWithinBound alone and is A LEAF: nothing taken while it is
 	// held, ever. That is what makes it safe to update these facts from under

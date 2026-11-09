@@ -1,9 +1,13 @@
 package exec
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +26,66 @@ import (
 // Nothing about the resulting code looks wrong at the call site. The defect
 // is the ORDER, so the test reads the order.
 func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
+	for _, v := range disclosureViolations(t, packageSources(t)) {
+		t.Error(v)
+	}
+}
+
+// THE GUARD TELLS A SAFE COMPOSITION FROM A BYPASS. OpenWireSessionWith is
+// respelled two ways in the real source: admitWire called on the authorization
+// AuthorizeWire just returned is the same flow and must pass; admitWire called on
+// an authorization nobody issued reaches a capacity answer with no credential
+// or grant checked and must be caught. A guard that flagged both would be
+// enforcing a spelling, and one that flagged neither would be guarding nothing.
+func TestDisclosureWitness_TellsASafeCompositionFromABypass(t *testing.T) {
+	const composed = "\ta, err := e.AuthorizeWire(ctx, req)\n\tif err != nil {\n\t\treturn WireSessionResult{}, err\n\t}\n\treturn a.Admit(ctx)\n}\n"
+	stock := packageSources(t)
+	if n := strings.Count(string(stock["wire_session.go"]), composed); n != 1 {
+		t.Fatalf("OpenWireSessionWith's composition appears %d times in wire_session.go, want 1; "+
+			"this cell's anchor has moved", n)
+	}
+	for _, c := range []struct {
+		name, with string
+		safe       bool
+	}{
+		{"admitWire on the authorization AuthorizeWire returned",
+			"\ta, err := e.AuthorizeWire(ctx, req)\n\tif err != nil {\n\t\treturn WireSessionResult{}, err\n\t}\n\treturn e.admitWire(ctx, a)\n}\n", true},
+		{"admitWire on an authorization nobody issued",
+			"\treturn e.admitWire(ctx, &WireAuthorization{req: req})\n}\n", false},
+	} {
+		srcs := map[string][]byte{}
+		for k, v := range stock {
+			srcs[k] = v
+		}
+		srcs["wire_session.go"] = []byte(strings.Replace(string(stock["wire_session.go"]), composed, c.with, 1))
+		v := disclosureViolations(t, srcs)
+		if c.safe && len(v) > 0 {
+			t.Errorf("%s: the guard flagged an equivalent composition: %v", c.name, v)
+		}
+		if !c.safe && len(v) == 0 {
+			t.Errorf("%s: the guard did not catch a capacity answer reached with no credential or grant checked", c.name)
+		}
+	}
+}
+
+// packageSources reads the package's non-test sources, keyed by file name.
+func packageSources(t *testing.T) map[string][]byte {
+	t.Helper()
+	out := map[string][]byte{}
+	for _, path := range goSourceFiles(t) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[path] = b
+	}
+	return out
+}
+
+// disclosureViolations is the guard over a set of sources, returning one message
+// per capacity witness that a caller who has not passed both gates could reach.
+func disclosureViolations(t *testing.T, sources map[string][]byte) []string {
+	t.Helper()
 	const (
 		authentication = "VerifyPAT"     // proves WHO the caller is
 		authorization  = "AuthorizeUser" // proves they may hold this connection
@@ -74,12 +138,17 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 	fns := map[string]*fnInfo{}
 	refsTo := map[string][]ref{}
 	var sites []site
-	for _, path := range goSourceFiles(t) {
+	paths := make([]string, 0, len(sources))
+	for path := range sources {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
 		// One FileSet per file keeps every position below comparable only
 		// against positions from the same file, which is the only comparison
 		// this test makes; a caller's ref and its gates come from one file.
 		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, 0)
+		f, err := parser.ParseFile(fset, path, sources[path], 0)
 		if err != nil {
 			t.Fatalf("parsing %s: %v", path, err)
 		}
@@ -121,8 +190,8 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 	// -- a rename, a wrapper, a move to another package -- and silence would
 	// read exactly like success.
 	if len(sites) == 0 {
-		t.Fatalf("no %s call sites found; the walk no longer sees the code it "+
-			"guards, so its silence proves nothing", witness)
+		return []string{fmt.Sprintf("no %s call sites found; the walk no longer sees the code it "+
+			"guards, so its silence proves nothing", witness)}
 	}
 
 	// passing[gate] is every function that passes gate somewhere in its body,
@@ -191,20 +260,22 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 		return true
 	}
 
+	var out []string
 	for _, s := range sites {
 		missing, before := gatedAt(s.fn, s.pos)
 		switch {
 		case missing == "":
 		case before:
-			t.Errorf("%s: %s runs BEFORE %s in %s. A caller who has not passed "+
+			out = append(out, fmt.Sprintf("%s: %s runs BEFORE %s in %s. A caller who has not passed "+
 				"that gate would be told the system is at its connection limit, "+
 				"which reports live capacity to a peer who has proved nothing",
-				s.where, witness, missing, s.fn)
+				s.where, witness, missing, s.fn))
 		case !trusted(s.fn, map[string]bool{}):
-			t.Errorf("%s: %s is called in %s, which never calls %s, and not every "+
+			out = append(out, fmt.Sprintf("%s: %s is called in %s, which never calls %s, and not every "+
 				"path into %s passes it -- the refusal claims the caller was "+
 				"authorized and nothing on some path to it established it",
-				s.where, witness, s.fn, missing, s.fn)
+				s.where, witness, s.fn, missing, s.fn))
 		}
 	}
+	return out
 }

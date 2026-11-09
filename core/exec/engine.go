@@ -279,6 +279,14 @@ func WithWaiterQueued(fn func()) Option {
 	return func(e *Engine) { e.sessions.hookWaiterQueued = func(uint64) { fn() } }
 }
 
+// WithWaiterLeft is called when a queued request gives up while still in line
+// (its caller cancelled or its wait expired), with the line's depth once it has
+// left (tests). A cell outside this package asserts on it that a departed
+// client's login left the line before any capacity came back.
+func WithWaiterLeft(fn func(depth int)) Option {
+	return func(e *Engine) { e.sessions.hookWaiterLeft = fn }
+}
+
 // WithNow injects a clock (tests).
 func WithNow(now func() time.Time) Option { return func(e *Engine) { e.now = now } }
 
