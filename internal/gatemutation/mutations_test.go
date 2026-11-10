@@ -303,6 +303,7 @@ func expectedControls() map[string][3]string {
 		"the-watch-result-decides-the-handoff":                    {"frontdoor/admit.go", "./frontdoor/", "TestAdmitFD_TheWatchDecidesAtTheHandoff"},
 		"a-lost-handoff-closes-the-session":                       {"frontdoor/admit.go", "./frontdoor/", "TestAdmitFD_TheWatchDecidesAtTheHandoff"},
 		"a-waiting-login-holds-no-auth-worker":                    {"frontdoor/auth.go", "./frontdoor/", "TestAdmitFD_AWaitingLoginHoldsNoAuthWorker"},
+		"a-panic-in-the-check-gives-its-worker-back":              {"frontdoor/auth.go", "./frontdoor/", "TestAuthWorkers_APanicInTheCheckGivesItsWorkerBack"},
 		"release-serves-the-line":                                 {"core/exec/session.go", "./core/exec/", "TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting"},
 		"expired-wait-names-its-blocker":                          {"core/exec/wire_session.go", "./core/exec/", "TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal"},
 		"the-wait-arm-comes-first":                                {"core/exec/wire_session.go", "./core/exec/", "TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn"},

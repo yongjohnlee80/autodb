@@ -167,3 +167,55 @@ func TestAuthWorkers_TheHarnessCanObserveAnUnboundedRun(t *testing.T) {
 	close(b.release)
 	wg.Wait()
 }
+
+// panicOnceAuth panics inside its first credential check, the way a bug in the
+// engine would, and records every later check's arrival. It reports the panic
+// on panicked before raising it, so the cell knows the first login really
+// reached the worker and broke there.
+type panicOnceAuth struct {
+	calls    atomic.Int32
+	panicked chan struct{}
+	entered  chan struct{}
+}
+
+func (p *panicOnceAuth) AuthorizeWire(context.Context, exec.WireOpen) (*exec.WireAuthorization, error) {
+	if p.calls.Add(1) == 1 {
+		close(p.panicked)
+		panic("a bug inside the credential check")
+	}
+	p.entered <- struct{}{}
+	return nil, context.Canceled // any answer: the cell only needs the arrival
+}
+
+func (p *panicOnceAuth) CloseWireSession(context.Context, exec.SessionID, int64, string, string) {}
+
+// A PANIC IN THE CREDENTIAL CHECK GIVES ITS WORKER BACK.
+//
+// The listener recovers a panic serving one connection and ends that
+// connection. The worker slot the check held must come back with it: with one
+// worker, a slot kept by the panic would turn every later login into a wait for
+// a worker that never frees, for the life of the listener.
+func TestAuthWorkers_APanicInTheCheckGivesItsWorkerBack(t *testing.T) {
+	t.Parallel()
+	p := &panicOnceAuth{panicked: make(chan struct{}), entered: make(chan struct{}, 1)}
+	_, _, addr := listenerWith(t, Options{
+		Authn: p, AuthFailuresPerIP: unthrottled, AuthWorkers: 1,
+		testDeadlines: &deadlines{tls: 5 * time.Second, startup: 5 * time.Second,
+			auth: 2 * time.Second, idle: time.Minute},
+	})
+
+	driveToPassword(t, addr)
+	select {
+	case <-p.panicked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first login never reached the credential check, so nothing panicked")
+	}
+
+	driveToPassword(t, addr)
+	select {
+	case <-p.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the login after a panic in the credential check never reached a worker: " +
+			"the panic kept the only one")
+	}
+}
