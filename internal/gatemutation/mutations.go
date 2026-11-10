@@ -1584,5 +1584,14 @@ func All() []Mutation {
 			Fails:       "still holding the worker",
 			Guarantee:   "that a login waiting for its pool does not hold a credential worker",
 		},
+		{
+			Name: "a-panic-in-the-check-gives-its-worker-back", Package: "./frontdoor/", File: "frontdoor/auth.go",
+			Anchor: "\t\tif r := recover(); r != nil {\n\t\t\trelease()\n\t\t\tpanic(r)\n",
+			// the panic still reaches the listener; the worker it held is kept.
+			Replacement: "\t\tif r := recover(); r != nil {\n\t\t\tpanic(r)\n",
+			Test:        "TestAuthWorkers_APanicInTheCheckGivesItsWorkerBack",
+			Fails:       "the panic kept the only one",
+			Guarantee:   "that a panic inside the credential check gives its worker back",
+		},
 	}
 }

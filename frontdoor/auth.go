@@ -266,6 +266,17 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// draws. Its registered class is None, so nothing is counted.
 		return authOutcome{Failure: outcomeID(OutcomeAuthWorkerBusy)}, werr
 	}
+	// A PANIC INSIDE THE CHECK GIVES THE WORKER BACK too. The listener recovers
+	// it and ends the connection, and a slot kept by it would be gone for the
+	// life of the listener. Only the panic path: the call below gives the
+	// worker back on the normal path, and a defer would hide a normal path that
+	// forgot to. The panic goes on to the listener's recover unchanged.
+	defer func() {
+		if r := recover(); r != nil {
+			release()
+			panic(r)
+		}
+	}()
 	authz, aerr := l.authn.AuthorizeWire(authCtx, exec.WireOpen{
 		PAT: pm.Password, StartupUser: params["user"], Database: params["database"],
 		IP: hostOf(peer),
