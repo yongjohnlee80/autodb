@@ -23,7 +23,17 @@ func connected(t *testing.T) (*tuiapp.Host, *decltest.Screen) {
 	t.Helper()
 	h, s := runHostSized(t, startRealServer(t), 100, 32)
 	bootstrapAs(t, h, s, "", "a long enough passphrase")
+	waitForFocus(t, h, s)
 	return h, s
+}
+
+// waitForFocus waits until a workspace pane holds the keyboard. Until the panes
+// arrive nothing does, and a key sent then is lost: under a loaded run, a leader
+// SPC or a menu's Alt+F sent straight after sign-in went nowhere, and the cell
+// waited for a screen that never came.
+func waitForFocus(t *testing.T, h *tuiapp.Host, s *decltest.Screen) {
+	t.Helper()
+	s.WaitFor(t, "a pane holding the keyboard", func(string) bool { return h.PaneWithFocus() != "" })
 }
 
 func tab() tuicore.KeyEvent { return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyTab} }

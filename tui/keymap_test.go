@@ -23,6 +23,7 @@ func connectedWithKeymap(t *testing.T, file string) (*tuiapp.Host, *decltest.Scr
 	notesFor := notes.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
 	h, s := tuiapp.RunHost(t, session, notesFor, tuiapp.Options{KeymapFile: file}, 100, 32)
 	bootstrapAs(t, h, s, "", "a long enough passphrase")
+	waitForFocus(t, h, s)
 	return h, s
 }
 

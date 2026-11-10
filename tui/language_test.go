@@ -162,8 +162,9 @@ func TestTheMenuMnemonicSurvivesTheMessageConversion(t *testing.T) {
 		{"English", "en"}, {"Korean", "ko_KR"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, s := tuiapp.RunHost(t, tuiapp.NewSession("127.0.0.1:1", logger.Nop{}, nil), nil,
+			h, s := tuiapp.RunHost(t, tuiapp.NewSession("127.0.0.1:1", logger.Nop{}, nil), nil,
 				tuiapp.Options{App: []tuicore.AppOption{tuicore.WithLanguage(tc.tag)}}, 100, 32)
+			waitForFocus(t, h, s)
 			// Top bar: Alt+F opens File, in every language.
 			s.Keys(t, decltest.Alt('f'))
 			s.WaitFor(t, "File open on Alt+F", func(sc string) bool { return strings.Contains(sc, "New note") || strings.Contains(sc, "새 노트") })
