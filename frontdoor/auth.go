@@ -270,7 +270,9 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	// it and ends the connection, and a slot kept by it would be gone for the
 	// life of the listener. Only the panic path: the call below gives the
 	// worker back on the normal path, and a defer would hide a normal path that
-	// forgot to. The panic goes on to the listener's recover unchanged.
+	// forgot to. The panic goes on to the listener's recover unchanged. The
+	// guard covers the rest of runAuth, past the normal release too; that is
+	// safe because release is once-only, so a panic after it frees nothing twice.
 	defer func() {
 		if r := recover(); r != nil {
 			release()
